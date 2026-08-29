@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.3.4
+// @version      0.3.7
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -239,12 +239,22 @@
     return { translation, segments };
   }
 
+  function errorMessageFor(error) {
+    if (typeof error?.message === "string" && error.message.trim()) {
+      return error.message;
+    }
+    if (typeof error === "string" && error.trim()) return error;
+    return "Translation failed";
+  }
+
   if (globalThis.__TOUCH_TRANSLATE_TEST__) {
     Object.assign(globalThis.__TOUCH_TRANSLATE_TEST__, {
       cleanSettings,
       endpointFor,
+      errorMessageFor,
       groupRecords,
       hashCacheKey,
+      hasHorizontalScroller,
       indicatorFor,
       makeBatches,
       movedTooFar,
@@ -447,8 +457,12 @@
           try {
             const body = JSON.parse(response.responseText || "{}");
             if (response.status < 200 || response.status >= 300) {
+              const apiMessage =
+                body?.error?.message ||
+                (typeof body?.error === "string" ? body.error : "") ||
+                body?.message;
               throw new Error(
-                body?.error?.message || `API HTTP ${response.status}`,
+                apiMessage || `API HTTP ${response.status}`,
               );
             }
             let content = body?.choices?.[0]?.message?.content;
@@ -548,18 +562,39 @@
     );
   }
 
-  function showIndicator(element, state, progress = 0) {
+  const indicatorErrors = new WeakMap();
+
+  function showIndicator(element, state, progress = 0, errorMessage = "") {
     if (!element?.isConnected) return null;
     let indicator = indicatorFor(element);
     if (!indicator) {
-      indicator = document.createElement("span");
+      indicator = document.createElement("button");
+      indicator.type = "button";
       indicator.className = INDICATOR_CLASS;
-      indicator.setAttribute("aria-hidden", "true");
+      indicator.addEventListener("click", (event) => {
+        if (indicator.dataset.state !== "error") return;
+        event.preventDefault();
+        event.stopPropagation();
+        toast(
+          indicatorErrors.get(indicator) || "Translation failed",
+          true,
+          8000,
+        );
+      });
       element.append(indicator);
     }
+    const isError = state === "error";
     indicator.dataset.state = state;
-    indicator.title =
-      state === "error" ? "Translation failed. Swipe right to retry" : "";
+    indicator.tabIndex = isError ? 0 : -1;
+    indicator.title = isError ? "Show translation error" : "";
+    if (isError) {
+      if (errorMessage) indicatorErrors.set(indicator, errorMessage);
+      indicator.removeAttribute("aria-hidden");
+      indicator.setAttribute("aria-label", "Show translation error");
+    } else {
+      indicator.setAttribute("aria-hidden", "true");
+      indicator.removeAttribute("aria-label");
+    }
     if (state === "gesture") {
       indicator.style.setProperty(
         "--touch-translate-progress",
@@ -574,6 +609,7 @@
   function removeIndicator(element, state) {
     const indicator = indicatorFor(element);
     if (indicator && (!state || indicator.dataset.state === state)) {
+      indicatorErrors.delete(indicator);
       indicator.remove();
     }
   }
@@ -734,13 +770,16 @@
     return job;
   }
 
-  function settleJob(job, state = "done") {
+  function settleJob(job, state = "done", errorMessage = "") {
     if (pendingJobs.get(job.element) !== job) return;
     clearTimeout(job.indicatorTimer);
     pendingJobs.delete(job.element);
     restoreAriaBusy(job);
-    if (state === "error") showIndicator(job.element, "error");
-    else removeIndicator(job.element);
+    if (state === "error") {
+      showIndicator(job.element, "error", 0, errorMessage);
+    } else {
+      removeIndicator(job.element);
+    }
   }
 
   function cancelJob(element) {
@@ -903,7 +942,8 @@
         }
       }
     } catch (error) {
-      operationJobs.forEach((job) => settleJob(job, "error"));
+      const message = errorMessageFor(error);
+      operationJobs.forEach((job) => settleJob(job, "error", message));
       throw error;
     }
     if (showProgress) toast(`Translated ${completed} blocks`);
@@ -911,7 +951,7 @@
 
   function reportError(error) {
     console.error("[Touch Translate]", error);
-    toast(error?.message || "Translation failed", true);
+    toast(errorMessageFor(error), true);
   }
 
   function flushSwipeBatch() {
@@ -1019,6 +1059,24 @@
     );
   }
 
+  function hasNestedTextBlock(element) {
+    const descendants = Array.from(element.children || []);
+    while (descendants.length) {
+      const child = descendants.pop();
+      const style = getComputedStyle(child);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      if (sourceText(child).length < 2) continue;
+      if (
+        child.matches(BLOCK_SELECTOR) ||
+        (style.display !== "contents" && !style.display.startsWith("inline"))
+      ) {
+        return true;
+      }
+      descendants.push(...Array.from(child.children || []));
+    }
+    return false;
+  }
+
   function swipeElementFor(target) {
     const translation = target.closest(`.${TRANSLATION_CLASS}`);
     if (translation) return translation;
@@ -1032,10 +1090,29 @@
         element.matches(BLOCK_SELECTOR) ||
         (display !== "contents" && !display.startsWith("inline"))
       ) {
-        return element;
+        return hasNestedTextBlock(element) ? null : element;
       }
     }
-    return inline;
+    return inline && !hasNestedTextBlock(inline) ? inline : null;
+  }
+
+  function hasHorizontalScroller(target) {
+    for (
+      let element = target;
+      element;
+      element = element.parentElement || element.getRootNode?.().host
+    ) {
+      const overflowX = getComputedStyle(element).overflowX;
+      if (
+        element.scrollWidth > element.clientWidth + 1 &&
+        (element === document.scrollingElement ||
+          /^(?:auto|scroll|overlay)$/.test(overflowX))
+      ) {
+        return true;
+      }
+      if (element === document.documentElement) break;
+    }
+    return false;
   }
 
   function movedTooFar(touches, starts) {
@@ -1090,7 +1167,8 @@
       !target ||
       touch.clientX < SAFARI_EDGE_X ||
       target.isContentEditable ||
-      target.closest("input, textarea, select, button")
+      target.closest("input, textarea, select, button") ||
+      hasHorizontalScroller(target)
     ) {
       clearSwipe();
       return;
@@ -1197,15 +1275,19 @@
       }
       .${INDICATOR_CLASS} {
         --touch-translate-progress: 0deg;
+        -webkit-appearance: none !important;
+        appearance: none !important;
         display: inline-block !important;
         position: relative !important;
         width: 0.72em !important;
         height: 0.72em !important;
         margin-inline-start: 0.38em !important;
+        padding: 0 !important;
         border: 0 solid transparent !important;
         border-radius: 50% !important;
         box-sizing: border-box !important;
         color: currentColor !important;
+        font: inherit !important;
         vertical-align: 0 !important;
         pointer-events: none !important;
       }
@@ -1283,6 +1365,15 @@
         mask: none !important;
         border: 1.5px solid #c8453c !important;
         opacity: 0.9 !important;
+        cursor: pointer !important;
+        pointer-events: auto !important;
+        touch-action: manipulation !important;
+      }
+      .${INDICATOR_CLASS}[data-state="error"]::before {
+        content: "" !important;
+        position: absolute !important;
+        inset: -10px !important;
+        pointer-events: auto !important;
       }
       .${INDICATOR_CLASS}[data-state="error"]::after {
         content: "!" !important;
@@ -1291,6 +1382,10 @@
         color: #c8453c !important;
         font: 700 0.55em/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
         transform: translate(-50%, -52%) !important;
+      }
+      .${INDICATOR_CLASS}[data-state="error"]:focus-visible {
+        outline: 2px solid #c8453c !important;
+        outline-offset: 3px !important;
       }
       @keyframes touch-translate-spin {
         to { transform: rotate(1turn); }
@@ -1317,6 +1412,8 @@
         font: 500 13px/1.35 -apple-system, BlinkMacSystemFont, sans-serif !important;
         letter-spacing: 0 !important;
         text-align: center !important;
+        overflow-wrap: anywhere !important;
+        white-space: pre-wrap !important;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.24) !important;
         -webkit-backdrop-filter: blur(12px) !important;
         backdrop-filter: blur(12px) !important;

@@ -14,7 +14,10 @@ const context = vm.createContext({
   URL,
   console,
   document: { body, documentElement },
-  getComputedStyle: (element) => ({ display: element.display }),
+  getComputedStyle: (element) => ({
+    display: element.display,
+    overflowX: element.overflowX,
+  }),
 });
 vm.runInContext(source, context);
 
@@ -22,6 +25,10 @@ assert.equal(api.normalizeText("  hello\n  world "), "hello world");
 assert.equal(api.pageTextLooksUseful("https://example.com/path"), false);
 assert.equal(api.pageTextLooksUseful("2026-08-29"), false);
 assert.equal(api.pageTextLooksUseful("A useful sentence."), true);
+assert.equal(
+  api.errorMessageFor({ message: "The requested model does not exist." }),
+  "The requested model does not exist.",
+);
 assert.equal(
   api.endpointFor("https://api.example.com/v1/"),
   "https://api.example.com/v1/chat/completions",
@@ -152,5 +159,32 @@ const shortBlock = {
   parentElement: largerParent,
 };
 assert.equal(api.swipeElementFor(shortBlock), shortBlock);
+
+const nestedTextBlock = {
+  children: [],
+  display: "block",
+  innerText: "The intended paragraph",
+  matches: () => false,
+};
+const broadContainer = {
+  children: [nestedTextBlock],
+  closest: () => null,
+  display: "block",
+  innerText: "The intended paragraph and unrelated content",
+  matches: () => false,
+  parentElement: body,
+};
+assert.equal(api.swipeElementFor(broadContainer), null);
+
+const scrollContainer = {
+  clientWidth: 320,
+  overflowX: "auto",
+  parentElement: body,
+  scrollWidth: 640,
+};
+const tableCell = { parentElement: scrollContainer };
+assert.equal(api.hasHorizontalScroller(tableCell), true);
+scrollContainer.scrollWidth = 320;
+assert.equal(api.hasHorizontalScroller(tableCell), false);
 
 console.log("Touch Translate self-check passed");

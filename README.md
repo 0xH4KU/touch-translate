@@ -8,10 +8,11 @@ A private, touch-first bilingual translation userscript for iOS Safari and Tampe
 
 - Swipe right at least 60px on a visible HTML text block. A progress ring follows the gesture, a short confirmation beat commits it, and then a compact activity indicator appears while the script translates it.
 - Swipe the same block again while it is loading to cancel. Swipe again after the translation appears to remove it.
+- Tap a red error indicator to view the translation provider's original error message.
 - Quickly tap with four fingers to translate the main page content in batches, starting with the current viewport.
 - Use the Tampermonkey menu to configure the API, translate the page, import or export settings, and clear the cache.
 
-Swipes starting within 30px of the left screen edge are ignored to avoid triggering Safari's back gesture.
+Swipes starting within 30px of the left screen edge are ignored to avoid triggering Safari's back gesture. Native horizontal scrolling takes priority inside scrollable tables and other horizontal regions. Container gaps that would select multiple nested text blocks are ignored.
 
 The userscript is enabled on all regular websites, including frames where Tampermonkey can inject and open Shadow DOM content. Browser-protected pages such as Safari settings, extension stores, and other internal URLs do not allow userscripts to run.
 
