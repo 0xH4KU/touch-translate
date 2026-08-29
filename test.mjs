@@ -23,8 +23,29 @@ assert.equal(
   "https://api.example.com/v1/chat/completions",
 );
 assert.deepEqual(
-  [...api.parseTranslations('```json\n{"translations":["甲","乙"]}\n```', 2)],
-  ["甲", "乙"],
+  [
+    ...api.parseTranslations(
+      '```json\n{"translations":["one","two"]}\n```',
+      2,
+    ),
+  ],
+  ["one", "two"],
+);
+const inline = api.parseInlineTranslation(
+  "[[TT0]]A translated lead[[/TT0]] [[TT1]]a colored quote[[/TT1]]",
+  2,
+);
+assert.equal(inline.translation, "A translated lead a colored quote");
+assert.deepEqual([...inline.segments], [
+  "A translated lead",
+  "a colored quote",
+]);
+assert.equal(
+  api.parseInlineTranslation(
+    "[[TT0]]A translated lead[[/TT0]] [[TT1]]a broken quote",
+    2,
+  ).segments,
+  null,
 );
 assert.throws(
   () => api.cleanSettings({ baseURL: "http://example.com", model: "m" }),
