@@ -7,10 +7,14 @@ const source = readFileSync(
   "utf8",
 );
 const api = {};
+const body = {};
+const documentElement = {};
 const context = vm.createContext({
   __TOUCH_TRANSLATE_TEST__: api,
   URL,
   console,
+  document: { body, documentElement },
+  getComputedStyle: (element) => ({ display: element.display }),
 });
 vm.runInContext(source, context);
 
@@ -110,5 +114,19 @@ assert.equal(
   api.indicatorFor({ children: { 0: indicator, length: 1 } }),
   indicator,
 );
+
+const genericBlock = {
+  closest: () => null,
+  display: "flow-root",
+  innerText: "A generic text block",
+  parentElement: body,
+};
+const inlineText = {
+  closest: () => null,
+  display: "inline",
+  innerText: "A generic text block",
+  parentElement: genericBlock,
+};
+assert.equal(api.swipeElementFor(inlineText), genericBlock);
 
 console.log("Touch Translate self-check passed");

@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.3.1
+// @version      0.3.3
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
 // @run-at       document-idle
-// @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -254,6 +253,7 @@
       parseInlineTranslation,
       parseTranslations,
       pointFor,
+      swipeElementFor,
       viewportPriority,
     });
     return;
@@ -1019,6 +1019,23 @@
     );
   }
 
+  function swipeElementFor(target) {
+    const known =
+      target.closest(`.${TRANSLATION_CLASS}`) ||
+      target.closest(BLOCK_SELECTOR);
+    if (known) return known;
+
+    let inline = null;
+    for (let element = target; element; element = element.parentElement) {
+      if (element === document.body || element === document.documentElement) break;
+      if (sourceText(element).length < 2) continue;
+      inline ||= element;
+      const display = getComputedStyle(element).display;
+      if (display !== "contents" && !display.startsWith("inline")) return element;
+    }
+    return inline;
+  }
+
   function movedTooFar(touches, starts) {
     return Array.from(touches).some((touch) => {
       const start = starts.get(touch.identifier);
@@ -1064,7 +1081,9 @@
       return;
     }
     const touch = event.touches[0];
-    const target = event.target instanceof Element ? event.target : null;
+    const target =
+      event.composedPath?.().find((node) => node instanceof Element) ||
+      (event.target instanceof Element ? event.target : null);
     if (
       !target ||
       touch.clientX < SAFARI_EDGE_X ||
@@ -1075,13 +1094,13 @@
       clearSwipe();
       return;
     }
-    const element =
-      target.closest(`.${TRANSLATION_CLASS}`) ||
-      target.closest(BLOCK_SELECTOR);
+    const element = swipeElementFor(target);
     if (!element) {
       clearSwipe();
       return;
     }
+    const root = element.getRootNode();
+    if (root !== document) addStyles(root);
     swipe = {
       at: Date.now(),
       element,
@@ -1159,8 +1178,10 @@
     fourFinger = null;
   }
 
-  function addStyles() {
+  function addStyles(root = document.documentElement) {
+    if (root.querySelector("style[data-touch-translate]")) return;
     const style = document.createElement("style");
+    style.dataset.touchTranslate = "";
     style.textContent = `
       .${TRANSLATION_CLASS} {
         box-sizing: border-box !important;
@@ -1346,7 +1367,7 @@
         }
       }
     `;
-    document.documentElement.append(style);
+    root.append(style);
   }
 
   addStyles();

@@ -6,14 +6,14 @@ A private, touch-first bilingual translation userscript for iOS Safari and Tampe
 
 ## Usage
 
-- Swipe right at least 60px on a text block. A progress ring follows the gesture, a short confirmation beat commits it, and then a compact activity indicator appears while the script translates `p`, `li`, `blockquote`, or `h1`-`h6` elements.
+- Swipe right at least 60px on a visible HTML text block. A progress ring follows the gesture, a short confirmation beat commits it, and then a compact activity indicator appears while the script translates it.
 - Swipe the same block again while it is loading to cancel. Swipe again after the translation appears to remove it.
 - Quickly tap with four fingers to translate the main page content in batches, starting with the current viewport.
 - Use the Tampermonkey menu to configure the API, translate the page, import or export settings, and clear the cache.
 
 Swipes starting within 30px of the left screen edge are ignored to avoid triggering Safari's back gesture.
 
-The userscript is enabled on all regular websites. Browser-protected pages such as Safari settings, extension stores, and other internal URLs do not allow userscripts to run.
+The userscript is enabled on all regular websites, including frames where Tampermonkey can inject and open Shadow DOM content. Browser-protected pages such as Safari settings, extension stores, and other internal URLs do not allow userscripts to run.
 
 Page translation skips navigation, forms, page headers and footers, plain URLs, and short blocks dominated by links. Repeated text is sent to the API once and the resulting translation is reused, reducing unnecessary API usage. Manual swipes bypass these content filters so you remain in control.
 
@@ -37,7 +37,7 @@ Example Base URL: `https://api.openai.com/v1`. The script appends `/chat/complet
 
 ## Limitations
 
-The script does not handle iframes, Shadow DOM, Canvas, PDFs, or video subtitles. Existing inline elements, classes, styles, and colors are preserved when the provider returns the segment markers intact. If it changes those markers, the script safely falls back to plain text without retrying or spending additional quota. API responses are never inserted as HTML.
+Browser-protected pages, frames that deny extension access, closed Shadow DOM, Canvas, PDFs, images, and video subtitles remain inaccessible because they do not expose ordinary HTML text to userscripts. Existing inline elements, classes, styles, and colors are preserved when the provider returns the segment markers intact. If it changes those markers, the script safely falls back to plain text without retrying or spending additional quota. API responses are never inserted as HTML.
 
 ## Self-check
 
