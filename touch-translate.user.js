@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.0
+// @version      0.2.0
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        http://*/*
@@ -22,6 +22,7 @@
 
   const BLOCK_SELECTOR = "p, li, blockquote, h1, h2, h3, h4, h5, h6";
   const TRANSLATION_CLASS = "touch-translate__translation";
+  const INDICATOR_CLASS = "touch-translate__indicator";
   const TOAST_CLASS = "touch-translate__toast";
   const SETTINGS_KEY = "settings-v1";
   const CACHE_KEY = "cache-v1";
@@ -31,9 +32,22 @@
   const SWIPE_MIN_X = 60;
   const SWIPE_MAX_Y = 42;
   const SWIPE_MAX_MS = 1200;
+  const SWIPE_BATCH_MS = 180;
   const SAFARI_EDGE_X = 30;
   const FOUR_FINGER_MAX_MOVE = 24;
   const FOUR_FINGER_MAX_MS = 700;
+  const CONTENT_ROOT_SELECTOR = "main, [role='main']";
+  const PAGE_CHROME_SELECTOR = [
+    "nav",
+    "aside",
+    "menu",
+    "form",
+    "[role='navigation']",
+    "[role='menu']",
+    "[role='banner']",
+    "[role='contentinfo']",
+    "[aria-hidden='true']",
+  ].join(", ");
   const DEFAULT_SETTINGS = {
     baseURL: "https://api.openai.com/v1",
     model: "",
@@ -138,6 +152,36 @@
     return batches;
   }
 
+  function groupRecords(records) {
+    const groups = new Map();
+    for (const record of records) {
+      let group = groups.get(record.key);
+      if (!group) {
+        group = { key: record.key, text: record.text, entries: [] };
+        groups.set(record.key, group);
+      }
+      group.entries.push(record);
+    }
+    return [...groups.values()];
+  }
+
+  function pageTextLooksUseful(text) {
+    const value = normalizeText(text);
+    return (
+      value.length >= 4 &&
+      /\p{L}/u.test(value) &&
+      !/^(?:https?:\/\/|www\.)\S+$/i.test(value)
+    );
+  }
+
+  function viewportPriority(rect, viewportHeight) {
+    if (rect.bottom >= 0 && rect.top <= viewportHeight) {
+      return [0, Math.max(0, rect.top)];
+    }
+    if (rect.top > viewportHeight) return [1, rect.top - viewportHeight];
+    return [2, -rect.bottom];
+  }
+
   function parseTranslations(content, expectedLength) {
     const text = String(content || "")
       .trim()
@@ -159,10 +203,13 @@
     Object.assign(globalThis.__TOUCH_TRANSLATE_TEST__, {
       cleanSettings,
       endpointFor,
+      groupRecords,
       hashCacheKey,
       makeBatches,
       normalizeText,
+      pageTextLooksUseful,
       parseTranslations,
+      viewportPriority,
     });
     return;
   }
@@ -191,6 +238,11 @@
         .forEach((key) => delete cache[key]);
     }
     GM_setValue(CACHE_KEY, cache);
+  }
+
+  function saveCacheEntries(entries) {
+    if (!Object.keys(entries).length) return;
+    saveCache({ ...loadCache(), ...entries });
   }
 
   function configureSettings() {
@@ -367,6 +419,43 @@
     return next?.classList.contains(TRANSLATION_CLASS) ? next : null;
   }
 
+  function indicatorFor(element) {
+    return (
+      [...element.children].find((child) =>
+        child.classList.contains(INDICATOR_CLASS),
+      ) || null
+    );
+  }
+
+  function showIndicator(element, state, progress = 0) {
+    if (!element?.isConnected) return null;
+    let indicator = indicatorFor(element);
+    if (!indicator) {
+      indicator = document.createElement("span");
+      indicator.className = INDICATOR_CLASS;
+      indicator.setAttribute("aria-hidden", "true");
+      element.append(indicator);
+    }
+    indicator.dataset.state = state;
+    indicator.title = state === "error" ? "翻譯失敗，向右滑重試" : "";
+    if (state === "gesture") {
+      indicator.style.setProperty(
+        "--touch-translate-progress",
+        `${Math.max(0, Math.min(1, progress)) * 360}deg`,
+      );
+    } else {
+      indicator.style.removeProperty("--touch-translate-progress");
+    }
+    return indicator;
+  }
+
+  function removeIndicator(element, state) {
+    const indicator = indicatorFor(element);
+    if (indicator && (!state || indicator.dataset.state === state)) {
+      indicator.remove();
+    }
+  }
+
   function insertTranslation(source, text) {
     if (!source.isConnected || translationAfter(source)) return;
     const translated = source.cloneNode(false);
@@ -392,110 +481,306 @@
     return style.display !== "none" && style.visibility !== "hidden";
   }
 
-  function collectPageBlocks() {
-    return [...document.querySelectorAll(BLOCK_SELECTOR)].filter(
-      (element) =>
-        !element.classList.contains(TRANSLATION_CLASS) &&
-        !element.querySelector(BLOCK_SELECTOR) &&
-        !translationAfter(element) &&
-        isVisible(element) &&
-        sourceText(element).length >= 2,
+  function pageContentRoots() {
+    const main = [...document.querySelectorAll(CONTENT_ROOT_SELECTOR)].filter(
+      isVisible,
     );
+    if (main.length) return main;
+    const articles = [...document.querySelectorAll("article")].filter(isVisible);
+    return articles.length
+      ? articles
+      : [document.body || document.documentElement];
   }
 
-  async function translateElements(elements) {
+  function isUsefulPageBlock(element, text) {
+    if (!pageTextLooksUseful(text) || element.closest(PAGE_CHROME_SELECTOR)) {
+      return false;
+    }
+    const outerChrome = element.closest("header, footer");
+    if (
+      outerChrome &&
+      !outerChrome.closest("article, main, [role='main']")
+    ) {
+      return false;
+    }
+    const linkedCharacters = element.closest("a")
+      ? text.length
+      : [...element.querySelectorAll("a")].reduce(
+          (sum, link) => sum + sourceText(link).length,
+          0,
+        );
+    // ponytail: link density is intentionally conservative; add site rules only
+    // when a regular reading site proves this heuristic wrong.
+    return text.length >= 160 || linkedCharacters / text.length <= 0.8;
+  }
+
+  function collectPageBlocks() {
+    const roots = pageContentRoots();
+    const viewportHeight = innerHeight || document.documentElement.clientHeight;
+    return [...document.querySelectorAll(BLOCK_SELECTOR)]
+      .filter((element) => roots.some((root) => root.contains(element)))
+      .map((element) => ({ element, text: sourceText(element) }))
+      .filter(
+        ({ element, text }) =>
+          !element.classList.contains(TRANSLATION_CLASS) &&
+          !element.querySelector(BLOCK_SELECTOR) &&
+          !translationAfter(element) &&
+          isVisible(element) &&
+          isUsefulPageBlock(element, text),
+      )
+      .sort((a, b) => {
+        const [aZone, aDistance] = viewportPriority(
+          a.element.getBoundingClientRect(),
+          viewportHeight,
+        );
+        const [bZone, bDistance] = viewportPriority(
+          b.element.getBoundingClientRect(),
+          viewportHeight,
+        );
+        return aZone - bZone || aDistance - bDistance;
+      })
+      .map(({ element }) => element);
+  }
+
+  const pendingJobs = new WeakMap();
+  const swipeBatch = new Map();
+  let swipeBatchTimer;
+
+  function restoreAriaBusy(job) {
+    if (job.ariaBusy === null) job.element.removeAttribute("aria-busy");
+    else job.element.setAttribute("aria-busy", job.ariaBusy);
+  }
+
+  function beginJob(element) {
+    const existing = pendingJobs.get(element);
+    if (existing) return existing;
+    const job = {
+      ariaBusy: element.getAttribute("aria-busy"),
+      cancelled: false,
+      element,
+    };
+    pendingJobs.set(element, job);
+    element.setAttribute("aria-busy", "true");
+    showIndicator(element, "loading");
+    return job;
+  }
+
+  function settleJob(job, state = "done") {
+    if (pendingJobs.get(job.element) !== job) return;
+    pendingJobs.delete(job.element);
+    restoreAriaBusy(job);
+    if (state === "error") showIndicator(job.element, "error");
+    else removeIndicator(job.element);
+  }
+
+  function cancelJob(element) {
+    const job = pendingJobs.get(element);
+    if (!job) return false;
+    job.cancelled = true;
+    pendingJobs.delete(element);
+    swipeBatch.delete(element);
+    restoreAriaBusy(job);
+    removeIndicator(element);
+    if (!swipeBatch.size && swipeBatchTimer) {
+      clearTimeout(swipeBatchTimer);
+      swipeBatchTimer = undefined;
+    }
+    return true;
+  }
+
+  async function translateElements(
+    elements,
+    { claimedJobs = new Map(), showProgress = false } = {},
+  ) {
+    const operationJobs = new Set(claimedJobs.values());
     const settings = readySettings();
-    if (!settings) return;
+    if (!settings) {
+      operationJobs.forEach((job) => settleJob(job));
+      return;
+    }
 
     const cache = loadCache();
     const records = [];
     let completed = 0;
     for (const element of elements) {
-      if (!element?.isConnected || translationAfter(element)) continue;
+      const claimedJob = claimedJobs.get(element);
+      if (!element?.isConnected || translationAfter(element)) {
+        if (claimedJob) settleJob(claimedJob);
+        continue;
+      }
+      const currentJob = pendingJobs.get(element);
+      if (currentJob && currentJob !== claimedJob) continue;
       const text = sourceText(element);
-      if (text.length < 2) continue;
+      if (text.length < 2) {
+        if (claimedJob) settleJob(claimedJob);
+        continue;
+      }
       const key = hashCacheKey(text, settings);
       const cached = cache[key];
       if (typeof cached?.translation === "string" && cached.translation) {
         insertTranslation(element, cached.translation);
+        if (claimedJob) settleJob(claimedJob);
         completed += 1;
       } else {
-        records.push({ element, key, text });
+        records.push({ element, job: claimedJob, key, text });
       }
     }
 
     const total = completed + records.length;
     if (!total) {
-      toast("沒有找到可翻譯的新段落");
+      if (showProgress) toast("沒有找到可翻譯的新段落");
       return;
     }
-    toast(`翻譯中 0/${total}`);
+    let activeTotal = total;
+    if (showProgress) toast(`翻譯中 ${completed}/${activeTotal}`, false, 0);
 
-    for (const batch of makeBatches(records)) {
-      const translations = await requestTranslations(
-        batch.map((record) => record.text),
-        settings,
-      );
-      translations.forEach((translation, index) => {
-        const record = batch[index];
-        insertTranslation(record.element, translation);
-        cache[record.key] = { translation, at: Date.now() };
-        completed += 1;
-      });
-      saveCache(cache);
-      toast(`翻譯中 ${completed}/${total}`);
+    try {
+      for (const batch of makeBatches(groupRecords(records))) {
+        const activeBatch = [];
+        for (const group of batch) {
+          const entries = [];
+          for (const record of group.entries) {
+            const { element } = record;
+            let { job } = record;
+            if (!element.isConnected) {
+              if (job) settleJob(job);
+              activeTotal -= 1;
+              continue;
+            }
+            if (translationAfter(element)) {
+              if (job) settleJob(job);
+              completed += 1;
+              continue;
+            }
+            const currentJob = pendingJobs.get(element);
+            if (job) {
+              if (currentJob !== job) {
+                activeTotal -= 1;
+                continue;
+              }
+            } else {
+              if (currentJob) {
+                activeTotal -= 1;
+                continue;
+              }
+              job = beginJob(element);
+              operationJobs.add(job);
+            }
+            entries.push({ ...record, job });
+          }
+          if (entries.length) activeBatch.push({ ...group, entries });
+        }
+        if (!activeBatch.length) continue;
+
+        const translations = await requestTranslations(
+          activeBatch.map((group) => group.text),
+          settings,
+        );
+        const cacheEntries = {};
+        translations.forEach((translation, index) => {
+          const group = activeBatch[index];
+          cacheEntries[group.key] = { translation, at: Date.now() };
+          for (const { element, job } of group.entries) {
+            if (pendingJobs.get(element) !== job || job.cancelled) {
+              activeTotal -= 1;
+              continue;
+            }
+            insertTranslation(element, translation);
+            settleJob(job);
+            completed += 1;
+          }
+        });
+        saveCacheEntries(cacheEntries);
+        if (showProgress) {
+          toast(`翻譯中 ${completed}/${activeTotal}`, false, 0);
+        }
+      }
+    } catch (error) {
+      operationJobs.forEach((job) => settleJob(job, "error"));
+      throw error;
     }
-    toast(`已翻譯 ${completed} 個段落`);
+    if (showProgress) toast(`已翻譯 ${completed} 個段落`);
   }
 
-  async function handleSwipe(target) {
-    if (!(target instanceof Element)) return;
-    const translated = target.closest(`.${TRANSLATION_CLASS}`);
-    if (translated) {
-      translated.remove();
+  function reportError(error) {
+    console.error("[Touch Translate]", error);
+    toast(error?.message || "翻譯失敗", true);
+  }
+
+  function flushSwipeBatch() {
+    swipeBatchTimer = undefined;
+    const claimedJobs = new Map(
+      [...swipeBatch].filter(
+        ([element, job]) => pendingJobs.get(element) === job,
+      ),
+    );
+    swipeBatch.clear();
+    if (!claimedJobs.size) return;
+    translateElements([...claimedJobs.keys()], { claimedJobs }).catch(
+      reportError,
+    );
+  }
+
+  function scheduleTranslation(element) {
+    const job = beginJob(element);
+    swipeBatch.set(element, job);
+    clearTimeout(swipeBatchTimer);
+    swipeBatchTimer = setTimeout(flushSwipeBatch, SWIPE_BATCH_MS);
+  }
+
+  function handleSwipe(element) {
+    if (!element?.isConnected) return;
+    if (element.classList.contains(TRANSLATION_CLASS)) {
+      element.remove();
       return;
     }
-    const source = target.closest(BLOCK_SELECTOR);
-    if (!source || source.classList.contains(TRANSLATION_CLASS)) return;
-    const existing = translationAfter(source);
+    if (cancelJob(element)) return;
+    const existing = translationAfter(element);
     if (existing) {
       existing.remove();
+      removeIndicator(element);
       return;
     }
-    await translateElements([source]);
+    scheduleTranslation(element);
   }
 
-  async function translatePage() {
-    const blocks = collectPageBlocks();
-    await translateElements(blocks);
+  let pageTask;
+  function startPageTranslation() {
+    if (pageTask) {
+      toast("整頁翻譯進行中");
+      return;
+    }
+    pageTask = translateElements(collectPageBlocks(), { showProgress: true })
+      .catch(reportError)
+      .finally(() => {
+        pageTask = undefined;
+      });
   }
 
   let toastTimer;
-  function toast(message, isError = false) {
+  function toast(
+    message,
+    isError = false,
+    timeout = isError ? 4200 : 1800,
+  ) {
     let element = document.querySelector(`.${TOAST_CLASS}`);
     if (!element) {
       element = document.createElement("div");
       element.className = TOAST_CLASS;
+      element.setAttribute("aria-atomic", "true");
       document.documentElement.append(element);
     }
     element.textContent = message;
     element.dataset.error = String(isError);
+    element.setAttribute("role", isError ? "alert" : "status");
+    element.setAttribute("aria-live", isError ? "assertive" : "polite");
     element.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(
-      () => {
-        element.hidden = true;
-      },
-      isError ? 4200 : 1800,
-    );
-  }
-
-  let queue = Promise.resolve();
-  function enqueue(task) {
-    queue = queue.then(task, task).catch((error) => {
-      console.error("[Touch Translate]", error);
-      toast(error?.message || "翻譯失敗", true);
-    });
+    toastTimer = timeout
+      ? setTimeout(() => {
+          element.hidden = true;
+        }, timeout)
+      : undefined;
   }
 
   let swipe = null;
@@ -516,8 +801,23 @@
     });
   }
 
+  function restoreGestureIndicator(gesture) {
+    if (indicatorFor(gesture?.element)?.dataset.state !== "gesture") return;
+    if (gesture.indicatorState === "error") {
+      showIndicator(gesture.element, "error");
+    } else {
+      removeIndicator(gesture.element, "gesture");
+    }
+  }
+
+  function clearSwipe() {
+    restoreGestureIndicator(swipe);
+    swipe = null;
+  }
+
   function onTouchStart(event) {
     if (event.touches.length === 4) {
+      clearSwipe();
       fourFinger = {
         at: Date.now(),
         cancelled: false,
@@ -528,27 +828,36 @@
           ]),
         ),
       };
-      swipe = null;
       return;
     }
     if (event.touches.length !== 1) {
-      swipe = null;
+      clearSwipe();
       return;
     }
     const touch = event.touches[0];
+    const target = event.target instanceof Element ? event.target : null;
     if (
+      !target ||
       touch.clientX < SAFARI_EDGE_X ||
-      event.target.closest?.(
+      target.closest(
         "input, textarea, select, button, [contenteditable='true']",
       )
     ) {
-      swipe = null;
+      clearSwipe();
+      return;
+    }
+    const element =
+      target.closest(`.${TRANSLATION_CLASS}`) ||
+      target.closest(BLOCK_SELECTOR);
+    if (!element) {
+      clearSwipe();
       return;
     }
     swipe = {
       at: Date.now(),
+      element,
       identifier: touch.identifier,
-      target: event.target,
+      indicatorState: indicatorFor(element)?.dataset.state || null,
       x: touch.clientX,
       y: touch.clientY,
     };
@@ -565,10 +874,15 @@
     if (!touch) return;
     const dx = touch.clientX - swipe.x;
     const dy = touch.clientY - swipe.y;
-    if (dx > 12 && dx > Math.abs(dy) * 1.25 && event.cancelable) {
-      event.preventDefault();
+    if (dx > 8 && dx > Math.abs(dy) * 1.25) {
+      if (dx > 12 && event.cancelable) event.preventDefault();
+      if (!pendingJobs.has(swipe.element)) {
+        showIndicator(swipe.element, "gesture", dx / SWIPE_MIN_X);
+      }
     } else if (Math.abs(dy) > 28 && Math.abs(dy) > Math.abs(dx)) {
-      swipe = null;
+      clearSwipe();
+    } else if (dx <= 8) {
+      restoreGestureIndicator(swipe);
     }
   }
 
@@ -584,7 +898,7 @@
           Date.now() - gesture.at <= FOUR_FINGER_MAX_MS
         ) {
           if (event.cancelable) event.preventDefault();
-          enqueue(translatePage);
+          startPageTranslation();
         }
       }
       return;
@@ -593,7 +907,10 @@
     const gesture = swipe;
     swipe = null;
     const touch = pointFor(event.changedTouches, gesture.identifier);
-    if (!touch) return;
+    if (!touch) {
+      restoreGestureIndicator(gesture);
+      return;
+    }
     const dx = touch.clientX - gesture.x;
     const dy = touch.clientY - gesture.y;
     if (
@@ -602,12 +919,14 @@
       Date.now() - gesture.at <= SWIPE_MAX_MS
     ) {
       if (event.cancelable) event.preventDefault();
-      enqueue(() => handleSwipe(gesture.target));
+      handleSwipe(gesture.element);
+    } else {
+      restoreGestureIndicator(gesture);
     }
   }
 
   function resetTouches() {
-    swipe = null;
+    clearSwipe();
     fourFinger = null;
   }
 
@@ -615,13 +934,71 @@
     const style = document.createElement("style");
     style.textContent = `
       .${TRANSLATION_CLASS} {
-        opacity: 0.48 !important;
-        filter: saturate(0.65) !important;
+        opacity: 0.78 !important;
+        filter: none !important;
         margin-block-start: 0.35em !important;
         pointer-events: auto !important;
       }
       li.${TRANSLATION_CLASS} {
         list-style: none !important;
+      }
+      .${INDICATOR_CLASS} {
+        --touch-translate-progress: 0deg;
+        display: inline-block !important;
+        position: relative !important;
+        width: 0.68em !important;
+        height: 0.68em !important;
+        margin-inline-start: 0.38em !important;
+        border: 0 solid transparent !important;
+        border-radius: 50% !important;
+        box-sizing: border-box !important;
+        color: currentColor !important;
+        vertical-align: 0 !important;
+        pointer-events: none !important;
+      }
+      .${INDICATOR_CLASS}[data-state="gesture"] {
+        background: conic-gradient(
+          currentColor var(--touch-translate-progress),
+          transparent 0
+        ) !important;
+        -webkit-mask: radial-gradient(
+          farthest-side,
+          transparent calc(100% - 1.5px),
+          #000 0
+        ) !important;
+        mask: radial-gradient(
+          farthest-side,
+          transparent calc(100% - 1.5px),
+          #000 0
+        ) !important;
+        opacity: 0.7 !important;
+      }
+      .${INDICATOR_CLASS}[data-state="loading"] {
+        background: transparent !important;
+        -webkit-mask: none !important;
+        mask: none !important;
+        border: 1.5px solid currentColor !important;
+        border-inline-end-color: transparent !important;
+        opacity: 0.58 !important;
+        animation: touch-translate-spin 720ms linear infinite !important;
+      }
+      .${INDICATOR_CLASS}[data-state="error"] {
+        background: transparent !important;
+        -webkit-mask: none !important;
+        mask: none !important;
+        border: 1.5px solid #c8453c !important;
+        opacity: 0.9 !important;
+      }
+      .${INDICATOR_CLASS}[data-state="error"]::after {
+        content: "!" !important;
+        position: absolute !important;
+        inset: 50% auto auto 50% !important;
+        color: #c8453c !important;
+        font: 700 0.55em/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        transform: translate(-50%, -52%) !important;
+      }
+      @keyframes touch-translate-spin {
+        to { transform: rotate(1turn); }
       }
       .${TOAST_CLASS} {
         position: fixed !important;
@@ -635,6 +1012,7 @@
         background: rgba(22, 22, 24, 0.88) !important;
         color: #fff !important;
         font: 500 13px/1.35 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: 0 !important;
         text-align: center !important;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.24) !important;
         backdrop-filter: blur(12px) !important;
@@ -644,6 +1022,23 @@
       }
       .${TOAST_CLASS}[hidden] {
         display: none !important;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .${INDICATOR_CLASS}[data-state="loading"] {
+          animation: none !important;
+        }
+      }
+      @media (prefers-reduced-transparency: reduce) {
+        .${TOAST_CLASS} {
+          background: rgb(22, 22, 24) !important;
+          backdrop-filter: none !important;
+        }
+      }
+      @media (prefers-contrast: more) {
+        .${TRANSLATION_CLASS},
+        .${INDICATOR_CLASS} {
+          opacity: 1 !important;
+        }
       }
     `;
     document.documentElement.append(style);
@@ -668,9 +1063,7 @@
   });
 
   GM_registerMenuCommand("Touch Translate：設定 API", configureSettings);
-  GM_registerMenuCommand("Touch Translate：翻譯整頁", () =>
-    enqueue(translatePage),
-  );
+  GM_registerMenuCommand("Touch Translate：翻譯整頁", startPageTranslation);
   GM_registerMenuCommand("Touch Translate：匯出設定", exportSettings);
   GM_registerMenuCommand("Touch Translate：匯入設定", importSettings);
   GM_registerMenuCommand("Touch Translate：清除快取", () => {

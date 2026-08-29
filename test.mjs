@@ -15,6 +15,9 @@ const context = vm.createContext({
 vm.runInContext(source, context);
 
 assert.equal(api.normalizeText("  hello\n  world "), "hello world");
+assert.equal(api.pageTextLooksUseful("https://example.com/path"), false);
+assert.equal(api.pageTextLooksUseful("2026-08-29"), false);
+assert.equal(api.pageTextLooksUseful("A useful sentence."), true);
 assert.equal(
   api.endpointFor("https://api.example.com/v1/"),
   "https://api.example.com/v1/chat/completions",
@@ -48,6 +51,27 @@ const records = [
 assert.deepEqual(
   [...api.makeBatches(records)].map((batch) => batch.length),
   [1, 2],
+);
+
+const grouped = api.groupRecords([
+  { key: "same", text: "Repeated text", element: 1 },
+  { key: "same", text: "Repeated text", element: 2 },
+  { key: "other", text: "Other text", element: 3 },
+]);
+assert.deepEqual(
+  [...grouped].map((group) => [group.key, group.entries.length]),
+  [
+    ["same", 2],
+    ["other", 1],
+  ],
+);
+assert.deepEqual(
+  [...api.viewportPriority({ top: 20, bottom: 100 }, 800)],
+  [0, 20],
+);
+assert.deepEqual(
+  [...api.viewportPriority({ top: 900, bottom: 980 }, 800)],
+  [1, 100],
 );
 
 console.log("Touch Translate self-check passed");
