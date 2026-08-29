@@ -1138,6 +1138,7 @@
     style.textContent = `
       .${TRANSLATION_CLASS} {
         box-sizing: border-box !important;
+        opacity: 0.78 !important;
         margin-block-start: 0.62em !important;
         padding-inline-start: 0.72em !important;
         border-inline-start: 2px solid rgba(127, 127, 127, 0.48) !important;
@@ -1291,6 +1292,7 @@
         }
       }
       @media (prefers-contrast: more) {
+        .${TRANSLATION_CLASS},
         .${INDICATOR_CLASS} {
           opacity: 1 !important;
         }
