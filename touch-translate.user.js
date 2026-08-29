@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.3.3
+// @version      0.3.4
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -1020,18 +1020,20 @@
   }
 
   function swipeElementFor(target) {
-    const known =
-      target.closest(`.${TRANSLATION_CLASS}`) ||
-      target.closest(BLOCK_SELECTOR);
-    if (known) return known;
+    const translation = target.closest(`.${TRANSLATION_CLASS}`);
+    if (translation) return translation;
 
     let inline = null;
     for (let element = target; element; element = element.parentElement) {
       if (element === document.body || element === document.documentElement) break;
-      if (sourceText(element).length < 2) continue;
       inline ||= element;
       const display = getComputedStyle(element).display;
-      if (display !== "contents" && !display.startsWith("inline")) return element;
+      if (
+        element.matches(BLOCK_SELECTOR) ||
+        (display !== "contents" && !display.startsWith("inline"))
+      ) {
+        return element;
+      }
     }
     return inline;
   }
@@ -1087,9 +1089,8 @@
     if (
       !target ||
       touch.clientX < SAFARI_EDGE_X ||
-      target.closest(
-        "input, textarea, select, button, [contenteditable='true']",
-      )
+      target.isContentEditable ||
+      target.closest("input, textarea, select, button")
     ) {
       clearSwipe();
       return;

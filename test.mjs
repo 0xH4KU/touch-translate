@@ -115,18 +115,42 @@ assert.equal(
   indicator,
 );
 
-const genericBlock = {
-  closest: () => null,
-  display: "flow-root",
-  innerText: "A generic text block",
+const outerListItem = {
+  display: "list-item",
+  innerText: "A generic text block and its metadata",
+  matches: (selector) => selector.includes("li"),
   parentElement: body,
 };
+const genericBlock = {
+  closest: () => outerListItem,
+  display: "flow-root",
+  innerText: "A generic text block",
+  matches: () => false,
+  parentElement: outerListItem,
+};
 const inlineText = {
-  closest: () => null,
+  closest: (selector) =>
+    selector === ".touch-translate__translation" ? null : outerListItem,
   display: "inline",
   innerText: "A generic text block",
+  matches: () => false,
   parentElement: genericBlock,
 };
 assert.equal(api.swipeElementFor(inlineText), genericBlock);
+
+const largerParent = {
+  display: "block",
+  innerText: "A and unrelated surrounding text",
+  matches: () => false,
+  parentElement: body,
+};
+const shortBlock = {
+  closest: () => null,
+  display: "block",
+  innerText: "A",
+  matches: () => false,
+  parentElement: largerParent,
+};
+assert.equal(api.swipeElementFor(shortBlock), shortBlock);
 
 console.log("Touch Translate self-check passed");
