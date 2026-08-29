@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.3.0
+// @version      0.3.1
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -246,11 +246,14 @@
       endpointFor,
       groupRecords,
       hashCacheKey,
+      indicatorFor,
       makeBatches,
+      movedTooFar,
       normalizeText,
       pageTextLooksUseful,
       parseInlineTranslation,
       parseTranslations,
+      pointFor,
       viewportPriority,
     });
     return;
@@ -537,8 +540,9 @@
   }
 
   function indicatorFor(element) {
+    if (!element) return null;
     return (
-      [...element.children].find((child) =>
+      Array.from(element.children).find((child) =>
         child.classList.contains(INDICATOR_CLASS),
       ) || null
     );
@@ -601,7 +605,7 @@
       "for",
     ]);
     for (const element of [translated, ...translated.querySelectorAll("*")]) {
-      for (const attribute of [...element.attributes]) {
+      for (const attribute of Array.from(element.attributes)) {
         if (
           unsafeAttributes.has(attribute.name) ||
           attribute.name.startsWith("aria-") ||
@@ -984,17 +988,39 @@
           element.hidden = true;
         }, timeout)
       : undefined;
+    return element;
+  }
+
+  function showMenuAction(label, action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener(
+      "click",
+      () => {
+        button.parentElement.hidden = true;
+        action();
+      },
+      { once: true },
+    );
+    const element = toast("", false, 15000);
+    element.replaceChildren(button);
+    element.removeAttribute("role");
+    element.removeAttribute("aria-live");
+    button.focus();
   }
 
   let swipe = null;
   let fourFinger = null;
 
   function pointFor(touches, identifier) {
-    return [...touches].find((touch) => touch.identifier === identifier);
+    return Array.from(touches).find(
+      (touch) => touch.identifier === identifier,
+    );
   }
 
   function movedTooFar(touches, starts) {
-    return [...touches].some((touch) => {
+    return Array.from(touches).some((touch) => {
       const start = starts.get(touch.identifier);
       return (
         start &&
@@ -1025,7 +1051,7 @@
         at: Date.now(),
         cancelled: false,
         starts: new Map(
-          [...event.touches].map((touch) => [
+          Array.from(event.touches, (touch) => [
             touch.identifier,
             { x: touch.clientX, y: touch.clientY },
           ]),
@@ -1270,7 +1296,28 @@
         letter-spacing: 0 !important;
         text-align: center !important;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.24) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
         backdrop-filter: blur(12px) !important;
+      }
+      .${TOAST_CLASS} > button {
+        -webkit-appearance: none !important;
+        appearance: none !important;
+        box-sizing: border-box !important;
+        display: block !important;
+        min-width: 180px !important;
+        min-height: 44px !important;
+        max-width: 100% !important;
+        padding: 0 14px !important;
+        border: 0 !important;
+        border-radius: 6px !important;
+        background: #fff !important;
+        color: #111 !important;
+        font: 600 14px/1.2 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: 0 !important;
+        white-space: normal !important;
+        cursor: pointer !important;
+        pointer-events: auto !important;
+        touch-action: manipulation !important;
       }
       .${TOAST_CLASS}[data-error="true"] {
         background: rgba(152, 34, 34, 0.94) !important;
@@ -1288,6 +1335,7 @@
       @media (prefers-reduced-transparency: reduce) {
         .${TOAST_CLASS} {
           background: rgb(22, 22, 24) !important;
+          -webkit-backdrop-filter: none !important;
           backdrop-filter: none !important;
         }
       }
@@ -1324,8 +1372,12 @@
     "Touch Translate: Translate page",
     startPageTranslation,
   );
-  GM_registerMenuCommand("Touch Translate: Export settings", exportSettings);
-  GM_registerMenuCommand("Touch Translate: Import settings", importSettings);
+  GM_registerMenuCommand("Touch Translate: Export settings", () => {
+    showMenuAction("Export settings", exportSettings);
+  });
+  GM_registerMenuCommand("Touch Translate: Import settings", () => {
+    showMenuAction("Choose settings file", importSettings);
+  });
   GM_registerMenuCommand("Touch Translate: Clear cache", () => {
     GM_deleteValue(CACHE_KEY);
     toast("Translation cache cleared");

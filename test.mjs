@@ -95,4 +95,20 @@ assert.deepEqual(
   [1, 100],
 );
 
+const touch = { identifier: 7, clientX: 40, clientY: 30 };
+const touchList = { 0: touch, length: 1 };
+assert.equal(api.pointFor(touchList, 7), touch);
+assert.equal(
+  api.movedTooFar(touchList, new Map([[7, { x: 0, y: 0 }]])),
+  true,
+);
+assert.equal(api.indicatorFor(null), null);
+const indicator = {
+  classList: { contains: (value) => value === "touch-translate__indicator" },
+};
+assert.equal(
+  api.indicatorFor({ children: { 0: indicator, length: 1 } }),
+  indicator,
+);
+
 console.log("Touch Translate self-check passed");
