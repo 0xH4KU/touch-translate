@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.3.8
+// @version      0.3.9
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -1288,7 +1288,7 @@
         box-sizing: border-box !important;
         color: currentColor !important;
         font: inherit !important;
-        vertical-align: 0 !important;
+        vertical-align: middle !important;
         pointer-events: none !important;
       }
       .${INDICATOR_CLASS}::before,
