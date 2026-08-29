@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.3.7
+// @version      0.3.8
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -1335,16 +1335,15 @@
         background: transparent !important;
         -webkit-mask: none !important;
         mask: none !important;
-        border: 1px solid currentColor !important;
         opacity: 0.62 !important;
       }
       .${INDICATOR_CLASS}[data-state="loading"]::before {
         content: "" !important;
         position: absolute !important;
-        inset: -1px !important;
-        border: 1.5px solid transparent !important;
-        border-block-start-color: currentColor !important;
-        border-inline-end-color: currentColor !important;
+        inset: 0 !important;
+        border: 1px solid currentColor !important;
+        border-block-start-width: 1.5px !important;
+        border-inline-end-width: 1.5px !important;
         border-radius: 50% !important;
         animation: touch-translate-spin 760ms linear infinite !important;
       }
