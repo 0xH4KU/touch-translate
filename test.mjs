@@ -32,6 +32,8 @@ const context = vm.createContext({
 });
 vm.runInContext(source, context);
 
+assert.match(source, /opacity: 0\.78 !important;/);
+assert.equal(api.errorHitSize, 44);
 assert.equal(api.normalizeText("  hello\n  world "), "hello world");
 assert.equal(api.pageTextLooksUseful("https://example.com/path"), false);
 assert.equal(api.pageTextLooksUseful("2026-08-29"), false);
@@ -138,8 +140,16 @@ const position = api.indicatorPosition(
 );
 assert.deepEqual(
   { ...position },
-  { left: 372, top: 118 },
+  { left: 368, top: 122 },
 );
+assert.equal(api.projectedSwipeX(30, 0.4), 66);
+assert.equal(api.swipeVelocity([{ x: 10, at: 0 }, { x: 50, at: 100 }]), 0.4);
+assert.equal(api.swipeShouldCommit(60, 0, 500), true);
+assert.equal(api.swipeShouldCommit(30, 0, 300, 0.4), true);
+assert.equal(api.swipeShouldCommit(20, 0, 300, 0.8), false);
+assert.equal(api.swipeShouldCommit(70, 0, 300, -0.2), false);
+assert.equal(api.swipeShouldCommit(70, 43, 300), false);
+assert.equal(api.swipeShouldCommit(70, 0, 1201), false);
 
 const request = api.requestTranslations(["hello"], {
   apiKey: "test",

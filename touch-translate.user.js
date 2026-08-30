@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.4.0
+// @version      0.4.1
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -18,11 +18,14 @@
 (() => {
   "use strict";
 
+  // Constants and defaults
+
   const BLOCK_SELECTOR = "p, li, blockquote, h1, h2, h3, h4, h5, h6";
   const TRANSLATION_CLASS = "touch-translate__translation";
   const INDICATOR_CLASS = "touch-translate__indicator";
   const TOAST_CLASS = "touch-translate__toast";
   const indicators = new WeakMap();
+  const removingTranslations = new WeakSet();
   const SETTINGS_KEY = "settings-v1";
   const CACHE_KEY = "cache-v1";
   const CACHE_LIMIT = 500;
@@ -31,10 +34,14 @@
   const FIRST_BATCH_MAX_ITEMS = 4;
   const FIRST_BATCH_MAX_CHARS = 1600;
   const SWIPE_MIN_X = 60;
+  const SWIPE_FLICK_MIN_X = 24;
+  const SWIPE_INTENT_PX = 10;
+  const SWIPE_PROJECTION_MS = 90;
   const SWIPE_MAX_Y = 42;
   const SWIPE_MAX_MS = 1200;
   const SWIPE_BATCH_MS = 80;
   const COMMIT_HOLD_MS = 140;
+  const ERROR_HIT_SIZE = 44;
   const SAFARI_EDGE_X = 30;
   const FOUR_FINGER_MAX_MOVE = 24;
   const FOUR_FINGER_MAX_MS = 700;
@@ -56,6 +63,8 @@
     apiKey: "",
     targetLanguage: globalThis.navigator?.language || "English",
   };
+
+  // Pure helpers
 
   function normalizeText(value) {
     return String(value || "")
@@ -258,15 +267,38 @@
     return error;
   }
 
+  function projectedSwipeX(dx, velocityX = 0) {
+    return dx + velocityX * SWIPE_PROJECTION_MS;
+  }
+
+  function swipeShouldCommit(dx, dy, elapsed, velocityX = 0) {
+    return (
+      dx >= SWIPE_FLICK_MIN_X &&
+      velocityX >= -0.1 &&
+      projectedSwipeX(dx, velocityX) >= SWIPE_MIN_X &&
+      Math.abs(dy) <= SWIPE_MAX_Y &&
+      elapsed <= SWIPE_MAX_MS
+    );
+  }
+
+  function swipeVelocity(samples) {
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    return first && last && last.at > first.at
+      ? (last.x - first.x) / (last.at - first.at)
+      : 0;
+  }
+
   function indicatorPosition(point, rect, viewport) {
     const clamp = (value, minimum, maximum) =>
       Math.max(minimum, Math.min(maximum, value));
+    const edgeInset = ERROR_HIT_SIZE / 2;
     const followsTouch = Number.isFinite(point?.x) && Number.isFinite(point?.y);
     const x = followsTouch
-      ? clamp(point.x, 18, viewport.width - 18)
-      : clamp(rect.right - 10, 18, viewport.width - 18);
+      ? clamp(point.x, edgeInset, viewport.width - edgeInset)
+      : clamp(rect.right - 10, edgeInset, viewport.width - edgeInset);
     const y = followsTouch
-      ? clamp(point.y - 28, 18, viewport.height - 18)
+      ? clamp(point.y - 28, edgeInset, viewport.height - edgeInset)
       : rect.top + Math.min(18, Math.max(8, rect.height / 2));
     return {
       left: x + viewport.scrollX,
@@ -274,10 +306,13 @@
     };
   }
 
+  // Test interface
+
   if (globalThis.__TOUCH_TRANSLATE_TEST__) {
     Object.assign(globalThis.__TOUCH_TRANSLATE_TEST__, {
       cleanSettings,
       endpointFor,
+      errorHitSize: ERROR_HIT_SIZE,
       errorMessageFor,
       groupRecords,
       hashCacheKey,
@@ -291,12 +326,17 @@
       parseInlineTranslation,
       parseTranslations,
       pointFor,
+      projectedSwipeX,
       requestTranslations,
+      swipeShouldCommit,
+      swipeVelocity,
       swipeElementFor,
       viewportPriority,
     });
     return;
   }
+
+  // Settings and persistence
 
   function loadSettings() {
     try {
@@ -450,6 +490,8 @@
     input.click();
   }
 
+  // Translation provider
+
   function requestTranslations(texts, settings) {
     const systemPrompt = [
       `Translate every string in the JSON array into ${settings.targetLanguage}.`,
@@ -526,6 +568,8 @@
     });
     return { abort: abortRequest, promise };
   }
+
+  // Page content and rendering
 
   function sourceText(element) {
     return normalizeText(element.innerText || element.textContent);
@@ -614,6 +658,8 @@
     progress = 0,
     errorMessage = "",
     point,
+    action = "",
+    ready = false,
   ) {
     if (!element?.isConnected) return null;
     let indicator = indicatorFor(element);
@@ -646,8 +692,8 @@
           scrollY: globalThis.scrollY || 0,
         },
       );
-      indicator.style.left = `${position.left}px`;
-      indicator.style.top = `${position.top}px`;
+      indicator.style.setProperty("--touch-translate-x", `${position.left}px`);
+      indicator.style.setProperty("--touch-translate-y", `${position.top}px`);
       if (created) indicator.style.color = getComputedStyle(element).color;
     }
     const isError = state === "error";
@@ -663,11 +709,15 @@
       indicator.removeAttribute("aria-label");
     }
     if (state === "gesture") {
+      indicator.dataset.action = action;
+      indicator.dataset.ready = String(ready);
       indicator.style.setProperty(
         "--touch-translate-progress",
         `${Math.max(0, Math.min(1, progress)) * 360}deg`,
       );
     } else {
+      delete indicator.dataset.action;
+      delete indicator.dataset.ready;
       indicator.style.removeProperty("--touch-translate-progress");
     }
     return indicator;
@@ -721,6 +771,11 @@
     }
     translated.classList.add(TRANSLATION_CLASS);
     translated.setAttribute("dir", "auto");
+    translated.setAttribute("role", "note");
+    const animateIn = !globalThis.matchMedia?.(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    if (animateIn) translated.style.setProperty("opacity", "0", "important");
 
     const nodes = contentTextNodes(translated);
     const segments = Array.isArray(result?.segments) ? result.segments : null;
@@ -738,6 +793,31 @@
       translated.replaceChildren(translation);
     }
     source.insertAdjacentElement("afterend", translated);
+    if (animateIn) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (translated.isConnected && !removingTranslations.has(translated)) {
+            translated.style.removeProperty("opacity");
+          }
+        });
+      });
+    }
+  }
+
+  function removeTranslation(element) {
+    if (!element?.isConnected || removingTranslations.has(element)) return;
+    if (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      element.remove();
+      return;
+    }
+    removingTranslations.add(element);
+    element.style.setProperty(
+      "transition",
+      "opacity 140ms ease-in",
+      "important",
+    );
+    element.style.setProperty("opacity", "0", "important");
+    setTimeout(() => element.remove(), 140);
   }
 
   function isVisible(element) {
@@ -806,6 +886,8 @@
       })
       .map(({ element }) => element);
   }
+
+  // Translation jobs and batching
 
   const pendingJobs = new WeakMap();
   const swipeBatch = new Map();
@@ -1095,13 +1177,13 @@
   function handleSwipe(element, point) {
     if (!element?.isConnected) return;
     if (element.classList.contains(TRANSLATION_CLASS)) {
-      element.remove();
+      removeTranslation(element);
       return;
     }
     if (cancelJob(element)) return;
     const existing = translationAfter(element);
     if (existing) {
-      existing.remove();
+      removeTranslation(existing);
       removeIndicator(element);
       return;
     }
@@ -1126,6 +1208,8 @@
         if (pageTask === task) pageTask = undefined;
       });
   }
+
+  // Notifications and menu actions
 
   let toastTimer;
   function toast(
@@ -1173,6 +1257,8 @@
     button.focus();
   }
 
+  // Touch gestures
+
   let swipe = null;
   let fourFinger = null;
 
@@ -1180,6 +1266,14 @@
     return Array.from(touches).find(
       (touch) => touch.identifier === identifier,
     );
+  }
+
+  function recordSwipeSample(gesture, x, at) {
+    gesture.samples.push({ at, x });
+    gesture.samples = gesture.samples
+      .filter((sample) => at - sample.at <= 100)
+      .slice(-4);
+    return swipeVelocity(gesture.samples);
   }
 
   function hasNestedTextBlock(element) {
@@ -1251,10 +1345,24 @@
 
   function restoreGestureIndicator(gesture) {
     if (indicatorFor(gesture?.element)?.dataset.state !== "gesture") return;
-    if (gesture.indicatorState === "error") {
-      showIndicator(gesture.element, "error");
+    let indicator;
+    if (pendingJobs.has(gesture.element)) {
+      indicator = showIndicator(gesture.element, "loading");
+    } else if (gesture.indicatorState) {
+      indicator = showIndicator(gesture.element, gesture.indicatorState);
     } else {
       removeIndicator(gesture.element, "gesture");
+      return;
+    }
+    if (indicator && gesture.indicatorCoordinates) {
+      indicator.style.setProperty(
+        "--touch-translate-x",
+        gesture.indicatorCoordinates.x,
+      );
+      indicator.style.setProperty(
+        "--touch-translate-y",
+        gesture.indicatorCoordinates.y,
+      );
     }
   }
 
@@ -1303,11 +1411,29 @@
     }
     const root = element.getRootNode();
     if (root !== document) addStyles(root);
+    const now = Date.now();
+    const indicator = indicatorFor(element);
     swipe = {
-      at: Date.now(),
+      action: pendingJobs.has(element)
+        ? "cancel"
+        : element.classList.contains(TRANSLATION_CLASS) ||
+            translationAfter(element)
+          ? "remove"
+          : indicator?.dataset.state === "error"
+            ? "retry"
+            : "translate",
+      at: now,
       element,
       identifier: touch.identifier,
-      indicatorState: indicatorFor(element)?.dataset.state || null,
+      indicatorCoordinates: indicator
+        ? {
+            x: indicator.style.getPropertyValue("--touch-translate-x"),
+            y: indicator.style.getPropertyValue("--touch-translate-y"),
+          }
+        : null,
+      indicatorState: indicator?.dataset.state || null,
+      phase: "possible",
+      samples: [{ at: now, x: touch.clientX }],
       x: touch.clientX,
       y: touch.clientY,
     };
@@ -1324,22 +1450,30 @@
     if (!touch) return;
     const dx = touch.clientX - swipe.x;
     const dy = touch.clientY - swipe.y;
-    if (dx > 8 && dx > Math.abs(dy) * 1.25) {
-      if (dx > 12 && event.cancelable) event.preventDefault();
-      if (!pendingJobs.has(swipe.element)) {
-        showIndicator(
-          swipe.element,
-          "gesture",
-          dx / SWIPE_MIN_X,
-          "",
-          { x: touch.clientX, y: touch.clientY },
-        );
+    if (
+      swipe.phase === "possible" &&
+      Math.hypot(dx, dy) >= SWIPE_INTENT_PX
+    ) {
+      if (dx > 0 && dx > Math.abs(dy) * 1.25) {
+        swipe.phase = "horizontal";
+      } else if (dx < 0 || Math.abs(dy) > Math.abs(dx) * 1.25) {
+        clearSwipe();
+        return;
       }
-    } else if (Math.abs(dy) > 28 && Math.abs(dy) > Math.abs(dx)) {
-      clearSwipe();
-    } else if (dx <= 8) {
-      restoreGestureIndicator(swipe);
     }
+    if (swipe.phase !== "horizontal") return;
+    if (event.cancelable) event.preventDefault();
+    const now = Date.now();
+    const velocityX = recordSwipeSample(swipe, touch.clientX, now);
+    showIndicator(
+      swipe.element,
+      "gesture",
+      dx / SWIPE_MIN_X,
+      "",
+      { x: touch.clientX, y: touch.clientY },
+      swipe.action,
+      swipeShouldCommit(dx, dy, now - swipe.at, velocityX),
+    );
   }
 
   function onTouchEnd(event) {
@@ -1369,10 +1503,15 @@
     }
     const dx = touch.clientX - gesture.x;
     const dy = touch.clientY - gesture.y;
+    const now = Date.now();
+    const velocityX = recordSwipeSample(
+      gesture,
+      touch.clientX,
+      now,
+    );
     if (
-      dx >= SWIPE_MIN_X &&
-      Math.abs(dy) <= SWIPE_MAX_Y &&
-      Date.now() - gesture.at <= SWIPE_MAX_MS
+      gesture.phase === "horizontal" &&
+      swipeShouldCommit(dx, dy, now - gesture.at, velocityX)
     ) {
       if (event.cancelable) event.preventDefault();
       handleSwipe(gesture.element, { x: touch.clientX, y: touch.clientY });
@@ -1386,6 +1525,8 @@
     fourFinger = null;
   }
 
+  // Styles
+
   function addStyles(root = document.documentElement) {
     if (root.querySelector("style[data-touch-translate]")) return;
     const style = document.createElement("style");
@@ -1398,17 +1539,23 @@
         padding-inline-start: 0.42em !important;
         border-inline-start: 1px solid rgba(127, 127, 127, 0.48) !important;
         pointer-events: auto !important;
+        transition: opacity 180ms ease-out !important;
       }
       li.${TRANSLATION_CLASS} {
+        display: block !important;
         list-style: none !important;
       }
       .${INDICATOR_CLASS} {
         --touch-translate-progress: 0deg;
+        --touch-translate-x: 0px;
+        --touch-translate-y: 0px;
         -webkit-appearance: none !important;
         appearance: none !important;
         display: block !important;
         position: absolute !important;
         z-index: 2147483646 !important;
+        left: 0 !important;
+        top: 0 !important;
         width: 16px !important;
         height: 16px !important;
         margin: -8px 0 0 -8px !important;
@@ -1418,6 +1565,8 @@
         box-sizing: border-box !important;
         filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.9)) !important;
         font: 16px/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        translate: var(--touch-translate-x) var(--touch-translate-y) !important;
+        will-change: translate !important;
         pointer-events: none !important;
       }
       .${INDICATOR_CLASS}::before,
@@ -1426,6 +1575,16 @@
         pointer-events: none !important;
       }
       .${INDICATOR_CLASS}[data-state="gesture"] {
+        background: transparent !important;
+        -webkit-mask: none !important;
+        mask: none !important;
+        opacity: 0.7 !important;
+      }
+      .${INDICATOR_CLASS}[data-state="gesture"]::before {
+        content: "" !important;
+        position: absolute !important;
+        inset: 0 !important;
+        border-radius: 50% !important;
         background: conic-gradient(
           currentColor var(--touch-translate-progress),
           transparent 0
@@ -1440,7 +1599,36 @@
           transparent calc(100% - 1.5px),
           #000 0
         ) !important;
-        opacity: 0.7 !important;
+      }
+      .${INDICATOR_CLASS}[data-state="gesture"]::after {
+        content: "" !important;
+        position: absolute !important;
+        width: 2.5px !important;
+        height: 2.5px !important;
+        inset: 50% auto auto 50% !important;
+        border-radius: 50% !important;
+        background: currentColor !important;
+        opacity: 0.55 !important;
+        transform: translate(-50%, -50%) !important;
+      }
+      .${INDICATOR_CLASS}[data-state="gesture"][data-ready="true"] {
+        opacity: 0.9 !important;
+      }
+      .${INDICATOR_CLASS}[data-state="gesture"][data-ready="true"]::before {
+        transform: scale(1.1) !important;
+      }
+      .${INDICATOR_CLASS}[data-state="gesture"][data-ready="true"]::after {
+        transform: translate(-50%, -50%) scale(1.45) !important;
+      }
+      .${INDICATOR_CLASS}[data-state="gesture"][data-action="cancel"]::after,
+      .${INDICATOR_CLASS}[data-state="gesture"][data-action="remove"]::after {
+        content: "\\00d7" !important;
+        width: auto !important;
+        height: auto !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        font: 700 11px/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        opacity: 0.8 !important;
       }
       .${INDICATOR_CLASS}[data-state="committed"] {
         background: transparent !important;
@@ -1488,20 +1676,28 @@
         animation: touch-translate-pulse 760ms ease-in-out infinite alternate !important;
       }
       .${INDICATOR_CLASS}[data-state="error"] {
+        width: ${ERROR_HIT_SIZE}px !important;
+        height: ${ERROR_HIT_SIZE}px !important;
+        margin: -${ERROR_HIT_SIZE / 2}px 0 0 -${ERROR_HIT_SIZE / 2}px !important;
         background: transparent !important;
         -webkit-mask: none !important;
         mask: none !important;
-        border: 1.5px solid #c8453c !important;
+        border: 0 !important;
         opacity: 0.9 !important;
         cursor: pointer !important;
         pointer-events: auto !important;
         touch-action: manipulation !important;
+        -webkit-tap-highlight-color: transparent !important;
       }
       .${INDICATOR_CLASS}[data-state="error"]::before {
         content: "" !important;
         position: absolute !important;
-        inset: -14px !important;
-        pointer-events: auto !important;
+        width: 16px !important;
+        height: 16px !important;
+        inset: 50% auto auto 50% !important;
+        border: 1.5px solid #c8453c !important;
+        border-radius: 50% !important;
+        transform: translate(-50%, -50%) !important;
       }
       .${INDICATOR_CLASS}[data-state="error"]::after {
         content: "!" !important;
@@ -1510,6 +1706,12 @@
         color: #c8453c !important;
         font: 700 0.55em/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
         transform: translate(-50%, -52%) !important;
+      }
+      .${INDICATOR_CLASS}[data-state="error"]:active {
+        opacity: 0.62 !important;
+      }
+      .${INDICATOR_CLASS}[data-state="error"]:active::before {
+        transform: translate(-50%, -50%) scale(0.9) !important;
       }
       .${INDICATOR_CLASS}[data-state="error"]:focus-visible {
         outline: 2px solid #c8453c !important;
@@ -1526,11 +1728,15 @@
         from { opacity: 0.3; transform: scale(0.78); }
         to { opacity: 0.72; transform: scale(1); }
       }
+      @keyframes touch-translate-toast-in {
+        from { opacity: 0; translate: 0 4px; scale: 0.98; }
+        to { opacity: 1; translate: 0; scale: 1; }
+      }
       .${TOAST_CLASS} {
         position: fixed !important;
         z-index: 2147483647 !important;
         left: 50% !important;
-        bottom: max(22px, env(safe-area-inset-bottom)) !important;
+        bottom: max(22px, calc(env(safe-area-inset-bottom, 0px) + 12px)) !important;
         transform: translateX(-50%) !important;
         max-width: min(82vw, 420px) !important;
         padding: 9px 12px !important;
@@ -1543,8 +1749,9 @@
         overflow-wrap: anywhere !important;
         white-space: pre-wrap !important;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.24) !important;
-        -webkit-backdrop-filter: blur(12px) !important;
-        backdrop-filter: blur(12px) !important;
+        -webkit-backdrop-filter: blur(12px) saturate(180%) !important;
+        backdrop-filter: blur(12px) saturate(180%) !important;
+        animation: touch-translate-toast-in 160ms ease-out both !important;
       }
       .${TOAST_CLASS} > button {
         -webkit-appearance: none !important;
@@ -1565,6 +1772,11 @@
         cursor: pointer !important;
         pointer-events: auto !important;
         touch-action: manipulation !important;
+        transition: opacity 100ms ease-out, transform 100ms ease-out !important;
+      }
+      .${TOAST_CLASS} > button:active {
+        opacity: 0.72 !important;
+        transform: scale(0.98) !important;
       }
       .${TOAST_CLASS}[data-error="true"] {
         background: rgba(152, 34, 34, 0.94) !important;
@@ -1573,10 +1785,15 @@
         display: none !important;
       }
       @media (prefers-reduced-motion: reduce) {
+        .${TOAST_CLASS},
         .${INDICATOR_CLASS}[data-state="committed"],
         .${INDICATOR_CLASS}[data-state="loading"]::before,
         .${INDICATOR_CLASS}[data-state="loading"]::after {
           animation: none !important;
+        }
+        .${TRANSLATION_CLASS},
+        .${TOAST_CLASS} > button {
+          transition: none !important;
         }
       }
       @media (prefers-reduced-transparency: reduce) {
@@ -1595,6 +1812,8 @@
     `;
     root.append(style);
   }
+
+  // Initialization
 
   addStyles();
   document.addEventListener("touchstart", onTouchStart, {
