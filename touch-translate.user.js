@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.4.2
+// @version      0.5.0
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -40,6 +40,7 @@
   const SWIPE_MAX_Y = 42;
   const SWIPE_MAX_MS = 1200;
   const SWIPE_BATCH_MS = 80;
+  const PAGE_REFRESH_MS = 160;
   const COMMIT_HOLD_MS = 140;
   const ERROR_HIT_SIZE = 44;
   const SAFARI_EDGE_X = 30;
@@ -205,6 +206,10 @@
     return [2, -rect.bottom];
   }
 
+  function isNearViewport(rect, viewportHeight) {
+    return viewportPriority(rect, viewportHeight)[1] <= viewportHeight;
+  }
+
   function parseTranslations(content, expectedLength) {
     const text = String(content || "")
       .trim()
@@ -319,6 +324,7 @@
       hasHorizontalScroller,
       indicatorPosition,
       indicatorFor,
+      isNearViewport,
       makeBatches,
       movedTooFar,
       normalizeText,
@@ -663,6 +669,10 @@
   ) {
     if (!element?.isConnected) return null;
     let indicator = indicatorFor(element);
+    if (state === "loading" && indicator?.dataset.state !== "loading") {
+      removeIndicator(element);
+      indicator = null;
+    }
     const created = !indicator;
     if (!indicator) {
       indicator = document.createElement("button");
@@ -683,6 +693,10 @@
     const parent = state === "loading" ? element : document.documentElement;
     const moved = indicator.parentElement !== parent;
     if (moved) parent.append(indicator);
+    if (state === "loading") {
+      indicator.style.removeProperty("--touch-translate-x");
+      indicator.style.removeProperty("--touch-translate-y");
+    }
     if (state !== "loading" && (created || moved || point)) {
       const position = indicatorPosition(
         point,
@@ -861,12 +875,19 @@
     return text.length >= 160 || linkedCharacters / text.length <= 0.8;
   }
 
-  function collectPageBlocks() {
+  function collectPageBlocks(nearbyOnly = false) {
     const roots = pageContentRoots();
     const viewportHeight = innerHeight || document.documentElement.clientHeight;
     return [...document.querySelectorAll(BLOCK_SELECTOR)]
       .filter((element) => roots.some((root) => root.contains(element)))
-      .map((element) => ({ element, text: sourceText(element) }))
+      .map((element) => ({
+        element,
+        rect: element.getBoundingClientRect(),
+      }))
+      .filter(
+        ({ rect }) => !nearbyOnly || isNearViewport(rect, viewportHeight),
+      )
+      .map((record) => ({ ...record, text: sourceText(record.element) }))
       .filter(
         ({ element, text }) =>
           !element.classList.contains(TRANSLATION_CLASS) &&
@@ -877,11 +898,11 @@
       )
       .sort((a, b) => {
         const [aZone, aDistance] = viewportPriority(
-          a.element.getBoundingClientRect(),
+          a.rect,
           viewportHeight,
         );
         const [bZone, bDistance] = viewportPriority(
-          b.element.getBoundingClientRect(),
+          b.rect,
           viewportHeight,
         );
         return aZone - bZone || aDistance - bDistance;
@@ -1193,22 +1214,69 @@
   }
 
   let pageTask;
-  function startPageTranslation() {
-    if (pageTask) {
-      const task = pageTask;
-      pageTask = undefined;
-      task.cancelled = true;
-      [...task.jobs].forEach((job) => cancelJob(job.element));
-      toast("Page translation cancelled");
+  function stopPageTranslation(task, message = "") {
+    if (pageTask === task) pageTask = undefined;
+    task.cancelled = true;
+    clearTimeout(task.refreshTimer);
+    task.observer.disconnect();
+    globalThis.removeEventListener("scroll", task.refresh, true);
+    [...task.jobs].forEach((job) => cancelJob(job.element));
+    if (message) toast(message);
+  }
+
+  function runPageTranslation(task, showProgress = false) {
+    if (task.cancelled) return;
+    if (task.running) {
+      task.rerun = true;
       return;
     }
-    const task = { cancelled: false, jobs: new Set() };
-    pageTask = task;
-    translateElements(collectPageBlocks(), { showProgress: true, task })
-      .catch(reportError)
+    task.running = translateElements(collectPageBlocks(true), {
+      showProgress,
+      task,
+    })
+      .catch((error) => {
+        if (task.cancelled) return;
+        stopPageTranslation(task);
+        reportError(error);
+      })
       .finally(() => {
-        if (pageTask === task) pageTask = undefined;
+        task.running = null;
+        if (task.rerun && !task.cancelled) {
+          task.rerun = false;
+          runPageTranslation(task);
+        }
       });
+  }
+
+  function startPageTranslation() {
+    if (pageTask) {
+      stopPageTranslation(pageTask, "Automatic page translation stopped");
+      return;
+    }
+    if (!readySettings()) return;
+    const task = {
+      cancelled: false,
+      jobs: new Set(),
+      rerun: false,
+    };
+    task.refresh = () => {
+      clearTimeout(task.refreshTimer);
+      task.refreshTimer = setTimeout(
+        () => runPageTranslation(task),
+        PAGE_REFRESH_MS,
+      );
+    };
+    task.observer = new MutationObserver(task.refresh);
+    task.observer.observe(document.body || document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+    globalThis.addEventListener("scroll", task.refresh, {
+      capture: true,
+      passive: true,
+    });
+    pageTask = task;
+    runPageTranslation(task, true);
   }
 
   // Notifications and menu actions
@@ -1356,7 +1424,10 @@
       removeIndicator(gesture.element, "gesture");
       return;
     }
-    if (indicator && gesture.indicatorCoordinates) {
+    if (
+      indicator?.dataset.state !== "loading" &&
+      gesture.indicatorCoordinates
+    ) {
       indicator.style.setProperty(
         "--touch-translate-x",
         gesture.indicatorCoordinates.x,
@@ -1848,7 +1919,7 @@
 
   GM_registerMenuCommand("Touch Translate: Configure API", configureSettings);
   GM_registerMenuCommand(
-    "Touch Translate: Translate page",
+    "Touch Translate: Auto-translate page",
     startPageTranslation,
   );
   GM_registerMenuCommand("Touch Translate: Export settings", () => {

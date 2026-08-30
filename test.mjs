@@ -34,7 +34,12 @@ vm.runInContext(source, context);
 
 assert.match(source, /opacity: 0\.78 !important;/);
 assert.match(source, /state === "loading" \? element : document\.documentElement/);
+assert.match(
+  source,
+  /state === "loading" && indicator\?\.dataset\.state !== "loading"[\s\S]{0,80}removeIndicator\(element\)/,
+);
 assert.match(source, /font: 700 11px\/16px/);
+assert.match(source, /new MutationObserver\(task\.refresh\)/);
 assert.equal(api.errorHitSize, 44);
 assert.equal(api.normalizeText("  hello\n  world "), "hello world");
 assert.equal(api.pageTextLooksUseful("https://example.com/path"), false);
@@ -126,6 +131,8 @@ assert.deepEqual(
   [...api.viewportPriority({ top: 900, bottom: 980 }, 800)],
   [1, 100],
 );
+assert.equal(api.isNearViewport({ top: 1500, bottom: 1580 }, 800), true);
+assert.equal(api.isNearViewport({ top: 1700, bottom: 1780 }, 800), false);
 
 const touch = { identifier: 7, clientX: 40, clientY: 30 };
 const touchList = { 0: touch, length: 1 };
