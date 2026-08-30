@@ -42,17 +42,11 @@ assert.match(
   source,
   /state === "loading" && indicator\?\.dataset\.state !== "loading"[\s\S]{0,80}removeIndicator\(element\)/,
 );
-assert.match(
-  source,
-  /data-state="error"\][\s\S]*?pointer-events: auto !important;/,
-);
-assert.match(
-  source,
-  /indicator\.addEventListener\("click"[\s\S]{0,240}toast\(/,
-);
+assert.doesNotMatch(source, /indicator\.addEventListener\("click"/);
+assert.match(source, /document\.createElement\("dialog"\)/);
+assert.match(source, /translateElements\(elements\)\.catch\(reportError\)/);
 assert.match(source, /font: 700 11px\/16px/);
 assert.match(source, /new MutationObserver\(task\.refresh\)/);
-assert.equal(api.errorHitSize, 44);
 assert.equal(api.normalizeText("  hello\n  world "), "hello world");
 assert.equal(api.pageTextLooksUseful("https://example.com/path"), false);
 assert.equal(api.pageTextLooksUseful("2026-08-29"), false);
@@ -73,6 +67,14 @@ assert.deepEqual(
     ),
   ],
   ["one", "two"],
+);
+assert.throws(
+  () => api.parseTranslations("not json", 1),
+  /Response format mismatch[\s\S]*AI output:\nnot json/,
+);
+assert.throws(
+  () => api.parseTranslations('{"translations":["one"]}', 2),
+  /Expected 2 translations, received 1/,
 );
 const inline = api.parseInlineTranslation(
   "[[TT0]]A translated lead[[/TT0]] [[TT1]]a colored quote[[/TT1]]",
@@ -178,10 +180,27 @@ const successfulRequest = api.requestTranslations(["hello"], {
   model: "fast-model",
   targetLanguage: "zh-TW",
 });
+const requestBody = JSON.parse(requestOptions.data);
+assert.equal(requestBody.response_format.type, "json_schema");
+assert.equal(
+  requestBody.response_format.json_schema.schema.properties.translations.minItems,
+  1,
+);
+assert.equal(
+  requestBody.response_format.json_schema.schema.properties.translations.maxItems,
+  1,
+);
 requestOptions.onload({
   status: 200,
   responseText: JSON.stringify({
-    choices: [{ message: { content: '["hello translated"]' } }],
+    choices: [
+      {
+        finish_reason: "stop",
+        message: {
+          content: '{"translations":["hello translated"]}',
+        },
+      },
+    ],
   }),
 });
 assert.deepEqual([...(await successfulRequest.promise)], ["hello translated"]);

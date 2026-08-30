@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.1
+// @version      0.5.2
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -23,6 +23,7 @@
   const BLOCK_SELECTOR = "p, li, blockquote, h1, h2, h3, h4, h5, h6";
   const TRANSLATION_CLASS = "touch-translate__translation";
   const INDICATOR_CLASS = "touch-translate__indicator";
+  const ERROR_DIALOG_CLASS = "touch-translate__error-dialog";
   const TOAST_CLASS = "touch-translate__toast";
   const indicators = new WeakMap();
   const removingTranslations = new WeakSet();
@@ -42,7 +43,6 @@
   const SWIPE_BATCH_MS = 80;
   const PAGE_REFRESH_MS = 160;
   const COMMIT_HOLD_MS = 140;
-  const ERROR_HIT_SIZE = 44;
   const SAFARI_EDGE_X = 30;
   const FOUR_FINGER_MAX_MOVE = 24;
   const FOUR_FINGER_MAX_MS = 700;
@@ -210,20 +210,49 @@
     return viewportPriority(rect, viewportHeight)[1] <= viewportHeight;
   }
 
+  function responseFormatError(reason, content) {
+    return new Error(
+      [
+        "Response format mismatch.",
+        reason,
+        'Expected: {"translations":["..."]}',
+        "",
+        `AI output:\n${String(content || "").slice(0, 2000) || "(empty)"}`,
+      ].join("\n"),
+    );
+  }
+
   function parseTranslations(content, expectedLength) {
     const text = String(content || "")
       .trim()
       .replace(/^```(?:json)?\s*/i, "")
       .replace(/\s*```$/, "");
-    const parsed = JSON.parse(text);
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      throw responseFormatError(`JSON error: ${error.message}`, text);
+    }
     const translations = Array.isArray(parsed) ? parsed : parsed?.translations;
-    if (
-      !Array.isArray(translations) ||
-      translations.length !== expectedLength ||
-      translations.some((item) => typeof item !== "string" || !item.trim())
-    ) {
-      throw new Error(
-        "The API response must be a JSON string array of the expected length.",
+    if (!Array.isArray(translations)) {
+      throw responseFormatError(
+        'The response is missing a "translations" array.',
+        text,
+      );
+    }
+    if (translations.length !== expectedLength) {
+      throw responseFormatError(
+        `Expected ${expectedLength} translations, received ${translations.length}.`,
+        text,
+      );
+    }
+    const invalidIndex = translations.findIndex(
+      (item) => typeof item !== "string" || !item.trim(),
+    );
+    if (invalidIndex >= 0) {
+      throw responseFormatError(
+        `Translation ${invalidIndex + 1} is empty or is not text.`,
+        text,
       );
     }
     return translations.map((item) => item.trim());
@@ -300,7 +329,6 @@
     Object.assign(globalThis.__TOUCH_TRANSLATE_TEST__, {
       cleanSettings,
       endpointFor,
-      errorHitSize: ERROR_HIT_SIZE,
       errorMessageFor,
       groupRecords,
       hashCacheKey,
@@ -487,7 +515,7 @@
       "Preserve meaning, tone, and paragraph breaks.",
       "When paired [[TT0]]...[[/TT0]] markers appear, preserve every marker exactly, including its number and order.",
       "Translate only text enclosed by those markers.",
-      "Return only a JSON array of translated strings in the same order and length.",
+      'Return a JSON object with a "translations" array in the same order and length.',
     ].join(" ");
 
     let abortRequest = () => {};
@@ -520,24 +548,75 @@
             { role: "system", content: systemPrompt },
             { role: "user", content: JSON.stringify(texts) },
           ],
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "translation_batch",
+              strict: true,
+              schema: {
+                type: "object",
+                properties: {
+                  translations: {
+                    type: "array",
+                    items: { type: "string" },
+                    minItems: texts.length,
+                    maxItems: texts.length,
+                  },
+                },
+                required: ["translations"],
+                additionalProperties: false,
+              },
+            },
+          },
         }),
         anonymous: true,
         timeout: 60000,
         onload(response) {
           try {
-            const body = JSON.parse(response.responseText || "{}");
+            const responseText = response.responseText || "{}";
+            let body;
+            try {
+              body = JSON.parse(responseText);
+            } catch (error) {
+              throw new Error(
+                [
+                  "The translation API returned invalid JSON.",
+                  `JSON error: ${error.message}`,
+                  "",
+                  `API response:\n${responseText.slice(0, 2000)}`,
+                ].join("\n"),
+              );
+            }
             if (response.status < 200 || response.status >= 300) {
               const apiMessage =
                 body?.error?.message ||
                 (typeof body?.error === "string" ? body.error : "") ||
                 body?.message;
               throw new Error(
-                apiMessage || `API HTTP ${response.status}`,
+                `Translation API error (HTTP ${response.status}).\n${apiMessage || "No error details were returned."}`,
               );
             }
-            let content = body?.choices?.[0]?.message?.content;
+            const choice = body?.choices?.[0];
+            const refusal = choice?.message?.refusal;
+            if (refusal) {
+              throw new Error(`The AI refused the translation.\n${refusal}`);
+            }
+            let content = choice?.message?.content;
             if (Array.isArray(content)) {
               content = content.map((part) => part?.text || "").join("");
+            }
+            const finishReason = String(
+              choice?.finish_reason || "",
+            ).toLowerCase();
+            if (finishReason && finishReason !== "stop") {
+              throw new Error(
+                [
+                  "The AI response was incomplete.",
+                  `Finish reason: ${finishReason}`,
+                  "",
+                  `AI output:\n${String(content || "").slice(0, 2000) || "(empty)"}`,
+                ].join("\n"),
+              );
             }
             finish(resolve, parseTranslations(content, texts.length));
           } catch (error) {
@@ -638,13 +717,10 @@
     return null;
   }
 
-  const indicatorErrors = new WeakMap();
-
   function showIndicator(
     element,
     state,
     progress = 0,
-    errorMessage = "",
     action = "",
     ready = false,
   ) {
@@ -656,35 +732,14 @@
     }
     const created = !indicator;
     if (!indicator) {
-      indicator = document.createElement("button");
-      indicator.type = "button";
+      indicator = document.createElement("span");
       indicator.className = INDICATOR_CLASS;
-      indicator.addEventListener("click", (event) => {
-        if (indicator.dataset.state !== "error") return;
-        event.preventDefault();
-        event.stopPropagation();
-        toast(
-          indicatorErrors.get(indicator) || "Translation failed",
-          true,
-          8000,
-        );
-      });
+      indicator.setAttribute("aria-hidden", "true");
       indicators.set(element, indicator);
     }
     if (indicator.parentElement !== element) element.append(indicator);
     if (created) indicator.style.color = getComputedStyle(element).color;
-    const isError = state === "error";
     indicator.dataset.state = state;
-    indicator.tabIndex = isError ? 0 : -1;
-    indicator.title = isError ? "Show translation error" : "";
-    if (isError) {
-      if (errorMessage) indicatorErrors.set(indicator, errorMessage);
-      indicator.removeAttribute("aria-hidden");
-      indicator.setAttribute("aria-label", "Show translation error");
-    } else {
-      indicator.setAttribute("aria-hidden", "true");
-      indicator.removeAttribute("aria-label");
-    }
     if (state === "gesture") {
       indicator.dataset.action = action;
       indicator.dataset.ready = String(ready);
@@ -703,7 +758,6 @@
   function removeIndicator(element, state) {
     const indicator = indicatorFor(element);
     if (indicator && (!state || indicator.dataset.state === state)) {
-      indicatorErrors.delete(indicator);
       indicators.delete(element);
       indicator.remove();
     }
@@ -921,14 +975,14 @@
     return job;
   }
 
-  function settleJob(job, state = "done", errorMessage = "") {
+  function settleJob(job, state = "done") {
     if (pendingJobs.get(job.element) !== job) return;
     clearTimeout(job.indicatorTimer);
     pendingJobs.delete(job.element);
     detachJob(job);
     restoreAriaBusy(job);
     if (state === "error") {
-      showIndicator(job.element, "error", 0, errorMessage);
+      showIndicator(job.element, "error");
     } else {
       removeIndicator(job.element);
     }
@@ -1020,7 +1074,7 @@
     }
     let activeTotal = total;
     if (showProgress) {
-      toast(`Translating ${completed}/${activeTotal}`, false, 0);
+      toast(`Translating ${completed}/${activeTotal}`, 0);
     }
 
     try {
@@ -1113,7 +1167,7 @@
           saveCache(cache);
         }
         if (showProgress) {
-          toast(`Translating ${completed}/${activeTotal}`, false, 0);
+          toast(`Translating ${completed}/${activeTotal}`, 0);
         }
       }
     } catch (error) {
@@ -1121,11 +1175,15 @@
         [...currentTask.jobs].forEach((job) => settleJob(job));
         return;
       }
-      const message = errorMessageFor(error);
-      [...currentTask.jobs].forEach((job) =>
-        settleJob(job, "error", message),
-      );
-      throw error;
+      const failedJobs = [...currentTask.jobs];
+      const failedElements = failedJobs
+        .map((job) => job.element)
+        .filter((element) => element?.isConnected);
+      failedJobs.forEach((job) => settleJob(job, "error"));
+      const failure =
+        error instanceof Error ? error : new Error(errorMessageFor(error));
+      failure.retryElements = failedElements;
+      throw failure;
     }
     if (showProgress && !currentTask.cancelled) {
       toast(`Translated ${completed} blocks`);
@@ -1134,7 +1192,9 @@
 
   function reportError(error) {
     console.error("[Touch Translate]", error);
-    toast(errorMessageFor(error), true);
+    const notification = document.querySelector(`.${TOAST_CLASS}`);
+    if (notification) notification.hidden = true;
+    showErrorDialog(error, error?.retryElements);
   }
 
   function flushSwipeBatch() {
@@ -1243,11 +1303,7 @@
   // Notifications and menu actions
 
   let toastTimer;
-  function toast(
-    message,
-    isError = false,
-    timeout = isError ? 4200 : 1800,
-  ) {
+  function toast(message, timeout = 1800) {
     let element = document.querySelector(`.${TOAST_CLASS}`);
     if (!element) {
       element = document.createElement("div");
@@ -1256,9 +1312,8 @@
       document.documentElement.append(element);
     }
     element.textContent = message;
-    element.dataset.error = String(isError);
-    element.setAttribute("role", isError ? "alert" : "status");
-    element.setAttribute("aria-live", isError ? "assertive" : "polite");
+    element.setAttribute("role", "status");
+    element.setAttribute("aria-live", "polite");
     element.hidden = false;
     clearTimeout(toastTimer);
     toastTimer = timeout
@@ -1267,6 +1322,69 @@
         }, timeout)
       : undefined;
     return element;
+  }
+
+  let dialogRetryElements = [];
+  function showErrorDialog(error, retryElements = []) {
+    let dialog = document.querySelector(`.${ERROR_DIALOG_CLASS}`);
+    if (!dialog) {
+      dialog = document.createElement("dialog");
+      dialog.className = ERROR_DIALOG_CLASS;
+      dialog.setAttribute("aria-labelledby", "touch-translate-error-title");
+      dialog.setAttribute("aria-describedby", "touch-translate-error-details");
+
+      const title = document.createElement("h2");
+      title.id = "touch-translate-error-title";
+      title.textContent = "Translation failed";
+
+      const details = document.createElement("pre");
+      details.id = "touch-translate-error-details";
+
+      const actions = document.createElement("div");
+      const close = document.createElement("button");
+      close.type = "button";
+      close.dataset.action = "close";
+      close.textContent = "Close";
+      close.autofocus = true;
+
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.dataset.action = "retry";
+      retry.textContent = "Retry";
+
+      const closeDialog = () => {
+        dialogRetryElements = [];
+        if (typeof dialog.close === "function") dialog.close();
+        else dialog.removeAttribute("open");
+      };
+      close.addEventListener("click", closeDialog);
+      dialog.addEventListener("cancel", () => {
+        dialogRetryElements = [];
+      });
+      retry.addEventListener("click", () => {
+        const elements = dialogRetryElements.filter(
+          (element) => element?.isConnected && !translationAfter(element),
+        );
+        closeDialog();
+        if (elements.length) translateElements(elements).catch(reportError);
+      });
+
+      actions.append(close, retry);
+      dialog.append(title, details, actions);
+      (document.body || document.documentElement).append(dialog);
+    }
+
+    dialogRetryElements = [...new Set(retryElements || [])].filter(
+      (element) => element?.isConnected && !translationAfter(element),
+    );
+    dialog.querySelector("pre").textContent = errorMessageFor(error);
+    dialog.querySelector('[data-action="retry"]').disabled =
+      !dialogRetryElements.length;
+    if (!dialog.open) {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+    dialog.querySelector('[data-action="close"]').focus();
   }
 
   function showMenuAction(label, action) {
@@ -1281,7 +1399,7 @@
       },
       { once: true },
     );
-    const element = toast("", false, 15000);
+    const element = toast("", 15000);
     element.replaceChildren(button);
     element.removeAttribute("role");
     element.removeAttribute("aria-live");
@@ -1482,7 +1600,6 @@
       swipe.element,
       "gesture",
       dx / SWIPE_MIN_X,
-      "",
       swipe.action,
       swipeShouldCommit(dx, dy, now - swipe.at, velocityX),
     );
@@ -1690,29 +1807,18 @@
         animation: touch-translate-pulse 760ms ease-in-out infinite alternate !important;
       }
       .${INDICATOR_CLASS}[data-state="error"] {
-        width: ${ERROR_HIT_SIZE}px !important;
-        height: ${ERROR_HIT_SIZE}px !important;
-        margin: -${(ERROR_HIT_SIZE - 16) / 2}px !important;
-        margin-inline-start: calc(0.38em - ${(ERROR_HIT_SIZE - 16) / 2}px) !important;
         background: transparent !important;
         -webkit-mask: none !important;
         mask: none !important;
         border: 0 !important;
         opacity: 0.9 !important;
-        cursor: pointer !important;
-        pointer-events: auto !important;
-        touch-action: manipulation !important;
-        -webkit-tap-highlight-color: transparent !important;
       }
       .${INDICATOR_CLASS}[data-state="error"]::before {
         content: "" !important;
         position: absolute !important;
-        width: 16px !important;
-        height: 16px !important;
-        inset: 50% auto auto 50% !important;
+        inset: 0 !important;
         border: 1.5px solid #c8453c !important;
         border-radius: 50% !important;
-        transform: translate(-50%, -50%) !important;
       }
       .${INDICATOR_CLASS}[data-state="error"]::after {
         content: "!" !important;
@@ -1721,16 +1827,6 @@
         color: #c8453c !important;
         font: 700 0.55em/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
         transform: translate(-50%, -52%) !important;
-      }
-      .${INDICATOR_CLASS}[data-state="error"]:active {
-        opacity: 0.62 !important;
-      }
-      .${INDICATOR_CLASS}[data-state="error"]:active::before {
-        transform: translate(-50%, -50%) scale(0.9) !important;
-      }
-      .${INDICATOR_CLASS}[data-state="error"]:focus-visible {
-        outline: 2px solid #c8453c !important;
-        outline-offset: 3px !important;
       }
       @keyframes touch-translate-spin {
         to { transform: rotate(1turn); }
@@ -1746,6 +1842,85 @@
       @keyframes touch-translate-toast-in {
         from { opacity: 0; translate: 0 4px; scale: 0.98; }
         to { opacity: 1; translate: 0; scale: 1; }
+      }
+      .${ERROR_DIALOG_CLASS} {
+        position: fixed !important;
+        inset: 0 !important;
+        width: min(92vw, 520px) !important;
+        max-width: 520px !important;
+        max-height: min(80dvh, 640px) !important;
+        margin: auto !important;
+        padding: 20px !important;
+        border: 1px solid rgba(0, 0, 0, 0.16) !important;
+        border-radius: 8px !important;
+        box-sizing: border-box !important;
+        background: #fff !important;
+        color: #18181a !important;
+        font: 15px/1.45 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: 0 !important;
+        text-align: start !important;
+        overflow: auto !important;
+        box-shadow: 0 18px 56px rgba(0, 0, 0, 0.28) !important;
+      }
+      .${ERROR_DIALOG_CLASS}::backdrop {
+        background: rgba(0, 0, 0, 0.48) !important;
+        -webkit-backdrop-filter: blur(2px) !important;
+        backdrop-filter: blur(2px) !important;
+      }
+      .${ERROR_DIALOG_CLASS} > h2 {
+        margin: 0 !important;
+        color: inherit !important;
+        font: 650 20px/1.2 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: 0 !important;
+      }
+      .${ERROR_DIALOG_CLASS} > pre {
+        max-height: min(48dvh, 360px) !important;
+        margin: 16px 0 20px !important;
+        padding: 14px 0 !important;
+        border-block: 1px solid rgba(0, 0, 0, 0.12) !important;
+        color: inherit !important;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace !important;
+        letter-spacing: 0 !important;
+        overflow: auto !important;
+        overflow-wrap: anywhere !important;
+        white-space: pre-wrap !important;
+      }
+      .${ERROR_DIALOG_CLASS} > div {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 8px !important;
+      }
+      .${ERROR_DIALOG_CLASS} button {
+        -webkit-appearance: none !important;
+        appearance: none !important;
+        flex: 1 1 120px !important;
+        min-height: 44px !important;
+        padding: 0 16px !important;
+        border: 1px solid rgba(0, 0, 0, 0.18) !important;
+        border-radius: 6px !important;
+        box-sizing: border-box !important;
+        background: #f1f1f3 !important;
+        color: #18181a !important;
+        font: 600 14px/1.2 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: 0 !important;
+        cursor: pointer !important;
+        touch-action: manipulation !important;
+      }
+      .${ERROR_DIALOG_CLASS} button[data-action="retry"] {
+        border-color: #18181a !important;
+        background: #18181a !important;
+        color: #fff !important;
+      }
+      .${ERROR_DIALOG_CLASS} button:active {
+        opacity: 0.7 !important;
+      }
+      .${ERROR_DIALOG_CLASS} button:focus-visible {
+        outline: 2px solid #2878d0 !important;
+        outline-offset: 2px !important;
+      }
+      .${ERROR_DIALOG_CLASS} button:disabled {
+        cursor: default !important;
+        opacity: 0.42 !important;
       }
       .${TOAST_CLASS} {
         position: fixed !important;
@@ -1793,9 +1968,6 @@
         opacity: 0.72 !important;
         transform: scale(0.98) !important;
       }
-      .${TOAST_CLASS}[data-error="true"] {
-        background: rgba(152, 34, 34, 0.94) !important;
-      }
       .${TOAST_CLASS}[hidden] {
         display: none !important;
       }
@@ -1816,6 +1988,26 @@
           background: rgb(22, 22, 24) !important;
           -webkit-backdrop-filter: none !important;
           backdrop-filter: none !important;
+        }
+      }
+      @media (prefers-color-scheme: dark) {
+        .${ERROR_DIALOG_CLASS} {
+          border-color: rgba(255, 255, 255, 0.18) !important;
+          background: #1c1c1e !important;
+          color: #f5f5f7 !important;
+        }
+        .${ERROR_DIALOG_CLASS} > pre {
+          border-color: rgba(255, 255, 255, 0.14) !important;
+        }
+        .${ERROR_DIALOG_CLASS} button {
+          border-color: rgba(255, 255, 255, 0.2) !important;
+          background: #323236 !important;
+          color: #f5f5f7 !important;
+        }
+        .${ERROR_DIALOG_CLASS} button[data-action="retry"] {
+          border-color: #f5f5f7 !important;
+          background: #f5f5f7 !important;
+          color: #18181a !important;
         }
       }
       @media (prefers-contrast: more) {
