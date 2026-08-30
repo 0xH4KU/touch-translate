@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.0
+// @version      0.5.1
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -294,23 +294,6 @@
       : 0;
   }
 
-  function indicatorPosition(point, rect, viewport) {
-    const clamp = (value, minimum, maximum) =>
-      Math.max(minimum, Math.min(maximum, value));
-    const edgeInset = ERROR_HIT_SIZE / 2;
-    const followsTouch = Number.isFinite(point?.x) && Number.isFinite(point?.y);
-    const x = followsTouch
-      ? clamp(point.x, edgeInset, viewport.width - edgeInset)
-      : clamp(rect.right - 10, edgeInset, viewport.width - edgeInset);
-    const y = followsTouch
-      ? clamp(point.y - 28, edgeInset, viewport.height - edgeInset)
-      : rect.top + Math.min(18, Math.max(8, rect.height / 2));
-    return {
-      left: x + viewport.scrollX,
-      top: y + viewport.scrollY,
-    };
-  }
-
   // Test interface
 
   if (globalThis.__TOUCH_TRANSLATE_TEST__) {
@@ -322,7 +305,6 @@
       groupRecords,
       hashCacheKey,
       hasHorizontalScroller,
-      indicatorPosition,
       indicatorFor,
       isNearViewport,
       makeBatches,
@@ -663,7 +645,6 @@
     state,
     progress = 0,
     errorMessage = "",
-    point,
     action = "",
     ready = false,
   ) {
@@ -690,28 +671,7 @@
       });
       indicators.set(element, indicator);
     }
-    const inline = state !== "error";
-    const parent = inline ? element : document.documentElement;
-    const moved = indicator.parentElement !== parent;
-    if (moved) parent.append(indicator);
-    if (inline) {
-      indicator.style.removeProperty("--touch-translate-x");
-      indicator.style.removeProperty("--touch-translate-y");
-    }
-    if (!inline && (created || moved || point)) {
-      const position = indicatorPosition(
-        point,
-        point ? null : element.getBoundingClientRect(),
-        {
-          width: innerWidth || document.documentElement.clientWidth,
-          height: innerHeight || document.documentElement.clientHeight,
-          scrollX: globalThis.scrollX || 0,
-          scrollY: globalThis.scrollY || 0,
-        },
-      );
-      indicator.style.setProperty("--touch-translate-x", `${position.left}px`);
-      indicator.style.setProperty("--touch-translate-y", `${position.top}px`);
-    }
+    if (indicator.parentElement !== element) element.append(indicator);
     if (created) indicator.style.color = getComputedStyle(element).color;
     const isError = state === "error";
     indicator.dataset.state = state;
@@ -937,7 +897,7 @@
     if (abortWhenUnused && !request.jobs.size) request.abort();
   }
 
-  function beginJob(element, committed = false, point) {
+  function beginJob(element, committed = false) {
     const existing = pendingJobs.get(element);
     if (existing) return existing;
     const job = {
@@ -951,7 +911,7 @@
     pendingJobs.set(element, job);
     element.setAttribute("aria-busy", "true");
     if (committed) {
-      showIndicator(element, "committed", 0, "", point);
+      showIndicator(element, "committed");
       job.indicatorTimer = setTimeout(() => {
         if (pendingJobs.get(element) === job) showIndicator(element, "loading");
       }, COMMIT_HOLD_MS);
@@ -1191,14 +1151,14 @@
     );
   }
 
-  function scheduleTranslation(element, point) {
-    const job = beginJob(element, true, point);
+  function scheduleTranslation(element) {
+    const job = beginJob(element, true);
     swipeBatch.set(element, job);
     clearTimeout(swipeBatchTimer);
     swipeBatchTimer = setTimeout(flushSwipeBatch, SWIPE_BATCH_MS);
   }
 
-  function handleSwipe(element, point) {
+  function handleSwipe(element) {
     if (!element?.isConnected) return;
     if (element.classList.contains(TRANSLATION_CLASS)) {
       removeTranslation(element);
@@ -1211,7 +1171,7 @@
       removeIndicator(element);
       return;
     }
-    scheduleTranslation(element, point);
+    scheduleTranslation(element);
   }
 
   let pageTask;
@@ -1416,27 +1376,12 @@
 
   function restoreGestureIndicator(gesture) {
     if (indicatorFor(gesture?.element)?.dataset.state !== "gesture") return;
-    let indicator;
     if (pendingJobs.has(gesture.element)) {
-      indicator = showIndicator(gesture.element, "loading");
+      showIndicator(gesture.element, "loading");
     } else if (gesture.indicatorState) {
-      indicator = showIndicator(gesture.element, gesture.indicatorState);
+      showIndicator(gesture.element, gesture.indicatorState);
     } else {
       removeIndicator(gesture.element, "gesture");
-      return;
-    }
-    if (
-      indicator?.dataset.state !== "loading" &&
-      gesture.indicatorCoordinates
-    ) {
-      indicator.style.setProperty(
-        "--touch-translate-x",
-        gesture.indicatorCoordinates.x,
-      );
-      indicator.style.setProperty(
-        "--touch-translate-y",
-        gesture.indicatorCoordinates.y,
-      );
     }
   }
 
@@ -1499,12 +1444,6 @@
       at: now,
       element,
       identifier: touch.identifier,
-      indicatorCoordinates: indicator
-        ? {
-            x: indicator.style.getPropertyValue("--touch-translate-x"),
-            y: indicator.style.getPropertyValue("--touch-translate-y"),
-          }
-        : null,
       indicatorState: indicator?.dataset.state || null,
       phase: "possible",
       samples: [{ at: now, x: touch.clientX }],
@@ -1544,7 +1483,6 @@
       "gesture",
       dx / SWIPE_MIN_X,
       "",
-      { x: touch.clientX, y: touch.clientY },
       swipe.action,
       swipeShouldCommit(dx, dy, now - swipe.at, velocityX),
     );
@@ -1588,7 +1526,7 @@
       swipeShouldCommit(dx, dy, now - gesture.at, velocityX)
     ) {
       if (event.cancelable) event.preventDefault();
-      handleSwipe(gesture.element, { x: touch.clientX, y: touch.clientY });
+      handleSwipe(gesture.element);
     } else {
       restoreGestureIndicator(gesture);
     }
@@ -1621,18 +1559,15 @@
       }
       .${INDICATOR_CLASS} {
         --touch-translate-progress: 0deg;
-        --touch-translate-x: 0px;
-        --touch-translate-y: 0px;
         -webkit-appearance: none !important;
         appearance: none !important;
-        display: block !important;
-        position: absolute !important;
+        display: inline-block !important;
+        position: relative !important;
         z-index: 2147483646 !important;
-        left: 0 !important;
-        top: 0 !important;
         width: 16px !important;
         height: 16px !important;
-        margin: -8px 0 0 -8px !important;
+        margin: 0 !important;
+        margin-inline-start: 0.38em !important;
         padding: 0 !important;
         border: 0 solid transparent !important;
         border-radius: 50% !important;
@@ -1641,24 +1576,14 @@
         font: 16px/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
         letter-spacing: 0 !important;
         text-indent: 0 !important;
-        translate: var(--touch-translate-x) var(--touch-translate-y) !important;
-        will-change: translate !important;
+        translate: none !important;
+        vertical-align: middle !important;
         pointer-events: none !important;
       }
       .${INDICATOR_CLASS}::before,
       .${INDICATOR_CLASS}::after {
         box-sizing: border-box !important;
         pointer-events: none !important;
-      }
-      .${INDICATOR_CLASS}[data-state="gesture"],
-      .${INDICATOR_CLASS}[data-state="committed"],
-      .${INDICATOR_CLASS}[data-state="loading"] {
-        display: inline-block !important;
-        position: relative !important;
-        margin: 0 !important;
-        margin-inline-start: 0.38em !important;
-        translate: none !important;
-        vertical-align: middle !important;
       }
       .${INDICATOR_CLASS}[data-state="gesture"] {
         background: transparent !important;
@@ -1767,7 +1692,8 @@
       .${INDICATOR_CLASS}[data-state="error"] {
         width: ${ERROR_HIT_SIZE}px !important;
         height: ${ERROR_HIT_SIZE}px !important;
-        margin: -${ERROR_HIT_SIZE / 2}px 0 0 -${ERROR_HIT_SIZE / 2}px !important;
+        margin: -${(ERROR_HIT_SIZE - 16) / 2}px !important;
+        margin-inline-start: calc(0.38em - ${(ERROR_HIT_SIZE - 16) / 2}px) !important;
         background: transparent !important;
         -webkit-mask: none !important;
         mask: none !important;

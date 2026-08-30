@@ -33,15 +33,22 @@ const context = vm.createContext({
 vm.runInContext(source, context);
 
 assert.match(source, /opacity: 0\.78 !important;/);
-assert.match(source, /const inline = state !== "error";/);
-assert.match(source, /const parent = inline \? element : document\.documentElement/);
 assert.match(
   source,
-  /data-state="gesture"\],\s+\.\$\{INDICATOR_CLASS\}\[data-state="committed"\],\s+\.\$\{INDICATOR_CLASS\}\[data-state="loading"\]/,
+  /if \(indicator\.parentElement !== element\) element\.append\(indicator\)/,
 );
+assert.doesNotMatch(source, /indicatorPosition/);
 assert.match(
   source,
   /state === "loading" && indicator\?\.dataset\.state !== "loading"[\s\S]{0,80}removeIndicator\(element\)/,
+);
+assert.match(
+  source,
+  /data-state="error"\][\s\S]*?pointer-events: auto !important;/,
+);
+assert.match(
+  source,
+  /indicator\.addEventListener\("click"[\s\S]{0,240}toast\(/,
 );
 assert.match(source, /font: 700 11px\/16px/);
 assert.match(source, /new MutationObserver\(task\.refresh\)/);
@@ -147,15 +154,6 @@ assert.equal(
   true,
 );
 assert.equal(api.indicatorFor(null), null);
-const position = api.indicatorPosition(
-  { x: 385, y: 20 },
-  null,
-  { width: 390, height: 844, scrollX: 0, scrollY: 100 },
-);
-assert.deepEqual(
-  { ...position },
-  { left: 368, top: 122 },
-);
 assert.equal(api.projectedSwipeX(30, 0.4), 66);
 assert.equal(api.swipeVelocity([{ x: 10, at: 0 }, { x: 50, at: 100 }]), 0.4);
 assert.equal(api.swipeShouldCommit(60, 0, 500), true);
