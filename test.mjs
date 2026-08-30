@@ -33,7 +33,12 @@ const context = vm.createContext({
 vm.runInContext(source, context);
 
 assert.match(source, /opacity: 0\.78 !important;/);
-assert.match(source, /state === "loading" \? element : document\.documentElement/);
+assert.match(source, /const inline = state !== "error";/);
+assert.match(source, /const parent = inline \? element : document\.documentElement/);
+assert.match(
+  source,
+  /data-state="gesture"\],\s+\.\$\{INDICATOR_CLASS\}\[data-state="committed"\],\s+\.\$\{INDICATOR_CLASS\}\[data-state="loading"\]/,
+);
 assert.match(
   source,
   /state === "loading" && indicator\?\.dataset\.state !== "loading"[\s\S]{0,80}removeIndicator\(element\)/,

@@ -690,14 +690,15 @@
       });
       indicators.set(element, indicator);
     }
-    const parent = state === "loading" ? element : document.documentElement;
+    const inline = state !== "error";
+    const parent = inline ? element : document.documentElement;
     const moved = indicator.parentElement !== parent;
     if (moved) parent.append(indicator);
-    if (state === "loading") {
+    if (inline) {
       indicator.style.removeProperty("--touch-translate-x");
       indicator.style.removeProperty("--touch-translate-y");
     }
-    if (state !== "loading" && (created || moved || point)) {
+    if (!inline && (created || moved || point)) {
       const position = indicatorPosition(
         point,
         point ? null : element.getBoundingClientRect(),
@@ -1649,6 +1650,16 @@
         box-sizing: border-box !important;
         pointer-events: none !important;
       }
+      .${INDICATOR_CLASS}[data-state="gesture"],
+      .${INDICATOR_CLASS}[data-state="committed"],
+      .${INDICATOR_CLASS}[data-state="loading"] {
+        display: inline-block !important;
+        position: relative !important;
+        margin: 0 !important;
+        margin-inline-start: 0.38em !important;
+        translate: none !important;
+        vertical-align: middle !important;
+      }
       .${INDICATOR_CLASS}[data-state="gesture"] {
         background: transparent !important;
         -webkit-mask: none !important;
@@ -1727,12 +1738,6 @@
         transform: translate(-50%, -50%) !important;
       }
       .${INDICATOR_CLASS}[data-state="loading"] {
-        display: inline-block !important;
-        position: relative !important;
-        margin: 0 !important;
-        margin-inline-start: 0.38em !important;
-        translate: none !important;
-        vertical-align: middle !important;
         background: transparent !important;
         -webkit-mask: none !important;
         mask: none !important;
