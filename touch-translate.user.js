@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.2
+// @version      0.5.3
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -36,10 +36,9 @@
   const FIRST_BATCH_MAX_CHARS = 1600;
   const SWIPE_MIN_X = 60;
   const SWIPE_FLICK_MIN_X = 24;
-  const SWIPE_INTENT_PX = 10;
+  const SWIPE_INTENT_PX = 16;
+  const SWIPE_SCROLL_PX = 24;
   const SWIPE_PROJECTION_MS = 90;
-  const SWIPE_MAX_Y = 42;
-  const SWIPE_MAX_MS = 1200;
   const SWIPE_BATCH_MS = 80;
   const PAGE_REFRESH_MS = 160;
   const COMMIT_HOLD_MS = 140;
@@ -305,13 +304,26 @@
     return dx + velocityX * SWIPE_PROJECTION_MS;
   }
 
-  function swipeShouldCommit(dx, dy, elapsed, velocityX = 0) {
+  function swipeIntent(dx, dy) {
+    const absX = Math.abs(dx);
+    const absY = Math.abs(dy);
+    if (dx >= SWIPE_INTENT_PX && dx >= absY) return "horizontal";
+    if (
+      dx <= -SWIPE_INTENT_PX ||
+      (absY >= SWIPE_SCROLL_PX && absY > absX * 1.25)
+    ) {
+      return "cancel";
+    }
+    return "possible";
+  }
+
+  function swipeShouldCommit(dx, velocityX = 0, ready = false) {
+    if (ready) return dx >= SWIPE_FLICK_MIN_X;
     return (
-      dx >= SWIPE_FLICK_MIN_X &&
-      velocityX >= -0.1 &&
-      projectedSwipeX(dx, velocityX) >= SWIPE_MIN_X &&
-      Math.abs(dy) <= SWIPE_MAX_Y &&
-      elapsed <= SWIPE_MAX_MS
+      dx >= SWIPE_MIN_X ||
+      (dx >= SWIPE_FLICK_MIN_X &&
+        velocityX > 0 &&
+        projectedSwipeX(dx, velocityX) >= SWIPE_MIN_X)
     );
   }
 
@@ -344,6 +356,7 @@
       pointFor,
       projectedSwipeX,
       requestTranslations,
+      swipeIntent,
       swipeShouldCommit,
       swipeVelocity,
       swipeElementFor,
@@ -1564,6 +1577,7 @@
       identifier: touch.identifier,
       indicatorState: indicator?.dataset.state || null,
       phase: "possible",
+      ready: false,
       samples: [{ at: now, x: touch.clientX }],
       x: touch.clientX,
       y: touch.clientY,
@@ -1581,13 +1595,11 @@
     if (!touch) return;
     const dx = touch.clientX - swipe.x;
     const dy = touch.clientY - swipe.y;
-    if (
-      swipe.phase === "possible" &&
-      Math.hypot(dx, dy) >= SWIPE_INTENT_PX
-    ) {
-      if (dx > 0 && dx > Math.abs(dy) * 1.25) {
+    if (swipe.phase === "possible") {
+      const intent = swipeIntent(dx, dy);
+      if (intent === "horizontal") {
         swipe.phase = "horizontal";
-      } else if (dx < 0 || Math.abs(dy) > Math.abs(dx) * 1.25) {
+      } else if (intent === "cancel") {
         clearSwipe();
         return;
       }
@@ -1596,12 +1608,13 @@
     if (event.cancelable) event.preventDefault();
     const now = Date.now();
     const velocityX = recordSwipeSample(swipe, touch.clientX, now);
+    swipe.ready = swipeShouldCommit(dx, velocityX, swipe.ready);
     showIndicator(
       swipe.element,
       "gesture",
-      dx / SWIPE_MIN_X,
+      swipe.ready ? 1 : dx / SWIPE_MIN_X,
       swipe.action,
-      swipeShouldCommit(dx, dy, now - swipe.at, velocityX),
+      swipe.ready,
     );
   }
 
@@ -1631,7 +1644,6 @@
       return;
     }
     const dx = touch.clientX - gesture.x;
-    const dy = touch.clientY - gesture.y;
     const now = Date.now();
     const velocityX = recordSwipeSample(
       gesture,
@@ -1640,7 +1652,7 @@
     );
     if (
       gesture.phase === "horizontal" &&
-      swipeShouldCommit(dx, dy, now - gesture.at, velocityX)
+      swipeShouldCommit(dx, velocityX, gesture.ready)
     ) {
       if (event.cancelable) event.preventDefault();
       handleSwipe(gesture.element);
@@ -1689,7 +1701,9 @@
         border: 0 solid transparent !important;
         border-radius: 50% !important;
         box-sizing: border-box !important;
-        filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.9)) !important;
+        box-shadow: none !important;
+        filter: none !important;
+        text-shadow: none !important;
         font: 16px/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
         letter-spacing: 0 !important;
         text-indent: 0 !important;
@@ -1783,28 +1797,17 @@
         background: transparent !important;
         -webkit-mask: none !important;
         mask: none !important;
-        opacity: 0.62 !important;
+        opacity: 0.7 !important;
       }
       .${INDICATOR_CLASS}[data-state="loading"]::before {
         content: "" !important;
         position: absolute !important;
         inset: 0 !important;
-        border: 1px solid currentColor !important;
-        border-block-start-width: 1.5px !important;
-        border-inline-end-width: 1.5px !important;
+        border: 1.5px solid transparent !important;
+        border-top-color: currentColor !important;
+        border-right-color: currentColor !important;
         border-radius: 50% !important;
-        animation: touch-translate-spin 760ms linear infinite !important;
-      }
-      .${INDICATOR_CLASS}[data-state="loading"]::after {
-        content: "" !important;
-        position: absolute !important;
-        width: 2px !important;
-        height: 2px !important;
-        inset: 50% auto auto 50% !important;
-        border-radius: 50% !important;
-        background: currentColor !important;
-        transform: translate(-50%, -50%) !important;
-        animation: touch-translate-pulse 760ms ease-in-out infinite alternate !important;
+        animation: touch-translate-spin 680ms linear infinite !important;
       }
       .${INDICATOR_CLASS}[data-state="error"] {
         background: transparent !important;
@@ -1830,10 +1833,6 @@
       }
       @keyframes touch-translate-spin {
         to { transform: rotate(1turn); }
-      }
-      @keyframes touch-translate-pulse {
-        from { opacity: 0.28; }
-        to { opacity: 0.9; }
       }
       @keyframes touch-translate-commit {
         from { opacity: 0.3; transform: scale(0.78); }
@@ -1974,8 +1973,7 @@
       @media (prefers-reduced-motion: reduce) {
         .${TOAST_CLASS},
         .${INDICATOR_CLASS}[data-state="committed"],
-        .${INDICATOR_CLASS}[data-state="loading"]::before,
-        .${INDICATOR_CLASS}[data-state="loading"]::after {
+        .${INDICATOR_CLASS}[data-state="loading"]::before {
           animation: none !important;
         }
         .${TRANSLATION_CLASS},

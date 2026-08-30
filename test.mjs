@@ -33,6 +33,12 @@ const context = vm.createContext({
 vm.runInContext(source, context);
 
 assert.match(source, /opacity: 0\.78 !important;/);
+assert.doesNotMatch(source, /drop-shadow/);
+assert.doesNotMatch(source, /touch-translate-pulse/);
+assert.match(
+  source,
+  /data-state="loading"\]::before[\s\S]{0,300}inset: 0[\s\S]{0,200}border: 1\.5px solid transparent[\s\S]{0,200}border-top-color: currentColor[\s\S]{0,200}border-right-color: currentColor/,
+);
 assert.match(
   source,
   /if \(indicator\.parentElement !== element\) element\.append\(indicator\)/,
@@ -158,12 +164,16 @@ assert.equal(
 assert.equal(api.indicatorFor(null), null);
 assert.equal(api.projectedSwipeX(30, 0.4), 66);
 assert.equal(api.swipeVelocity([{ x: 10, at: 0 }, { x: 50, at: 100 }]), 0.4);
-assert.equal(api.swipeShouldCommit(60, 0, 500), true);
-assert.equal(api.swipeShouldCommit(30, 0, 300, 0.4), true);
-assert.equal(api.swipeShouldCommit(20, 0, 300, 0.8), false);
-assert.equal(api.swipeShouldCommit(70, 0, 300, -0.2), false);
-assert.equal(api.swipeShouldCommit(70, 43, 300), false);
-assert.equal(api.swipeShouldCommit(70, 0, 1201), false);
+assert.equal(api.swipeIntent(10, 12), "possible");
+assert.equal(api.swipeIntent(16, 12), "horizontal");
+assert.equal(api.swipeIntent(16, 16), "horizontal");
+assert.equal(api.swipeIntent(10, 24), "cancel");
+assert.equal(api.swipeIntent(-16, 0), "cancel");
+assert.equal(api.swipeShouldCommit(60, -0.2), true);
+assert.equal(api.swipeShouldCommit(30, 0.4), true);
+assert.equal(api.swipeShouldCommit(20, 0.8), false);
+assert.equal(api.swipeShouldCommit(30, -0.2, true), true);
+assert.equal(api.swipeShouldCommit(20, 0.8, true), false);
 
 const request = api.requestTranslations(["hello"], {
   apiKey: "test",
