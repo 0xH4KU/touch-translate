@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.3.9
+// @version      0.4.0
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -22,15 +22,18 @@
   const TRANSLATION_CLASS = "touch-translate__translation";
   const INDICATOR_CLASS = "touch-translate__indicator";
   const TOAST_CLASS = "touch-translate__toast";
+  const indicators = new WeakMap();
   const SETTINGS_KEY = "settings-v1";
   const CACHE_KEY = "cache-v1";
   const CACHE_LIMIT = 500;
   const BATCH_MAX_ITEMS = 12;
   const BATCH_MAX_CHARS = 6000;
+  const FIRST_BATCH_MAX_ITEMS = 4;
+  const FIRST_BATCH_MAX_CHARS = 1600;
   const SWIPE_MIN_X = 60;
   const SWIPE_MAX_Y = 42;
   const SWIPE_MAX_MS = 1200;
-  const SWIPE_BATCH_MS = 180;
+  const SWIPE_BATCH_MS = 80;
   const COMMIT_HOLD_MS = 140;
   const SAFARI_EDGE_X = 30;
   const FOUR_FINGER_MAX_MOVE = 24;
@@ -132,16 +135,18 @@
     return `${hash.toString(16).padStart(16, "0")}-${input.length}`;
   }
 
-  function makeBatches(records) {
+  function makeBatches(records, prioritizeFirst = false) {
     const batches = [];
     let batch = [];
     let characters = 0;
     for (const record of records) {
+      const firstBatch = prioritizeFirst && !batches.length;
       if (
         batch.length &&
-        (batch.length >= BATCH_MAX_ITEMS ||
+        (batch.length >=
+          (firstBatch ? FIRST_BATCH_MAX_ITEMS : BATCH_MAX_ITEMS) ||
           characters + (record.requestText || record.text).length >
-            BATCH_MAX_CHARS)
+            (firstBatch ? FIRST_BATCH_MAX_CHARS : BATCH_MAX_CHARS))
       ) {
         batches.push(batch);
         batch = [];
@@ -247,6 +252,28 @@
     return "Translation failed";
   }
 
+  function cancelledError() {
+    const error = new Error("Translation cancelled");
+    error.name = "AbortError";
+    return error;
+  }
+
+  function indicatorPosition(point, rect, viewport) {
+    const clamp = (value, minimum, maximum) =>
+      Math.max(minimum, Math.min(maximum, value));
+    const followsTouch = Number.isFinite(point?.x) && Number.isFinite(point?.y);
+    const x = followsTouch
+      ? clamp(point.x, 18, viewport.width - 18)
+      : clamp(rect.right - 10, 18, viewport.width - 18);
+    const y = followsTouch
+      ? clamp(point.y - 28, 18, viewport.height - 18)
+      : rect.top + Math.min(18, Math.max(8, rect.height / 2));
+    return {
+      left: x + viewport.scrollX,
+      top: y + viewport.scrollY,
+    };
+  }
+
   if (globalThis.__TOUCH_TRANSLATE_TEST__) {
     Object.assign(globalThis.__TOUCH_TRANSLATE_TEST__, {
       cleanSettings,
@@ -255,6 +282,7 @@
       groupRecords,
       hashCacheKey,
       hasHorizontalScroller,
+      indicatorPosition,
       indicatorFor,
       makeBatches,
       movedTooFar,
@@ -263,6 +291,7 @@
       parseInlineTranslation,
       parseTranslations,
       pointFor,
+      requestTranslations,
       swipeElementFor,
       viewportPriority,
     });
@@ -293,11 +322,6 @@
         .forEach((key) => delete cache[key]);
     }
     GM_setValue(CACHE_KEY, cache);
-  }
-
-  function saveCacheEntries(entries) {
-    if (!Object.keys(entries).length) return;
-    saveCache({ ...loadCache(), ...entries });
   }
 
   function configureSettings() {
@@ -436,8 +460,24 @@
       "Return only a JSON array of translated strings in the same order and length.",
     ].join(" ");
 
-    return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
+    let abortRequest = () => {};
+    const promise = new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        callback(value);
+      };
+      let request;
+      abortRequest = () => {
+        if (settled) return;
+        try {
+          request?.abort?.();
+        } finally {
+          finish(reject, cancelledError());
+        }
+      };
+      request = GM_xmlhttpRequest({
         method: "POST",
         url: endpointFor(settings.baseURL),
         headers: {
@@ -469,16 +509,22 @@
             if (Array.isArray(content)) {
               content = content.map((part) => part?.text || "").join("");
             }
-            resolve(parseTranslations(content, texts.length));
+            finish(resolve, parseTranslations(content, texts.length));
           } catch (error) {
-            reject(error);
+            finish(reject, error);
           }
         },
         onerror: () =>
-          reject(new Error("Could not connect to the translation API.")),
-        ontimeout: () => reject(new Error("The translation API timed out.")),
+          finish(
+            reject,
+            new Error("Could not connect to the translation API."),
+          ),
+        ontimeout: () =>
+          finish(reject, new Error("The translation API timed out.")),
+        onabort: () => finish(reject, cancelledError()),
       });
     });
+    return { abort: abortRequest, promise };
   }
 
   function sourceText(element) {
@@ -554,19 +600,24 @@
   }
 
   function indicatorFor(element) {
-    if (!element) return null;
-    return (
-      Array.from(element.children).find((child) =>
-        child.classList.contains(INDICATOR_CLASS),
-      ) || null
-    );
+    const indicator = element && indicators.get(element);
+    if (indicator?.isConnected) return indicator;
+    if (element) indicators.delete(element);
+    return null;
   }
 
   const indicatorErrors = new WeakMap();
 
-  function showIndicator(element, state, progress = 0, errorMessage = "") {
+  function showIndicator(
+    element,
+    state,
+    progress = 0,
+    errorMessage = "",
+    point,
+  ) {
     if (!element?.isConnected) return null;
     let indicator = indicatorFor(element);
+    const created = !indicator;
     if (!indicator) {
       indicator = document.createElement("button");
       indicator.type = "button";
@@ -581,7 +632,23 @@
           8000,
         );
       });
-      element.append(indicator);
+      indicators.set(element, indicator);
+      document.documentElement.append(indicator);
+    }
+    if (created || point) {
+      const position = indicatorPosition(
+        point,
+        point ? null : element.getBoundingClientRect(),
+        {
+          width: innerWidth || document.documentElement.clientWidth,
+          height: innerHeight || document.documentElement.clientHeight,
+          scrollX: globalThis.scrollX || 0,
+          scrollY: globalThis.scrollY || 0,
+        },
+      );
+      indicator.style.left = `${position.left}px`;
+      indicator.style.top = `${position.top}px`;
+      if (created) indicator.style.color = getComputedStyle(element).color;
     }
     const isError = state === "error";
     indicator.dataset.state = state;
@@ -610,6 +677,7 @@
     const indicator = indicatorFor(element);
     if (indicator && (!state || indicator.dataset.state === state)) {
       indicatorErrors.delete(indicator);
+      indicators.delete(element);
       indicator.remove();
     }
   }
@@ -748,7 +816,22 @@
     else job.element.setAttribute("aria-busy", job.ariaBusy);
   }
 
-  function beginJob(element, committed = false) {
+  function trackJob(job, task) {
+    job.task = task;
+    task.jobs.add(job);
+  }
+
+  function detachJob(job, abortWhenUnused = false) {
+    job.task?.jobs.delete(job);
+    job.task = undefined;
+    const request = job.request;
+    job.request = undefined;
+    if (!request) return;
+    request.jobs.delete(job);
+    if (abortWhenUnused && !request.jobs.size) request.abort();
+  }
+
+  function beginJob(element, committed = false, point) {
     const existing = pendingJobs.get(element);
     if (existing) return existing;
     const job = {
@@ -756,11 +839,13 @@
       cancelled: false,
       element,
       indicatorTimer: undefined,
+      request: undefined,
+      task: undefined,
     };
     pendingJobs.set(element, job);
     element.setAttribute("aria-busy", "true");
     if (committed) {
-      showIndicator(element, "committed");
+      showIndicator(element, "committed", 0, "", point);
       job.indicatorTimer = setTimeout(() => {
         if (pendingJobs.get(element) === job) showIndicator(element, "loading");
       }, COMMIT_HOLD_MS);
@@ -774,6 +859,7 @@
     if (pendingJobs.get(job.element) !== job) return;
     clearTimeout(job.indicatorTimer);
     pendingJobs.delete(job.element);
+    detachJob(job);
     restoreAriaBusy(job);
     if (state === "error") {
       showIndicator(job.element, "error", 0, errorMessage);
@@ -789,6 +875,7 @@
     clearTimeout(job.indicatorTimer);
     pendingJobs.delete(element);
     swipeBatch.delete(element);
+    detachJob(job, true);
     restoreAriaBusy(job);
     removeIndicator(element);
     if (!swipeBatch.size && swipeBatchTimer) {
@@ -800,12 +887,13 @@
 
   async function translateElements(
     elements,
-    { claimedJobs = new Map(), showProgress = false } = {},
+    { claimedJobs = new Map(), showProgress = false, task } = {},
   ) {
-    const operationJobs = new Set(claimedJobs.values());
+    const currentTask = task || { cancelled: false, jobs: new Set() };
+    claimedJobs.forEach((job) => trackJob(job, currentTask));
     const settings = readySettings();
     if (!settings) {
-      operationJobs.forEach((job) => settleJob(job));
+      [...currentTask.jobs].forEach((job) => settleJob(job));
       return;
     }
 
@@ -870,7 +958,8 @@
     }
 
     try {
-      for (const batch of makeBatches(groupRecords(records))) {
+      for (const batch of makeBatches(groupRecords(records), showProgress)) {
+        if (currentTask.cancelled) return;
         const activeBatch = [];
         for (const group of batch) {
           const entries = [];
@@ -899,7 +988,7 @@
                 continue;
               }
               job = beginJob(element);
-              operationJobs.add(job);
+              trackJob(job, currentTask);
             }
             entries.push({ ...record, job });
           }
@@ -907,10 +996,27 @@
         }
         if (!activeBatch.length) continue;
 
-        const translations = await requestTranslations(
+        const request = requestTranslations(
           activeBatch.map((group) => group.requestText || group.text),
           settings,
         );
+        const activeRequest = { abort: request.abort, jobs: new Set() };
+        activeBatch.forEach((group) =>
+          group.entries.forEach(({ job }) => {
+            job.request = activeRequest;
+            activeRequest.jobs.add(job);
+          }),
+        );
+        let translations;
+        try {
+          translations = await request.promise;
+        } finally {
+          activeRequest.jobs.forEach((job) => {
+            if (job.request === activeRequest) job.request = undefined;
+          });
+          activeRequest.jobs.clear();
+        }
+        if (currentTask.cancelled) return;
         const cacheEntries = {};
         translations.forEach((rawTranslation, index) => {
           const group = activeBatch[index];
@@ -936,17 +1042,28 @@
             completed += 1;
           }
         });
-        saveCacheEntries(cacheEntries);
+        if (Object.keys(cacheEntries).length) {
+          Object.assign(cache, cacheEntries);
+          saveCache(cache);
+        }
         if (showProgress) {
           toast(`Translating ${completed}/${activeTotal}`, false, 0);
         }
       }
     } catch (error) {
+      if (error?.name === "AbortError") {
+        [...currentTask.jobs].forEach((job) => settleJob(job));
+        return;
+      }
       const message = errorMessageFor(error);
-      operationJobs.forEach((job) => settleJob(job, "error", message));
+      [...currentTask.jobs].forEach((job) =>
+        settleJob(job, "error", message),
+      );
       throw error;
     }
-    if (showProgress) toast(`Translated ${completed} blocks`);
+    if (showProgress && !currentTask.cancelled) {
+      toast(`Translated ${completed} blocks`);
+    }
   }
 
   function reportError(error) {
@@ -968,14 +1085,14 @@
     );
   }
 
-  function scheduleTranslation(element) {
-    const job = beginJob(element, true);
+  function scheduleTranslation(element, point) {
+    const job = beginJob(element, true, point);
     swipeBatch.set(element, job);
     clearTimeout(swipeBatchTimer);
     swipeBatchTimer = setTimeout(flushSwipeBatch, SWIPE_BATCH_MS);
   }
 
-  function handleSwipe(element) {
+  function handleSwipe(element, point) {
     if (!element?.isConnected) return;
     if (element.classList.contains(TRANSLATION_CLASS)) {
       element.remove();
@@ -988,19 +1105,25 @@
       removeIndicator(element);
       return;
     }
-    scheduleTranslation(element);
+    scheduleTranslation(element, point);
   }
 
   let pageTask;
   function startPageTranslation() {
     if (pageTask) {
-      toast("Page translation is already running");
+      const task = pageTask;
+      pageTask = undefined;
+      task.cancelled = true;
+      [...task.jobs].forEach((job) => cancelJob(job.element));
+      toast("Page translation cancelled");
       return;
     }
-    pageTask = translateElements(collectPageBlocks(), { showProgress: true })
+    const task = { cancelled: false, jobs: new Set() };
+    pageTask = task;
+    translateElements(collectPageBlocks(), { showProgress: true, task })
       .catch(reportError)
       .finally(() => {
-        pageTask = undefined;
+        if (pageTask === task) pageTask = undefined;
       });
   }
 
@@ -1204,7 +1327,13 @@
     if (dx > 8 && dx > Math.abs(dy) * 1.25) {
       if (dx > 12 && event.cancelable) event.preventDefault();
       if (!pendingJobs.has(swipe.element)) {
-        showIndicator(swipe.element, "gesture", dx / SWIPE_MIN_X);
+        showIndicator(
+          swipe.element,
+          "gesture",
+          dx / SWIPE_MIN_X,
+          "",
+          { x: touch.clientX, y: touch.clientY },
+        );
       }
     } else if (Math.abs(dy) > 28 && Math.abs(dy) > Math.abs(dx)) {
       clearSwipe();
@@ -1246,7 +1375,7 @@
       Date.now() - gesture.at <= SWIPE_MAX_MS
     ) {
       if (event.cancelable) event.preventDefault();
-      handleSwipe(gesture.element);
+      handleSwipe(gesture.element, { x: touch.clientX, y: touch.clientY });
     } else {
       restoreGestureIndicator(gesture);
     }
@@ -1265,9 +1394,9 @@
       .${TRANSLATION_CLASS} {
         box-sizing: border-box !important;
         opacity: 0.78 !important;
-        margin-block-start: 0.62em !important;
-        padding-inline-start: 0.72em !important;
-        border-inline-start: 2px solid rgba(127, 127, 127, 0.48) !important;
+        margin-block-start: 0.54em !important;
+        padding-inline-start: 0.42em !important;
+        border-inline-start: 1px solid rgba(127, 127, 127, 0.48) !important;
         pointer-events: auto !important;
       }
       li.${TRANSLATION_CLASS} {
@@ -1277,18 +1406,18 @@
         --touch-translate-progress: 0deg;
         -webkit-appearance: none !important;
         appearance: none !important;
-        display: inline-block !important;
-        position: relative !important;
-        width: 0.72em !important;
-        height: 0.72em !important;
-        margin-inline-start: 0.38em !important;
+        display: block !important;
+        position: absolute !important;
+        z-index: 2147483646 !important;
+        width: 16px !important;
+        height: 16px !important;
+        margin: -8px 0 0 -8px !important;
         padding: 0 !important;
         border: 0 solid transparent !important;
         border-radius: 50% !important;
         box-sizing: border-box !important;
-        color: currentColor !important;
-        font: inherit !important;
-        vertical-align: middle !important;
+        filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.9)) !important;
+        font: 16px/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
         pointer-events: none !important;
       }
       .${INDICATOR_CLASS}::before,
@@ -1371,7 +1500,7 @@
       .${INDICATOR_CLASS}[data-state="error"]::before {
         content: "" !important;
         position: absolute !important;
-        inset: -10px !important;
+        inset: -14px !important;
         pointer-events: auto !important;
       }
       .${INDICATOR_CLASS}[data-state="error"]::after {

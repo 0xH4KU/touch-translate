@@ -9,11 +9,22 @@ const source = readFileSync(
 const api = {};
 const body = {};
 const documentElement = {};
+let requestAborted = false;
+let requestOptions;
 const context = vm.createContext({
   __TOUCH_TRANSLATE_TEST__: api,
   URL,
   console,
   document: { body, documentElement },
+  GM_xmlhttpRequest: (options) => {
+    requestOptions = options;
+    return {
+      abort() {
+        requestAborted = true;
+        options.onabort();
+      },
+    };
+  },
   getComputedStyle: (element) => ({
     display: element.display,
     overflowX: element.overflowX,
@@ -84,6 +95,12 @@ assert.deepEqual(
   [...api.makeBatches(records)].map((batch) => batch.length),
   [1, 2],
 );
+assert.deepEqual(
+  [...api.makeBatches(Array(8).fill({ text: "x".repeat(500) }), true)].map(
+    (batch) => batch.length,
+  ),
+  [3, 5],
+);
 
 const grouped = api.groupRecords([
   { key: "same", text: "Repeated text", element: 1 },
@@ -114,13 +131,38 @@ assert.equal(
   true,
 );
 assert.equal(api.indicatorFor(null), null);
-const indicator = {
-  classList: { contains: (value) => value === "touch-translate__indicator" },
-};
-assert.equal(
-  api.indicatorFor({ children: { 0: indicator, length: 1 } }),
-  indicator,
+const position = api.indicatorPosition(
+  { x: 385, y: 20 },
+  null,
+  { width: 390, height: 844, scrollX: 0, scrollY: 100 },
 );
+assert.deepEqual(
+  { ...position },
+  { left: 372, top: 118 },
+);
+
+const request = api.requestTranslations(["hello"], {
+  apiKey: "test",
+  baseURL: "https://api.example.com/v1",
+  model: "fast-model",
+  targetLanguage: "zh-TW",
+});
+request.abort();
+await assert.rejects(request.promise, (error) => error.name === "AbortError");
+assert.equal(requestAborted, true);
+const successfulRequest = api.requestTranslations(["hello"], {
+  apiKey: "test",
+  baseURL: "https://api.example.com/v1",
+  model: "fast-model",
+  targetLanguage: "zh-TW",
+});
+requestOptions.onload({
+  status: 200,
+  responseText: JSON.stringify({
+    choices: [{ message: { content: '["hello translated"]' } }],
+  }),
+});
+assert.deepEqual([...(await successfulRequest.promise)], ["hello translated"]);
 
 const outerListItem = {
   display: "list-item",
