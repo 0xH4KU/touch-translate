@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.4.1
+// @version      0.4.2
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -679,9 +679,11 @@
         );
       });
       indicators.set(element, indicator);
-      document.documentElement.append(indicator);
     }
-    if (created || point) {
+    const parent = state === "loading" ? element : document.documentElement;
+    const moved = indicator.parentElement !== parent;
+    if (moved) parent.append(indicator);
+    if (state !== "loading" && (created || moved || point)) {
       const position = indicatorPosition(
         point,
         point ? null : element.getBoundingClientRect(),
@@ -694,8 +696,8 @@
       );
       indicator.style.setProperty("--touch-translate-x", `${position.left}px`);
       indicator.style.setProperty("--touch-translate-y", `${position.top}px`);
-      if (created) indicator.style.color = getComputedStyle(element).color;
     }
+    if (created) indicator.style.color = getComputedStyle(element).color;
     const isError = state === "error";
     indicator.dataset.state = state;
     indicator.tabIndex = isError ? 0 : -1;
@@ -1565,6 +1567,8 @@
         box-sizing: border-box !important;
         filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.9)) !important;
         font: 16px/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: 0 !important;
+        text-indent: 0 !important;
         translate: var(--touch-translate-x) var(--touch-translate-y) !important;
         will-change: translate !important;
         pointer-events: none !important;
@@ -1623,12 +1627,15 @@
       .${INDICATOR_CLASS}[data-state="gesture"][data-action="cancel"]::after,
       .${INDICATOR_CLASS}[data-state="gesture"][data-action="remove"]::after {
         content: "\\00d7" !important;
-        width: auto !important;
-        height: auto !important;
+        inset: 0 !important;
+        width: 16px !important;
+        height: 16px !important;
         border-radius: 0 !important;
         background: transparent !important;
-        font: 700 11px/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        font: 700 11px/16px -apple-system, BlinkMacSystemFont, sans-serif !important;
+        text-align: center !important;
         opacity: 0.8 !important;
+        transform: none !important;
       }
       .${INDICATOR_CLASS}[data-state="committed"] {
         background: transparent !important;
@@ -1649,6 +1656,12 @@
         transform: translate(-50%, -50%) !important;
       }
       .${INDICATOR_CLASS}[data-state="loading"] {
+        display: inline-block !important;
+        position: relative !important;
+        margin: 0 !important;
+        margin-inline-start: 0.38em !important;
+        translate: none !important;
+        vertical-align: middle !important;
         background: transparent !important;
         -webkit-mask: none !important;
         mask: none !important;

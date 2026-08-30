@@ -6,7 +6,7 @@ A private, touch-first bilingual translation userscript for iOS Safari and Tampe
 
 ## Usage
 
-- Swipe right on a visible HTML text block. A 60px drag or a shorter deliberate flick commits it; a progress ring follows above your finger without shifting the text, then a compact activity indicator remains at that reading position while the script translates it.
+- Swipe right on a visible HTML text block. A 60px drag or a shorter deliberate flick commits it; a progress ring follows above your finger without shifting the text, then a compact activity indicator moves to the end of the text block while the script translates it.
 - Swipe the same block again while it is loading to cancel. The network request is also aborted when no other block shares it. Swipe again after the translation appears to remove it.
 - Tap a red error indicator to view the translation provider's original error message.
 - Quickly tap with four fingers to translate the main page content in batches, starting with a small batch in the current viewport. Repeat the gesture to stop the remaining page translation.

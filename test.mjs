@@ -33,6 +33,8 @@ const context = vm.createContext({
 vm.runInContext(source, context);
 
 assert.match(source, /opacity: 0\.78 !important;/);
+assert.match(source, /state === "loading" \? element : document\.documentElement/);
+assert.match(source, /font: 700 11px\/16px/);
 assert.equal(api.errorHitSize, 44);
 assert.equal(api.normalizeText("  hello\n  world "), "hello world");
 assert.equal(api.pageTextLooksUseful("https://example.com/path"), false);
