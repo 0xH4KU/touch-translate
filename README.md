@@ -9,7 +9,7 @@ A private, touch-first bilingual translation userscript for iOS Safari and Tampe
 - Swipe right on a visible HTML text block. A 60px drag or a shorter deliberate flick commits it; initial finger drift and a small release correction are tolerated once the rightward gesture is clear.
 - Swipe the same block again while it is loading to cancel. The network request is also aborted when no other block shares it. Swipe again after the translation appears to remove it.
 - Translation errors open a dialog with the provider or response-format details. Retry the failed blocks from the dialog or close it and leave the red status indicator in place.
-- Quickly tap with four fingers to start automatic page translation. The current and nearby content is translated first, then newly revealed or loaded blocks continue automatically as you scroll. Repeat the gesture to stop.
+- Quickly tap with four fingers to start automatic page translation. The current and nearby content is translated first, then newly revealed or loaded blocks continue automatically as you scroll. Repeat the gesture to stop and remove the translations added by that automatic run.
 - Use the Tampermonkey menu to configure or clear the API settings, translate the page, import or export settings, and clear the cache.
 
 Swipes starting within 30px of the left screen edge are ignored to avoid triggering Safari's back gesture. Native horizontal scrolling takes priority inside scrollable tables and other horizontal regions. Container gaps that would select multiple nested text blocks are ignored.

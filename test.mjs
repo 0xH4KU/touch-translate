@@ -54,6 +54,7 @@ const context = vm.createContext({
     overflowX: element.overflowX,
     visibility: element.visibility,
   }),
+  matchMedia: () => ({ matches: true }),
 });
 vm.runInContext(source, context);
 
@@ -233,6 +234,18 @@ visibleRoot.textNodes = [visibleNode, hiddenNode];
 assert.equal(api.isRenderedTextNode(visibleNode, visibleRoot), true);
 assert.equal(api.isRenderedTextNode(hiddenNode, visibleRoot), false);
 assert.equal(api.sourceText({ innerText: "", textContent: "Hidden text" }), "");
+let removedTranslations = 0;
+const translatedElement = {
+  isConnected: true,
+  remove() {
+    this.isConnected = false;
+    removedTranslations += 1;
+  },
+};
+const pageTask = { translations: new Set([translatedElement]) };
+api.undoPageTranslations(pageTask);
+assert.equal(removedTranslations, 1);
+assert.equal(pageTask.translations.size, 0);
 const snapshotSettings = {
   baseURL: "https://api.example.com/v1",
   model: "m",

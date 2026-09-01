@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.8
+// @version      0.5.9
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -429,6 +429,7 @@
       swipeShouldCommit,
       swipeVelocity,
       swipeElementFor,
+      undoPageTranslations,
       viewportPriority,
     });
     return;
@@ -931,7 +932,7 @@
     }
   }
 
-  function insertTranslation(source, result) {
+  function insertTranslation(source, result, translations) {
     if (!source.isConnected || translationAfter(source)) return;
     const translation =
       typeof result === "string" ? result : result?.translation;
@@ -977,6 +978,7 @@
     if (animateIn) translated.style.setProperty("opacity", "0", "important");
 
     source.insertAdjacentElement("afterend", translated);
+    translations?.add(translated);
     const nodes = contentTextNodes(translated);
     const segments = Array.isArray(result?.segments) ? result.segments : null;
     if (segments?.length === nodes.length) {
@@ -1214,13 +1216,17 @@
         cached.translation &&
         (!segmentCount || cached.formatKey === formatKey)
       ) {
-        insertTranslation(element, {
-          translation: cached.translation,
-          segments:
-            cached.formatKey === formatKey && Array.isArray(cached.segments)
-              ? cached.segments
-              : null,
-        });
+        insertTranslation(
+          element,
+          {
+            translation: cached.translation,
+            segments:
+              cached.formatKey === formatKey && Array.isArray(cached.segments)
+                ? cached.segments
+                : null,
+          },
+          currentTask.translations,
+        );
         if (claimedJob) settleJob(claimedJob);
         completed += 1;
       } else if (requestText.length > BATCH_MAX_CHARS) {
@@ -1342,10 +1348,15 @@
               activeTotal -= 1;
               continue;
             }
-            insertTranslation(element, {
-              translation: result.translation,
-              segments: formatKey === group.formatKey ? result.segments : null,
-            });
+            insertTranslation(
+              element,
+              {
+                translation: result.translation,
+                segments:
+                  formatKey === group.formatKey ? result.segments : null,
+              },
+              currentTask.translations,
+            );
             settleJob(job);
             completed += 1;
           }
@@ -1424,13 +1435,23 @@
   }
 
   let pageTask;
-  function stopPageTranslation(task, message = "") {
+  function undoPageTranslations(task) {
+    task.translations.forEach(removeTranslation);
+    task.translations.clear();
+  }
+
+  function stopPageTranslation(
+    task,
+    message = "",
+    removeTranslations = false,
+  ) {
     if (pageTask === task) pageTask = undefined;
     task.cancelled = true;
     clearTimeout(task.refreshTimer);
     task.observer.disconnect();
     globalThis.removeEventListener("scroll", task.refresh, true);
     [...task.jobs].forEach((job) => cancelJob(job.element));
+    if (removeTranslations) undoPageTranslations(task);
     if (message) toast(message);
   }
 
@@ -1460,7 +1481,11 @@
 
   async function startPageTranslation() {
     if (pageTask) {
-      stopPageTranslation(pageTask, "Automatic page translation stopped");
+      stopPageTranslation(
+        pageTask,
+        "Automatic page translation undone",
+        true,
+      );
       return;
     }
     if (!(await readySettings())) return;
@@ -1468,6 +1493,7 @@
       cancelled: false,
       jobs: new Set(),
       rerun: false,
+      translations: new Set(),
     };
     task.refresh = () => {
       clearTimeout(task.refreshTimer);
