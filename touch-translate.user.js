@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.7
+// @version      0.5.8
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -24,9 +24,11 @@
   const TRANSLATION_CLASS = "touch-translate__translation";
   const INDICATOR_CLASS = "touch-translate__indicator";
   const ERROR_DIALOG_CLASS = "touch-translate__error-dialog";
+  const SETTINGS_DIALOG_CLASS = "touch-translate__settings-dialog";
   const TOAST_CLASS = "touch-translate__toast";
   const indicators = new WeakMap();
   const removingTranslations = new WeakSet();
+  const unstructuredModels = new Set();
   const SETTINGS_KEY = "settings-v1";
   const CACHE_KEY = "cache-v1";
   const CACHE_LIMIT = 500;
@@ -316,6 +318,25 @@
     return "Translation failed";
   }
 
+  function structuredOutputUnsupported(status, message) {
+    return (
+      (status === 400 || status === 422) &&
+      /response[_ -]?format|json[_ -]?schema|structured outputs?/i.test(
+        String(message || ""),
+      )
+    );
+  }
+
+  function oversizedBlocksError(lengths) {
+    const count = lengths.length;
+    const largest = Math.max(...lengths);
+    const subject =
+      count === 1 ? "This text block is" : `${count} text blocks are`;
+    return new Error(
+      `${subject} too long to translate safely. Largest: ${largest} characters; limit: ${BATCH_MAX_CHARS}.`,
+    );
+  }
+
   function cancelledError() {
     const error = new Error("Translation cancelled");
     error.name = "AbortError";
@@ -357,6 +378,27 @@
       : 0;
   }
 
+  function isRenderedTextNode(node, root) {
+    for (
+      let element = node.parentElement;
+      element;
+      element = element.parentElement
+    ) {
+      if (element.matches(NON_TEXT_SELECTOR)) return false;
+      const style = getComputedStyle(element);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse" ||
+        style.contentVisibility === "hidden"
+      ) {
+        return false;
+      }
+      if (element === root) return true;
+    }
+    return false;
+  }
+
   // Test interface
 
   if (globalThis.__TOUCH_TRANSLATE_TEST__) {
@@ -369,15 +411,20 @@
       hasHorizontalScroller,
       indicatorFor,
       isNearViewport,
+      isRenderedTextNode,
       makeBatches,
       movedTooFar,
       normalizeText,
+      oversizedBlocksError,
       pageTextLooksUseful,
       parseInlineTranslation,
       parseTranslations,
       pointFor,
       projectedSwipeX,
+      recordMatchesElement,
       requestTranslations,
+      sourceText,
+      structuredOutputUnsupported,
       swipeIntent,
       swipeShouldCommit,
       swipeVelocity,
@@ -415,43 +462,124 @@
     GM_setValue(CACHE_KEY, cache);
   }
 
-  function configureSettings() {
+  async function configureSettings() {
     const current = loadSettings();
-    const baseURL = prompt("OpenAI-compatible Base URL", current.baseURL);
-    if (baseURL === null) return null;
-    const model = prompt("Model", current.model);
-    if (model === null) return null;
-    const targetLanguage = prompt("Target language", current.targetLanguage);
-    if (targetLanguage === null) return null;
-    const apiKey = prompt(
-      current.apiKey
-        ? "API Key (leave blank to keep the current key)"
-        : "API Key",
-      "",
-    );
-    if (apiKey === null) return null;
+    const dialog = document.createElement("dialog");
+    dialog.className = SETTINGS_DIALOG_CLASS;
+    dialog.setAttribute("aria-labelledby", "touch-translate-settings-title");
 
-    try {
-      const next = cleanSettings(
-        {
-          baseURL,
-          model,
-          targetLanguage,
-          apiKey: apiKey || current.apiKey,
-        },
-        current,
-      );
-      requireReadySettings(next);
-      GM_setValue(SETTINGS_KEY, next);
-      toast("API settings saved");
-      return next;
-    } catch (error) {
-      alert(error.message);
-      return null;
+    const form = document.createElement("form");
+    const title = document.createElement("h2");
+    title.id = "touch-translate-settings-title";
+    title.textContent = "API settings";
+    const inputs = {};
+    const field = (labelText, name, type, value, required = true) => {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      const id = `touch-translate-settings-${name}`;
+      label.htmlFor = id;
+      label.textContent = labelText;
+      input.id = id;
+      input.name = name;
+      input.type = type;
+      input.value = value;
+      input.required = required;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      if (name !== "targetLanguage") {
+        input.setAttribute("autocapitalize", "none");
+      }
+      label.append(input);
+      inputs[name] = input;
+      return label;
+    };
+
+    const baseURL = field(
+      "Chat Completions Base URL",
+      "baseURL",
+      "url",
+      current.baseURL,
+    );
+    const model = field("Model", "model", "text", current.model);
+    const targetLanguage = field(
+      "Target language",
+      "targetLanguage",
+      "text",
+      current.targetLanguage,
+    );
+    const apiKey = field(
+      "API Key",
+      "apiKey",
+      "password",
+      "",
+      !current.apiKey,
+    );
+    if (current.apiKey) {
+      inputs.apiKey.placeholder = "Leave blank to keep current key";
     }
+
+    const error = document.createElement("p");
+    error.dataset.error = "";
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    const actions = document.createElement("div");
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    const save = document.createElement("button");
+    save.type = "submit";
+    save.dataset.action = "save";
+    save.textContent = "Save";
+    actions.append(cancel, save);
+    form.append(title, baseURL, model, targetLanguage, apiKey, error, actions);
+    dialog.append(form);
+    (document.body || document.documentElement).append(dialog);
+
+    return new Promise((resolve) => {
+      let result = null;
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        dialog.remove();
+        resolve(result);
+      };
+      const closeDialog = () => {
+        if (typeof dialog.close === "function") dialog.close();
+        else finish();
+      };
+      cancel.addEventListener("click", closeDialog);
+      dialog.addEventListener("close", finish, { once: true });
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const data = new FormData(form);
+        try {
+          result = requireReadySettings(
+            cleanSettings(
+              {
+                baseURL: data.get("baseURL"),
+                model: data.get("model"),
+                targetLanguage: data.get("targetLanguage"),
+                apiKey: data.get("apiKey") || current.apiKey,
+              },
+              current,
+            ),
+          );
+          GM_setValue(SETTINGS_KEY, result);
+          closeDialog();
+          toast("API settings saved");
+        } catch (settingsError) {
+          error.textContent = errorMessageFor(settingsError);
+          error.hidden = false;
+        }
+      });
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+      (current.apiKey ? inputs.model : inputs.apiKey).focus();
+    });
   }
 
-  function readySettings() {
+  async function readySettings() {
     const current = loadSettings();
     try {
       return requireReadySettings(current);
@@ -553,6 +681,11 @@
       'Return a JSON object with a "translations" array in the same order and length.',
     ].join(" ");
 
+    const messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: JSON.stringify(texts) },
+    ];
+    const compatibilityKey = `${settings.baseURL}\u0000${settings.model}`;
     let abortRequest = () => {};
     const promise = new Promise((resolve, reject) => {
       let settled = false;
@@ -570,20 +703,13 @@
           finish(reject, cancelledError());
         }
       };
-      request = GM_xmlhttpRequest({
-        method: "POST",
-        url: endpointFor(settings.baseURL),
-        headers: {
-          Authorization: `Bearer ${settings.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        data: JSON.stringify({
+      const send = (structuredOutput) => {
+        const body = {
           model: settings.model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: JSON.stringify(texts) },
-          ],
-          response_format: {
+          messages,
+        };
+        if (structuredOutput) {
+          body.response_format = {
             type: "json_schema",
             json_schema: {
               name: "translation_batch",
@@ -602,71 +728,91 @@
                 additionalProperties: false,
               },
             },
+          };
+        }
+        request = GM_xmlhttpRequest({
+          method: "POST",
+          url: endpointFor(settings.baseURL),
+          headers: {
+            Authorization: `Bearer ${settings.apiKey}`,
+            "Content-Type": "application/json",
           },
-        }),
-        anonymous: true,
-        timeout: 60000,
-        onload(response) {
-          try {
-            const responseText = response.responseText || "{}";
-            let body;
+          data: JSON.stringify(body),
+          anonymous: true,
+          timeout: 60000,
+          onload(response) {
             try {
-              body = JSON.parse(responseText);
+              const responseText = response.responseText || "{}";
+              let responseBody;
+              try {
+                responseBody = JSON.parse(responseText);
+              } catch (error) {
+                throw new Error(
+                  [
+                    "The translation API returned invalid JSON.",
+                    `JSON error: ${error.message}`,
+                    "",
+                    `API response:\n${responseText.slice(0, 2000)}`,
+                  ].join("\n"),
+                );
+              }
+              if (response.status < 200 || response.status >= 300) {
+                const apiMessage =
+                  responseBody?.error?.message ||
+                  (typeof responseBody?.error === "string"
+                    ? responseBody.error
+                    : "") ||
+                  responseBody?.message;
+                if (
+                  structuredOutput &&
+                  structuredOutputUnsupported(response.status, apiMessage)
+                ) {
+                  unstructuredModels.add(compatibilityKey);
+                  send(false);
+                  return;
+                }
+                throw new Error(
+                  `Translation API error (HTTP ${response.status}).\n${apiMessage || "No error details were returned."}`,
+                );
+              }
+              const choice = responseBody?.choices?.[0];
+              const refusal = choice?.message?.refusal;
+              if (refusal) {
+                throw new Error(`The AI refused the translation.\n${refusal}`);
+              }
+              let content = choice?.message?.content;
+              if (Array.isArray(content)) {
+                content = content.map((part) => part?.text || "").join("");
+              }
+              const finishReason = String(
+                choice?.finish_reason || "",
+              ).toLowerCase();
+              if (finishReason && finishReason !== "stop") {
+                throw new Error(
+                  [
+                    "The AI response was incomplete.",
+                    `Finish reason: ${finishReason}`,
+                    "",
+                    `AI output:\n${String(content || "").slice(0, 2000) || "(empty)"}`,
+                  ].join("\n"),
+                );
+              }
+              finish(resolve, parseTranslations(content, texts.length));
             } catch (error) {
-              throw new Error(
-                [
-                  "The translation API returned invalid JSON.",
-                  `JSON error: ${error.message}`,
-                  "",
-                  `API response:\n${responseText.slice(0, 2000)}`,
-                ].join("\n"),
-              );
+              finish(reject, error);
             }
-            if (response.status < 200 || response.status >= 300) {
-              const apiMessage =
-                body?.error?.message ||
-                (typeof body?.error === "string" ? body.error : "") ||
-                body?.message;
-              throw new Error(
-                `Translation API error (HTTP ${response.status}).\n${apiMessage || "No error details were returned."}`,
-              );
-            }
-            const choice = body?.choices?.[0];
-            const refusal = choice?.message?.refusal;
-            if (refusal) {
-              throw new Error(`The AI refused the translation.\n${refusal}`);
-            }
-            let content = choice?.message?.content;
-            if (Array.isArray(content)) {
-              content = content.map((part) => part?.text || "").join("");
-            }
-            const finishReason = String(
-              choice?.finish_reason || "",
-            ).toLowerCase();
-            if (finishReason && finishReason !== "stop") {
-              throw new Error(
-                [
-                  "The AI response was incomplete.",
-                  `Finish reason: ${finishReason}`,
-                  "",
-                  `AI output:\n${String(content || "").slice(0, 2000) || "(empty)"}`,
-                ].join("\n"),
-              );
-            }
-            finish(resolve, parseTranslations(content, texts.length));
-          } catch (error) {
-            finish(reject, error);
-          }
-        },
-        onerror: () =>
-          finish(
-            reject,
-            new Error("Could not connect to the translation API."),
-          ),
-        ontimeout: () =>
-          finish(reject, new Error("The translation API timed out.")),
-        onabort: () => finish(reject, cancelledError()),
-      });
+          },
+          onerror: () =>
+            finish(
+              reject,
+              new Error("Could not connect to the translation API."),
+            ),
+          ontimeout: () =>
+            finish(reject, new Error("The translation API timed out.")),
+          onabort: () => finish(reject, cancelledError()),
+        });
+      };
+      send(!unstructuredModels.has(compatibilityKey));
     });
     return { abort: abortRequest, promise };
   }
@@ -674,7 +820,7 @@
   // Page content and rendering
 
   function sourceText(element) {
-    return normalizeText(element.innerText || element.textContent);
+    return normalizeText(element.innerText ?? element.textContent);
   }
 
   function contentTextNodes(element) {
@@ -684,8 +830,7 @@
       NodeFilter.SHOW_TEXT,
       {
         acceptNode: (node) =>
-          normalizeText(node.nodeValue) &&
-          !node.parentElement?.closest(NON_TEXT_SELECTOR)
+          normalizeText(node.nodeValue) && isRenderedTextNode(node, element)
             ? NodeFilter.FILTER_ACCEPT
             : NodeFilter.FILTER_REJECT,
       },
@@ -719,6 +864,13 @@
       })
       .join("");
     return { requestText, segmentCount: nodes.length };
+  }
+
+  function recordMatchesElement(record, settings) {
+    const text = sourceText(record.element);
+    if (text !== record.text) return false;
+    const { requestText } = translationRequestFor(record.element, text);
+    return hashCacheKey(requestText, settings) === record.formatKey;
   }
 
   function translationAfter(source) {
@@ -824,6 +976,7 @@
     ).matches;
     if (animateIn) translated.style.setProperty("opacity", "0", "important");
 
+    source.insertAdjacentElement("afterend", translated);
     const nodes = contentTextNodes(translated);
     const segments = Array.isArray(result?.segments) ? result.segments : null;
     if (segments?.length === nodes.length) {
@@ -839,7 +992,6 @@
       // if preserving every inline style proves worth another paid request.
       translated.replaceChildren(translation);
     }
-    source.insertAdjacentElement("afterend", translated);
     if (animateIn) {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -1027,7 +1179,7 @@
   ) {
     const currentTask = task || { cancelled: false, jobs: new Set() };
     claimedJobs.forEach((job) => trackJob(job, currentTask));
-    const settings = readySettings();
+    const settings = await readySettings();
     if (!settings) {
       [...currentTask.jobs].forEach((job) => settleJob(job));
       return;
@@ -1035,6 +1187,7 @@
 
     const cache = loadCache();
     const records = [];
+    const oversized = [];
     let completed = 0;
     for (const element of elements) {
       const claimedJob = claimedJobs.get(element);
@@ -1070,6 +1223,13 @@
         });
         if (claimedJob) settleJob(claimedJob);
         completed += 1;
+      } else if (requestText.length > BATCH_MAX_CHARS) {
+        // ponytail: reject oversized blocks; add sentence chunking only when
+        // real pages justify the marker and cancellation complexity.
+        const job = claimedJob || beginJob(element);
+        if (!claimedJob) trackJob(job, currentTask);
+        settleJob(job, "error");
+        oversized.push(requestText.length);
       } else {
         records.push({
           element,
@@ -1085,6 +1245,7 @@
 
     const total = completed + records.length;
     if (!total) {
+      if (oversized.length) throw oversizedBlocksError(oversized);
       if (showProgress) toast("No new translatable blocks found");
       return;
     }
@@ -1110,6 +1271,11 @@
             if (translationAfter(element)) {
               if (job) settleJob(job);
               completed += 1;
+              continue;
+            }
+            if (!recordMatchesElement(record, settings)) {
+              if (job) settleJob(job);
+              activeTotal -= 1;
               continue;
             }
             const currentJob = pendingJobs.get(element);
@@ -1165,8 +1331,14 @@
             formatKey: group.formatKey,
             at: Date.now(),
           };
-          for (const { element, formatKey, job } of group.entries) {
+          for (const record of group.entries) {
+            const { element, formatKey, job } = record;
             if (pendingJobs.get(element) !== job || job.cancelled) {
+              activeTotal -= 1;
+              continue;
+            }
+            if (!recordMatchesElement(record, settings)) {
+              settleJob(job);
               activeTotal -= 1;
               continue;
             }
@@ -1201,6 +1373,7 @@
       failure.retryElements = failedElements;
       throw failure;
     }
+    if (oversized.length) throw oversizedBlocksError(oversized);
     if (showProgress && !currentTask.cancelled) {
       toast(`Translated ${completed} blocks`);
     }
@@ -1285,12 +1458,12 @@
       });
   }
 
-  function startPageTranslation() {
+  async function startPageTranslation() {
     if (pageTask) {
       stopPageTranslation(pageTask, "Automatic page translation stopped");
       return;
     }
-    if (!readySettings()) return;
+    if (!(await readySettings())) return;
     const task = {
       cancelled: false,
       jobs: new Set(),
@@ -1855,7 +2028,8 @@
         from { opacity: 0; translate: 0 4px; scale: 0.98; }
         to { opacity: 1; translate: 0; scale: 1; }
       }
-      .${ERROR_DIALOG_CLASS} {
+      .${ERROR_DIALOG_CLASS},
+      .${SETTINGS_DIALOG_CLASS} {
         position: fixed !important;
         inset: 0 !important;
         width: min(92vw, 520px) !important;
@@ -1874,7 +2048,8 @@
         overflow: auto !important;
         box-shadow: 0 18px 56px rgba(0, 0, 0, 0.28) !important;
       }
-      .${ERROR_DIALOG_CLASS}::backdrop {
+      .${ERROR_DIALOG_CLASS}::backdrop,
+      .${SETTINGS_DIALOG_CLASS}::backdrop {
         background: rgba(0, 0, 0, 0.48) !important;
         -webkit-backdrop-filter: blur(2px) !important;
         backdrop-filter: blur(2px) !important;
@@ -1884,6 +2059,60 @@
         color: inherit !important;
         font: 650 20px/1.2 -apple-system, BlinkMacSystemFont, sans-serif !important;
         letter-spacing: 0 !important;
+      }
+      .${SETTINGS_DIALOG_CLASS} > form {
+        display: grid !important;
+        gap: 14px !important;
+        margin: 0 !important;
+      }
+      .${SETTINGS_DIALOG_CLASS} h2 {
+        margin: 0 0 2px !important;
+        color: inherit !important;
+        font: 650 20px/1.2 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: 0 !important;
+      }
+      .${SETTINGS_DIALOG_CLASS} label {
+        display: grid !important;
+        gap: 6px !important;
+        margin: 0 !important;
+        color: inherit !important;
+        font: 600 13px/1.25 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: 0 !important;
+      }
+      .${SETTINGS_DIALOG_CLASS} input {
+        -webkit-appearance: none !important;
+        appearance: none !important;
+        width: 100% !important;
+        min-height: 44px !important;
+        margin: 0 !important;
+        padding: 9px 11px !important;
+        border: 1px solid rgba(0, 0, 0, 0.2) !important;
+        border-radius: 6px !important;
+        box-sizing: border-box !important;
+        background: #fff !important;
+        color: #18181a !important;
+        font: 16px/1.25 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: 0 !important;
+      }
+      .${SETTINGS_DIALOG_CLASS} input:focus-visible {
+        border-color: #2878d0 !important;
+        outline: 2px solid #2878d0 !important;
+        outline-offset: 1px !important;
+      }
+      .${SETTINGS_DIALOG_CLASS} [data-error] {
+        margin: 0 !important;
+        color: #b42318 !important;
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        letter-spacing: 0 !important;
+      }
+      .${SETTINGS_DIALOG_CLASS} [data-error][hidden] {
+        display: none !important;
+      }
+      .${SETTINGS_DIALOG_CLASS} form > div {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 8px !important;
+        margin-top: 2px !important;
       }
       .${ERROR_DIALOG_CLASS} > pre {
         max-height: min(48dvh, 360px) !important;
@@ -1902,7 +2131,8 @@
         flex-wrap: wrap !important;
         gap: 8px !important;
       }
-      .${ERROR_DIALOG_CLASS} button {
+      .${ERROR_DIALOG_CLASS} button,
+      .${SETTINGS_DIALOG_CLASS} button {
         -webkit-appearance: none !important;
         appearance: none !important;
         flex: 1 1 120px !important;
@@ -1918,19 +2148,23 @@
         cursor: pointer !important;
         touch-action: manipulation !important;
       }
-      .${ERROR_DIALOG_CLASS} button[data-action="retry"] {
+      .${ERROR_DIALOG_CLASS} button[data-action="retry"],
+      .${SETTINGS_DIALOG_CLASS} button[data-action="save"] {
         border-color: #18181a !important;
         background: #18181a !important;
         color: #fff !important;
       }
-      .${ERROR_DIALOG_CLASS} button:active {
+      .${ERROR_DIALOG_CLASS} button:active,
+      .${SETTINGS_DIALOG_CLASS} button:active {
         opacity: 0.7 !important;
       }
-      .${ERROR_DIALOG_CLASS} button:focus-visible {
+      .${ERROR_DIALOG_CLASS} button:focus-visible,
+      .${SETTINGS_DIALOG_CLASS} button:focus-visible {
         outline: 2px solid #2878d0 !important;
         outline-offset: 2px !important;
       }
-      .${ERROR_DIALOG_CLASS} button:disabled {
+      .${ERROR_DIALOG_CLASS} button:disabled,
+      .${SETTINGS_DIALOG_CLASS} button:disabled {
         cursor: default !important;
         opacity: 0.42 !important;
       }
@@ -2003,7 +2237,8 @@
         }
       }
       @media (prefers-color-scheme: dark) {
-        .${ERROR_DIALOG_CLASS} {
+        .${ERROR_DIALOG_CLASS},
+        .${SETTINGS_DIALOG_CLASS} {
           border-color: rgba(255, 255, 255, 0.18) !important;
           background: #1c1c1e !important;
           color: #f5f5f7 !important;
@@ -2011,12 +2246,22 @@
         .${ERROR_DIALOG_CLASS} > pre {
           border-color: rgba(255, 255, 255, 0.14) !important;
         }
-        .${ERROR_DIALOG_CLASS} button {
+        .${SETTINGS_DIALOG_CLASS} input {
+          border-color: rgba(255, 255, 255, 0.22) !important;
+          background: #2c2c2e !important;
+          color: #f5f5f7 !important;
+        }
+        .${SETTINGS_DIALOG_CLASS} [data-error] {
+          color: #ff9b8f !important;
+        }
+        .${ERROR_DIALOG_CLASS} button,
+        .${SETTINGS_DIALOG_CLASS} button {
           border-color: rgba(255, 255, 255, 0.2) !important;
           background: #323236 !important;
           color: #f5f5f7 !important;
         }
-        .${ERROR_DIALOG_CLASS} button[data-action="retry"] {
+        .${ERROR_DIALOG_CLASS} button[data-action="retry"],
+        .${SETTINGS_DIALOG_CLASS} button[data-action="save"] {
           border-color: #f5f5f7 !important;
           background: #f5f5f7 !important;
           color: #18181a !important;
@@ -2053,6 +2298,17 @@
   });
 
   GM_registerMenuCommand("Touch Translate: Configure API", configureSettings);
+  GM_registerMenuCommand("Touch Translate: Clear API settings", () => {
+    if (
+      !confirm(
+        "Remove the saved Base URL, model, target language, and API key?",
+      )
+    ) {
+      return;
+    }
+    GM_deleteValue(SETTINGS_KEY);
+    toast("API settings cleared");
+  });
   GM_registerMenuCommand(
     "Touch Translate: Auto-translate page",
     startPageTranslation,

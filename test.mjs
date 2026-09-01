@@ -9,13 +9,36 @@ const source = readFileSync(
 const api = {};
 const body = {};
 const documentElement = {};
+const NodeFilter = {
+  FILTER_ACCEPT: 1,
+  FILTER_REJECT: 2,
+  SHOW_TEXT: 4,
+};
+const document = {
+  body,
+  documentElement,
+  createTreeWalker(element, _whatToShow, filter) {
+    const nodes = (element.textNodes || []).filter(
+      (node) => filter.acceptNode(node) === NodeFilter.FILTER_ACCEPT,
+    );
+    let index = -1;
+    return {
+      currentNode: null,
+      nextNode() {
+        this.currentNode = nodes[++index];
+        return Boolean(this.currentNode);
+      },
+    };
+  },
+};
 let requestAborted = false;
 let requestOptions;
 const context = vm.createContext({
   __TOUCH_TRANSLATE_TEST__: api,
   URL,
   console,
-  document: { body, documentElement },
+  document,
+  NodeFilter,
   GM_xmlhttpRequest: (options) => {
     requestOptions = options;
     return {
@@ -26,8 +49,10 @@ const context = vm.createContext({
     };
   },
   getComputedStyle: (element) => ({
+    contentVisibility: element.contentVisibility,
     display: element.display,
     overflowX: element.overflowX,
+    visibility: element.visibility,
   }),
 });
 vm.runInContext(source, context);
@@ -64,6 +89,9 @@ assert.match(
 );
 assert.doesNotMatch(source, /indicator\.addEventListener\("click"/);
 assert.match(source, /document\.createElement\("dialog"\)/);
+assert.match(source, /field\(\s*"API Key",\s*"apiKey",\s*"password"/);
+assert.doesNotMatch(source, /\bprompt\(/);
+assert.match(source, /GM_deleteValue\(SETTINGS_KEY\)/);
 assert.match(source, /translateElements\(elements\)\.catch\(reportError\)/);
 assert.doesNotMatch(source, /\\\\00d7/);
 assert.match(
@@ -79,6 +107,15 @@ assert.equal(
   api.errorMessageFor({ message: "The requested model does not exist." }),
   "The requested model does not exist.",
 );
+assert.equal(
+  api.structuredOutputUnsupported(
+    400,
+    "response_format json_schema is not supported",
+  ),
+  true,
+);
+assert.equal(api.structuredOutputUnsupported(401, "response_format"), false);
+assert.match(api.oversizedBlocksError([6001]).message, /6001[\s\S]*6000/);
 assert.equal(
   api.endpointFor("https://api.example.com/v1/"),
   "https://api.example.com/v1/chat/completions",
@@ -172,6 +209,45 @@ assert.deepEqual(
 assert.equal(api.isNearViewport({ top: 1500, bottom: 1580 }, 800), true);
 assert.equal(api.isNearViewport({ top: 1700, bottom: 1780 }, 800), false);
 
+const visibleRoot = {
+  closest: () => null,
+  display: "block",
+  innerText: "Visible text",
+  matches: () => false,
+  parentElement: null,
+  visibility: "visible",
+};
+const visibleNode = {
+  nodeValue: "Visible text",
+  parentElement: visibleRoot,
+};
+const hiddenParent = {
+  closest: () => null,
+  display: "none",
+  matches: () => false,
+  parentElement: visibleRoot,
+  visibility: "visible",
+};
+const hiddenNode = { nodeValue: "Hidden text", parentElement: hiddenParent };
+visibleRoot.textNodes = [visibleNode, hiddenNode];
+assert.equal(api.isRenderedTextNode(visibleNode, visibleRoot), true);
+assert.equal(api.isRenderedTextNode(hiddenNode, visibleRoot), false);
+assert.equal(api.sourceText({ innerText: "", textContent: "Hidden text" }), "");
+const snapshotSettings = {
+  baseURL: "https://api.example.com/v1",
+  model: "m",
+  targetLanguage: "zh-TW",
+};
+const sourceRecord = {
+  element: visibleRoot,
+  formatKey: api.hashCacheKey("Visible text", snapshotSettings),
+  text: "Visible text",
+};
+assert.equal(api.recordMatchesElement(sourceRecord, snapshotSettings), true);
+visibleRoot.innerText = "Updated text";
+visibleNode.nodeValue = "Updated text";
+assert.equal(api.recordMatchesElement(sourceRecord, snapshotSettings), false);
+
 const touch = { identifier: 7, clientX: 40, clientY: 30 };
 const touchList = { 0: touch, length: 1 };
 assert.equal(api.pointFor(touchList, 7), touch);
@@ -232,6 +308,51 @@ requestOptions.onload({
   }),
 });
 assert.deepEqual([...(await successfulRequest.promise)], ["hello translated"]);
+
+const fallbackSettings = {
+  apiKey: "test",
+  baseURL: "https://api.example.com/v1",
+  model: "fallback-model",
+  targetLanguage: "zh-TW",
+};
+const fallbackRequest = api.requestTranslations(["hello"], fallbackSettings);
+requestOptions.onload({
+  status: 400,
+  responseText: JSON.stringify({
+    error: { message: "response_format json_schema is not supported" },
+  }),
+});
+assert.equal(JSON.parse(requestOptions.data).response_format, undefined);
+requestOptions.onload({
+  status: 200,
+  responseText: JSON.stringify({
+    choices: [
+      {
+        finish_reason: "stop",
+        message: { content: '{"translations":["fallback translated"]}' },
+      },
+    ],
+  }),
+});
+assert.deepEqual([...(await fallbackRequest.promise)], ["fallback translated"]);
+
+const rememberedFallback = api.requestTranslations(
+  ["again"],
+  fallbackSettings,
+);
+assert.equal(JSON.parse(requestOptions.data).response_format, undefined);
+requestOptions.onload({
+  status: 200,
+  responseText: JSON.stringify({
+    choices: [
+      {
+        finish_reason: "stop",
+        message: { content: '{"translations":["again translated"]}' },
+      },
+    ],
+  }),
+});
+assert.deepEqual([...(await rememberedFallback.promise)], ["again translated"]);
 
 const outerListItem = {
   display: "list-item",
