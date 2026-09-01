@@ -37,7 +37,16 @@ assert.doesNotMatch(source, /drop-shadow/);
 assert.doesNotMatch(source, /touch-translate-pulse/);
 assert.match(
   source,
-  /data-state="loading"\]::before[\s\S]{0,300}inset: 0[\s\S]{0,200}border: 1\.5px solid transparent[\s\S]{0,200}border-top-color: currentColor[\s\S]{0,200}border-right-color: currentColor/,
+  /data-state="loading"\]::before[\s\S]{0,300}inset: 5\.5px[\s\S]{0,200}animation: touch-translate-breathe/,
+);
+assert.match(
+  source,
+  /data-state="loading"\]::after[\s\S]{0,300}border: 1px solid currentColor[\s\S]{0,200}animation: touch-translate-ripple/,
+);
+assert.doesNotMatch(source, /touch-translate-spin/);
+assert.match(
+  source,
+  /data-state="error"\]::before[\s\S]{0,240}background: #c8453c/,
 );
 assert.match(
   source,
@@ -252,6 +261,22 @@ const shortBlock = {
   parentElement: largerParent,
 };
 assert.equal(api.swipeElementFor(shortBlock), shortBlock);
+
+const citationButton = {
+  children: [],
+  display: "block",
+  innerText: "Citation metadata",
+  matches: (selector) => selector.includes("button"),
+};
+const citedBlock = {
+  children: [citationButton],
+  closest: () => null,
+  display: "block",
+  innerText: "A sentence with citation metadata",
+  matches: () => false,
+  parentElement: body,
+};
+assert.equal(api.swipeElementFor(citedBlock), citedBlock);
 
 const nestedTextBlock = {
   children: [],

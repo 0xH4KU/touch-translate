@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.3
+// @version      0.5.5
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -55,6 +55,28 @@
     "[role='menu']",
     "[role='banner']",
     "[role='contentinfo']",
+    "[aria-hidden='true']",
+  ].join(", ");
+  const NON_TEXT_SELECTOR = [
+    `.${INDICATOR_CLASS}`,
+    "script",
+    "style",
+    "noscript",
+    "template",
+    "iframe",
+    "object",
+    "embed",
+    "canvas",
+    "video",
+    "audio",
+    "picture",
+    "img",
+    "svg",
+    "input",
+    "textarea",
+    "select",
+    "button",
+    "[hidden]",
     "[aria-hidden='true']",
   ].join(", ");
   const DEFAULT_SETTINGS = {
@@ -655,29 +677,6 @@
     return normalizeText(element.innerText || element.textContent);
   }
 
-  const NON_TEXT_SELECTOR = [
-    `.${INDICATOR_CLASS}`,
-    "script",
-    "style",
-    "noscript",
-    "template",
-    "iframe",
-    "object",
-    "embed",
-    "canvas",
-    "video",
-    "audio",
-    "picture",
-    "img",
-    "svg",
-    "input",
-    "textarea",
-    "select",
-    "button",
-    "[hidden]",
-    "[aria-hidden='true']",
-  ].join(", ");
-
   function contentTextNodes(element) {
     const nodes = [];
     const walker = document.createTreeWalker(
@@ -701,7 +700,11 @@
       nodes.length < 2 ||
       nodes.some((node) => /\[\[\/?TT\d+\]\]/.test(node.nodeValue))
     ) {
-      return { requestText: text, segmentCount: 0 };
+      return {
+        requestText:
+          nodes.length === 1 ? normalizeText(nodes[0].nodeValue) : text,
+        segmentCount: 0,
+      };
     }
     const requestText = nodes
       .map((node, index) => {
@@ -1442,6 +1445,7 @@
     const descendants = Array.from(element.children || []);
     while (descendants.length) {
       const child = descendants.pop();
+      if (child.matches(NON_TEXT_SELECTOR)) continue;
       const style = getComputedStyle(child);
       if (style.display === "none" || style.visibility === "hidden") continue;
       if (sourceText(child).length < 2) continue;
@@ -1720,7 +1724,7 @@
         background: transparent !important;
         -webkit-mask: none !important;
         mask: none !important;
-        opacity: 0.7 !important;
+        opacity: 0.82 !important;
       }
       .${INDICATOR_CLASS}[data-state="gesture"]::before {
         content: "" !important;
@@ -1728,39 +1732,29 @@
         inset: 0 !important;
         border-radius: 50% !important;
         background: conic-gradient(
-          currentColor var(--touch-translate-progress),
-          transparent 0
+          currentColor 0 var(--touch-translate-progress),
+          rgba(127, 127, 127, 0.32) var(--touch-translate-progress) 1turn
         ) !important;
-        -webkit-mask: radial-gradient(
-          farthest-side,
-          transparent calc(100% - 1.5px),
-          #000 0
-        ) !important;
-        mask: radial-gradient(
-          farthest-side,
-          transparent calc(100% - 1.5px),
-          #000 0
-        ) !important;
+        opacity: 0.38 !important;
       }
       .${INDICATOR_CLASS}[data-state="gesture"]::after {
         content: "" !important;
         position: absolute !important;
-        width: 2.5px !important;
-        height: 2.5px !important;
+        width: 5px !important;
+        height: 5px !important;
         inset: 50% auto auto 50% !important;
         border-radius: 50% !important;
         background: currentColor !important;
-        opacity: 0.55 !important;
         transform: translate(-50%, -50%) !important;
       }
       .${INDICATOR_CLASS}[data-state="gesture"][data-ready="true"] {
-        opacity: 0.9 !important;
+        opacity: 0.94 !important;
       }
       .${INDICATOR_CLASS}[data-state="gesture"][data-ready="true"]::before {
-        transform: scale(1.1) !important;
+        opacity: 0.72 !important;
       }
       .${INDICATOR_CLASS}[data-state="gesture"][data-ready="true"]::after {
-        transform: translate(-50%, -50%) scale(1.45) !important;
+        transform: translate(-50%, -50%) scale(1.25) !important;
       }
       .${INDICATOR_CLASS}[data-state="gesture"][data-action="cancel"]::after,
       .${INDICATOR_CLASS}[data-state="gesture"][data-action="remove"]::after {
@@ -1779,15 +1773,23 @@
         background: transparent !important;
         -webkit-mask: none !important;
         mask: none !important;
-        border: 1.5px solid currentColor !important;
-        opacity: 0.72 !important;
+        border: 0 !important;
+        opacity: 0.82 !important;
         animation: touch-translate-commit ${COMMIT_HOLD_MS}ms ease-out both !important;
+      }
+      .${INDICATOR_CLASS}[data-state="committed"]::before {
+        content: "" !important;
+        position: absolute !important;
+        inset: 0 !important;
+        border-radius: 50% !important;
+        background: currentColor !important;
+        opacity: 0.5 !important;
       }
       .${INDICATOR_CLASS}[data-state="committed"]::after {
         content: "" !important;
         position: absolute !important;
-        width: 2.5px !important;
-        height: 2.5px !important;
+        width: 5px !important;
+        height: 5px !important;
         inset: 50% auto auto 50% !important;
         border-radius: 50% !important;
         background: currentColor !important;
@@ -1797,17 +1799,23 @@
         background: transparent !important;
         -webkit-mask: none !important;
         mask: none !important;
-        opacity: 0.7 !important;
+        opacity: 0.78 !important;
       }
       .${INDICATOR_CLASS}[data-state="loading"]::before {
         content: "" !important;
         position: absolute !important;
-        inset: 0 !important;
-        border: 1.5px solid transparent !important;
-        border-top-color: currentColor !important;
-        border-right-color: currentColor !important;
+        inset: 5.5px !important;
         border-radius: 50% !important;
-        animation: touch-translate-spin 680ms linear infinite !important;
+        background: currentColor !important;
+        animation: touch-translate-breathe 760ms ease-in-out infinite alternate !important;
+      }
+      .${INDICATOR_CLASS}[data-state="loading"]::after {
+        content: "" !important;
+        position: absolute !important;
+        inset: 1px !important;
+        border: 1px solid currentColor !important;
+        border-radius: 50% !important;
+        animation: touch-translate-ripple 760ms ease-out infinite !important;
       }
       .${INDICATOR_CLASS}[data-state="error"] {
         background: transparent !important;
@@ -1820,23 +1828,28 @@
         content: "" !important;
         position: absolute !important;
         inset: 0 !important;
-        border: 1.5px solid #c8453c !important;
         border-radius: 50% !important;
+        background: #c8453c !important;
       }
       .${INDICATOR_CLASS}[data-state="error"]::after {
-        content: "!" !important;
+        content: "\\00d7" !important;
         position: absolute !important;
-        inset: 50% auto auto 50% !important;
-        color: #c8453c !important;
-        font: 700 0.55em/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
-        transform: translate(-50%, -52%) !important;
+        inset: 0 !important;
+        color: #fff !important;
+        font: 700 13px/16px -apple-system, BlinkMacSystemFont, sans-serif !important;
+        text-align: center !important;
       }
-      @keyframes touch-translate-spin {
-        to { transform: rotate(1turn); }
+      @keyframes touch-translate-breathe {
+        from { opacity: 0.44; transform: scale(0.7); }
+        to { opacity: 0.9; transform: scale(1.15); }
+      }
+      @keyframes touch-translate-ripple {
+        from { opacity: 0.42; transform: scale(0.4); }
+        to { opacity: 0; transform: scale(1); }
       }
       @keyframes touch-translate-commit {
-        from { opacity: 0.3; transform: scale(0.78); }
-        to { opacity: 0.72; transform: scale(1); }
+        from { opacity: 0.32; transform: scale(0.76); }
+        to { opacity: 0.82; transform: scale(1); }
       }
       @keyframes touch-translate-toast-in {
         from { opacity: 0; translate: 0 4px; scale: 0.98; }
@@ -1973,7 +1986,8 @@
       @media (prefers-reduced-motion: reduce) {
         .${TOAST_CLASS},
         .${INDICATOR_CLASS}[data-state="committed"],
-        .${INDICATOR_CLASS}[data-state="loading"]::before {
+        .${INDICATOR_CLASS}[data-state="loading"]::before,
+        .${INDICATOR_CLASS}[data-state="loading"]::after {
           animation: none !important;
         }
         .${TRANSLATION_CLASS},
