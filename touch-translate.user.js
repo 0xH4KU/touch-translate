@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.5
+// @version      0.5.7
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -1758,16 +1758,7 @@
       }
       .${INDICATOR_CLASS}[data-state="gesture"][data-action="cancel"]::after,
       .${INDICATOR_CLASS}[data-state="gesture"][data-action="remove"]::after {
-        content: "\\00d7" !important;
-        inset: 0 !important;
-        width: 16px !important;
-        height: 16px !important;
-        border-radius: 0 !important;
-        background: transparent !important;
-        font: 700 11px/16px -apple-system, BlinkMacSystemFont, sans-serif !important;
-        text-align: center !important;
         opacity: 0.8 !important;
-        transform: none !important;
       }
       .${INDICATOR_CLASS}[data-state="committed"] {
         background: transparent !important;
@@ -1812,10 +1803,10 @@
       .${INDICATOR_CLASS}[data-state="loading"]::after {
         content: "" !important;
         position: absolute !important;
-        inset: 1px !important;
+        inset: 0 !important;
         border: 1px solid currentColor !important;
         border-radius: 50% !important;
-        animation: touch-translate-ripple 760ms ease-out infinite !important;
+        animation: touch-translate-loading-ring 760ms ease-in-out infinite alternate !important;
       }
       .${INDICATOR_CLASS}[data-state="error"] {
         background: transparent !important;
@@ -1832,24 +1823,33 @@
         background: #c8453c !important;
       }
       .${INDICATOR_CLASS}[data-state="error"]::after {
-        content: "\\00d7" !important;
-        position: absolute !important;
-        inset: 0 !important;
         color: #fff !important;
-        font: 700 13px/16px -apple-system, BlinkMacSystemFont, sans-serif !important;
-        text-align: center !important;
+      }
+      .${INDICATOR_CLASS}[data-state="gesture"][data-action="cancel"]::after,
+      .${INDICATOR_CLASS}[data-state="gesture"][data-action="remove"]::after,
+      .${INDICATOR_CLASS}[data-state="error"]::after {
+        content: "" !important;
+        position: absolute !important;
+        width: 8px !important;
+        height: 8px !important;
+        inset: 50% auto auto 50% !important;
+        border-radius: 0 !important;
+        background:
+          linear-gradient(45deg, transparent 42%, currentColor 42% 58%, transparent 58%),
+          linear-gradient(-45deg, transparent 42%, currentColor 42% 58%, transparent 58%) !important;
+        transform: translate(-50%, -50%) !important;
       }
       @keyframes touch-translate-breathe {
         from { opacity: 0.44; transform: scale(0.7); }
         to { opacity: 0.9; transform: scale(1.15); }
       }
-      @keyframes touch-translate-ripple {
-        from { opacity: 0.42; transform: scale(0.4); }
-        to { opacity: 0; transform: scale(1); }
+      @keyframes touch-translate-loading-ring {
+        from { opacity: 0.22; }
+        to { opacity: 0.52; }
       }
       @keyframes touch-translate-commit {
-        from { opacity: 0.32; transform: scale(0.76); }
-        to { opacity: 0.82; transform: scale(1); }
+        from { opacity: 0.32; }
+        to { opacity: 0.82; }
       }
       @keyframes touch-translate-toast-in {
         from { opacity: 0; translate: 0 4px; scale: 0.98; }

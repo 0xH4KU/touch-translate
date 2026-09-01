@@ -41,7 +41,12 @@ assert.match(
 );
 assert.match(
   source,
-  /data-state="loading"\]::after[\s\S]{0,300}border: 1px solid currentColor[\s\S]{0,200}animation: touch-translate-ripple/,
+  /data-state="loading"\]::after[\s\S]{0,200}inset: 0 !important;[\s\S]{0,200}border: 1px solid currentColor[\s\S]{0,200}animation: touch-translate-loading-ring/,
+);
+assert.doesNotMatch(source, /touch-translate-ripple/);
+assert.match(
+  source,
+  /@keyframes touch-translate-commit\s*\{\s*from \{ opacity: 0\.32; \}\s*to \{ opacity: 0\.82; \}/,
 );
 assert.doesNotMatch(source, /touch-translate-spin/);
 assert.match(
@@ -60,7 +65,11 @@ assert.match(
 assert.doesNotMatch(source, /indicator\.addEventListener\("click"/);
 assert.match(source, /document\.createElement\("dialog"\)/);
 assert.match(source, /translateElements\(elements\)\.catch\(reportError\)/);
-assert.match(source, /font: 700 11px\/16px/);
+assert.doesNotMatch(source, /\\\\00d7/);
+assert.match(
+  source,
+  /data-action="remove"\][\s\S]{0,500}width: 8px !important;[\s\S]{0,200}linear-gradient\(45deg/,
+);
 assert.match(source, /new MutationObserver\(task\.refresh\)/);
 assert.equal(api.normalizeText("  hello\n  world "), "hello world");
 assert.equal(api.pageTextLooksUseful("https://example.com/path"), false);
