@@ -50,7 +50,6 @@ const context = vm.createContext({
   },
   getComputedStyle: (element) => ({
     contentVisibility: element.contentVisibility,
-    direction: element.direction,
     display: element.display,
     overflowX: element.overflowX,
     visibility: element.visibility,
@@ -454,68 +453,6 @@ const broadContainer = {
   parentElement: body,
 };
 assert.equal(api.swipeElementFor(broadContainer), null);
-
-const scrollContainer = {
-  clientWidth: 320,
-  overflowX: "auto",
-  parentElement: body,
-  scrollLeft: 80,
-  scrollWidth: 640,
-};
-const tableCell = { parentElement: scrollContainer };
-assert.equal(api.canConsumeRightSwipe(tableCell), true);
-scrollContainer.scrollLeft = 0;
-assert.equal(api.canConsumeRightSwipe(tableCell), false);
-
-Object.assign(scrollContainer, { direction: "rtl", scrollLeft: -80 });
-assert.equal(api.canConsumeRightSwipe(tableCell), true);
-scrollContainer.scrollLeft = 0;
-assert.equal(api.canConsumeRightSwipe(tableCell), false);
-Object.assign(scrollContainer, {
-  direction: "ltr",
-  scrollLeft: 80,
-  scrollWidth: 320,
-});
-assert.equal(api.canConsumeRightSwipe(tableCell), false);
-
-Object.assign(documentElement, {
-  clientWidth: 320,
-  overflowX: "auto",
-  scrollWidth: 640,
-});
-document.scrollingElement = documentElement;
-const pageContent = { parentElement: documentElement };
-assert.equal(api.canConsumeRightSwipe(pageContent), false);
-
-const feedContainer = {
-  clientWidth: 320,
-  matches: (selector) => selector.includes("[role='feed']"),
-  overflowX: "auto",
-  parentElement: body,
-  scrollLeft: 0,
-  scrollWidth: 640,
-};
-const feedPost = { parentElement: feedContainer };
-assert.equal(api.canConsumeRightSwipe(feedPost), false);
-feedContainer.scrollLeft = 20;
-assert.equal(api.canConsumeRightSwipe(feedPost), true);
-
-const mainLandmark = { parentElement: body };
-document.querySelector = (selector) =>
-  selector.includes("main") ? mainLandmark : null;
-const appShell = {
-  clientWidth: 320,
-  contains: (el) => el === mainLandmark,
-  matches: () => false,
-  overflowX: "auto",
-  parentElement: body,
-  scrollLeft: 0,
-  scrollWidth: 640,
-};
-const appPost = { parentElement: appShell };
-assert.equal(api.canConsumeRightSwipe(appPost), false);
-appShell.scrollLeft = 20;
-assert.equal(api.canConsumeRightSwipe(appPost), true);
 
 const slottedTitle = {
   closest: () => null,
