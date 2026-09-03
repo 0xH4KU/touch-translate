@@ -78,6 +78,14 @@ assert.doesNotMatch(source, /touch-translate-spin/);
 assert.doesNotMatch(source, /touch-action: pan-y/);
 assert.match(
   source,
+  /const element = swipeElementFor\(target\);[\s\S]{0,150}if \(event\.cancelable\) event\.preventDefault\(\);/,
+);
+assert.match(
+  source,
+  /document\.addEventListener\("touchstart", onTouchStart, \{\s*capture: true,\s*passive: false/,
+);
+assert.match(
+  source,
   /data-state="error"\]::before[\s\S]{0,240}background: #c8453c/,
 );
 assert.match(
