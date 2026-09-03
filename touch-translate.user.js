@@ -20,7 +20,20 @@
 
   // Constants and defaults
 
-  const BLOCK_SELECTOR = "p, li, blockquote, h1, h2, h3, h4, h5, h6";
+  const BLOCK_SELECTOR = "p, li, blockquote, h1, h2, h3, h4, h5, h6, [slot='title']";
+  const TITLE_BLOCK_SELECTOR = "p, h1, h2, h3, h4, h5, h6, [slot='title']";
+  const OVERLAY_LINK_SELECTOR = [
+    "a[slot*='post-link']",
+    "a.absolute.inset-0",
+    "a[class*='inset-0']",
+  ].join(", ");
+  const PAGE_CONTAINER_SELECTOR = [
+    "main",
+    "[role='main']",
+    "[role='feed']",
+    "shreddit-app",
+    "shreddit-feed",
+  ].join(", ");
   const TRANSLATION_CLASS = "touch-translate__translation";
   const INDICATOR_CLASS = "touch-translate__indicator";
   const ERROR_DIALOG_CLASS = "touch-translate__error-dialog";
@@ -423,6 +436,7 @@
       projectedSwipeX,
       recordMatchesElement,
       requestTranslations,
+      resolveTargetElement,
       sourceText,
       structuredOutputUnsupported,
       swipeIntent,
@@ -1049,6 +1063,7 @@
     ) {
       return false;
     }
+    if (element.matches?.("[slot='title']")) return true;
     const linkedCharacters = element.closest("a")
       ? text.length
       : [...element.querySelectorAll("a")].reduce(
@@ -1660,17 +1675,21 @@
   }
 
   function swipeElementFor(target) {
-    const translation = target.closest(`.${TRANSLATION_CLASS}`);
+    const translation = target?.closest?.(`.${TRANSLATION_CLASS}`);
     if (translation) return translation;
 
     let inline = null;
-    for (let element = target; element; element = element.parentElement) {
+    for (
+      let element = target;
+      element;
+      element = element.parentElement || element.getRootNode?.().host
+    ) {
       if (element === document.body || element === document.documentElement) break;
       inline ||= element;
       const display = getComputedStyle(element).display;
-      if (element.matches("p, h1, h2, h3, h4, h5, h6")) return element;
+      if (element.matches?.(TITLE_BLOCK_SELECTOR)) return element;
       if (
-        element.matches(BLOCK_SELECTOR) ||
+        element.matches?.(BLOCK_SELECTOR) ||
         (display !== "contents" && !display.startsWith("inline"))
       ) {
         return hasNestedTextBlock(element) ? null : element;
@@ -1685,6 +1704,10 @@
       element;
       element = element.parentElement || element.getRootNode?.().host
     ) {
+      if (element.matches?.(PAGE_CONTAINER_SELECTOR)) {
+        if (element === document.documentElement) break;
+        continue;
+      }
       const overflowX = getComputedStyle(element).overflowX;
       if (
         element !== document.scrollingElement &&
@@ -1696,6 +1719,29 @@
       if (element === document.documentElement) break;
     }
     return false;
+  }
+
+  function resolveTargetElement(target, touch) {
+    if (!target) return null;
+    if (
+      target.matches?.(OVERLAY_LINK_SELECTOR) &&
+      sourceText(target).length < 2 &&
+      typeof document.elementsFromPoint === "function" &&
+      touch
+    ) {
+      const elements =
+        document.elementsFromPoint(touch.clientX, touch.clientY) || [];
+      const underlying = elements.find(
+        (element) =>
+          (typeof Element === "undefined" || element instanceof Element) &&
+          element !== target &&
+          !element.matches?.(OVERLAY_LINK_SELECTOR) &&
+          element !== document.body &&
+          element !== document.documentElement,
+      );
+      if (underlying) return underlying;
+    }
+    return target;
   }
 
   function movedTooFar(touches, starts) {
@@ -1745,9 +1791,10 @@
       return;
     }
     const touch = event.touches[0];
-    const target =
+    const rawTarget =
       event.composedPath?.().find((node) => node instanceof Element) ||
       (event.target instanceof Element ? event.target : null);
+    const target = resolveTargetElement(rawTarget, touch);
     if (
       !target ||
       touch.clientX < SAFARI_EDGE_X ||
@@ -1877,6 +1924,9 @@
     const style = document.createElement("style");
     style.dataset.touchTranslate = "";
     style.textContent = `
+      p, [slot="title"], [slot="comment"], [slot="text-body"], .md {
+        touch-action: pan-y pinch-zoom;
+      }
       .${TRANSLATION_CLASS} {
         box-sizing: border-box !important;
         opacity: 0.78 !important;

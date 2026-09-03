@@ -473,4 +473,54 @@ document.scrollingElement = documentElement;
 const pageContent = { parentElement: documentElement };
 assert.equal(api.hasHorizontalScroller(pageContent), false);
 
+const shredditFeed = {
+  clientWidth: 320,
+  matches: (selector) => selector.includes("shreddit-feed"),
+  overflowX: "auto",
+  parentElement: body,
+  scrollWidth: 640,
+};
+const feedPost = { parentElement: shredditFeed };
+assert.equal(api.hasHorizontalScroller(feedPost), false);
+
+const redditTitle = {
+  closest: () => null,
+  display: "block",
+  innerText: "Reddit post headline",
+  matches: (selector) => selector.includes("[slot='title']"),
+  parentElement: body,
+};
+assert.equal(api.swipeElementFor(redditTitle), redditTitle);
+
+const shadowHost = {
+  closest: () => null,
+  display: "block",
+  innerText: "Shadow host block text",
+  matches: (selector) => selector.includes("p"),
+  parentElement: body,
+};
+const shadowChild = {
+  closest: () => null,
+  display: "inline",
+  getRootNode: () => ({ host: shadowHost }),
+  innerText: "Shadow child text",
+  matches: () => false,
+  parentElement: null,
+};
+assert.equal(api.swipeElementFor(shadowChild), shadowHost);
+
+const underlyingText = {
+  innerText: "Underlying post title",
+  matches: () => false,
+};
+const overlayLink = {
+  innerText: "",
+  matches: (selector) => selector.includes("post-link"),
+};
+document.elementsFromPoint = () => [overlayLink, underlyingText, body];
+assert.equal(
+  api.resolveTargetElement(overlayLink, { clientX: 50, clientY: 50 }),
+  underlyingText,
+);
+
 console.log("Touch Translate self-check passed");
