@@ -20,19 +20,25 @@
 
   // Constants and defaults
 
-  const BLOCK_SELECTOR = "p, li, blockquote, h1, h2, h3, h4, h5, h6, [slot='title']";
-  const TITLE_BLOCK_SELECTOR = "p, h1, h2, h3, h4, h5, h6, [slot='title']";
+  const BLOCK_SELECTOR =
+    "p, li, blockquote, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header']";
+  const TITLE_BLOCK_SELECTOR =
+    "p, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header']";
   const OVERLAY_LINK_SELECTOR = [
-    "a[slot*='post-link']",
+    "a.stretched-link",
+    "a[class*='stretched-link']",
     "a.absolute.inset-0",
     "a[class*='inset-0']",
+    "a[class*='overlay']",
+    "a[slot*='link']",
   ].join(", ");
   const PAGE_CONTAINER_SELECTOR = [
+    "html",
+    "body",
     "main",
     "[role='main']",
     "[role='feed']",
-    "shreddit-app",
-    "shreddit-feed",
+    "[role='application']",
   ].join(", ");
   const TRANSLATION_CLASS = "touch-translate__translation";
   const INDICATOR_CLASS = "touch-translate__indicator";
@@ -93,6 +99,10 @@
     "button",
     "[hidden]",
     "[aria-hidden='true']",
+    ".sr-only",
+    ".visually-hidden",
+    "[class*='screen-reader']",
+    "[class*='visually-hidden']",
   ].join(", ");
   const DEFAULT_SETTINGS = {
     baseURL: "https://api.openai.com/v1",
@@ -1063,7 +1073,7 @@
     ) {
       return false;
     }
-    if (element.matches?.("[slot='title']")) return true;
+    if (element.matches?.(TITLE_BLOCK_SELECTOR)) return true;
     const linkedCharacters = element.closest("a")
       ? text.length
       : [...element.querySelectorAll("a")].reduce(
@@ -1698,13 +1708,33 @@
     return inline && !hasNestedTextBlock(inline) ? inline : null;
   }
 
+  function isPageLevelContainer(element) {
+    if (
+      !element ||
+      element === document.documentElement ||
+      element === document.body
+    ) {
+      return true;
+    }
+    if (element.matches?.(PAGE_CONTAINER_SELECTOR)) return true;
+    const main = document.querySelector?.("main, [role='main']");
+    if (
+      main &&
+      typeof element.contains === "function" &&
+      element.contains(main)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
   function hasHorizontalScroller(target) {
     for (
       let element = target;
       element;
       element = element.parentElement || element.getRootNode?.().host
     ) {
-      if (element.matches?.(PAGE_CONTAINER_SELECTOR)) {
+      if (isPageLevelContainer(element)) {
         if (element === document.documentElement) break;
         continue;
       }
@@ -1721,11 +1751,26 @@
     return false;
   }
 
+  function isOverlayLink(element) {
+    if (!element || element.tagName !== "A") return false;
+    if (element.matches?.(OVERLAY_LINK_SELECTOR)) return true;
+    const style = getComputedStyle(element);
+    if (style.position !== "absolute" && style.position !== "fixed") return false;
+    const parent = element.parentElement;
+    if (parent && typeof parent.getBoundingClientRect === "function") {
+      const pRect = parent.getBoundingClientRect();
+      const rect = element.getBoundingClientRect();
+      if (rect.width >= pRect.width * 0.9 && rect.height >= pRect.height * 0.9) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function resolveTargetElement(target, touch) {
     if (!target) return null;
     if (
-      target.matches?.(OVERLAY_LINK_SELECTOR) &&
-      sourceText(target).length < 2 &&
+      isOverlayLink(target) &&
       typeof document.elementsFromPoint === "function" &&
       touch
     ) {
@@ -1735,9 +1780,8 @@
         (element) =>
           (typeof Element === "undefined" || element instanceof Element) &&
           element !== target &&
-          !element.matches?.(OVERLAY_LINK_SELECTOR) &&
-          element !== document.body &&
-          element !== document.documentElement,
+          !isOverlayLink(element) &&
+          !isPageLevelContainer(element),
       );
       if (underlying) return underlying;
     }
@@ -1924,7 +1968,7 @@
     const style = document.createElement("style");
     style.dataset.touchTranslate = "";
     style.textContent = `
-      p, [slot="title"], [slot="comment"], [slot="text-body"], .md {
+      p, li, blockquote, h1, h2, h3, h4, h5, h6, [role="heading"], [slot] {
         touch-action: pan-y pinch-zoom;
       }
       .${TRANSLATION_CLASS} {

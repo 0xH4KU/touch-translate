@@ -473,24 +473,38 @@ document.scrollingElement = documentElement;
 const pageContent = { parentElement: documentElement };
 assert.equal(api.hasHorizontalScroller(pageContent), false);
 
-const shredditFeed = {
+const feedContainer = {
   clientWidth: 320,
-  matches: (selector) => selector.includes("shreddit-feed"),
+  matches: (selector) => selector.includes("[role='feed']"),
   overflowX: "auto",
   parentElement: body,
   scrollWidth: 640,
 };
-const feedPost = { parentElement: shredditFeed };
+const feedPost = { parentElement: feedContainer };
 assert.equal(api.hasHorizontalScroller(feedPost), false);
 
-const redditTitle = {
+const mainLandmark = { parentElement: body };
+document.querySelector = (selector) =>
+  selector.includes("main") ? mainLandmark : null;
+const appShell = {
+  clientWidth: 320,
+  contains: (el) => el === mainLandmark,
+  matches: () => false,
+  overflowX: "auto",
+  parentElement: body,
+  scrollWidth: 640,
+};
+const appPost = { parentElement: appShell };
+assert.equal(api.hasHorizontalScroller(appPost), false);
+
+const slottedTitle = {
   closest: () => null,
   display: "block",
-  innerText: "Reddit post headline",
+  innerText: "Slotted headline",
   matches: (selector) => selector.includes("[slot='title']"),
   parentElement: body,
 };
-assert.equal(api.swipeElementFor(redditTitle), redditTitle);
+assert.equal(api.swipeElementFor(slottedTitle), slottedTitle);
 
 const shadowHost = {
   closest: () => null,
@@ -514,8 +528,9 @@ const underlyingText = {
   matches: () => false,
 };
 const overlayLink = {
-  innerText: "",
-  matches: (selector) => selector.includes("post-link"),
+  innerText: "Accessible screen reader text",
+  matches: (selector) => selector.includes("stretched-link"),
+  tagName: "A",
 };
 document.elementsFromPoint = () => [overlayLink, underlyingText, body];
 assert.equal(
