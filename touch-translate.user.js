@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.16
+// @version      0.5.17
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -431,6 +431,7 @@
       errorMessageFor,
       groupRecords,
       hashCacheKey,
+      canConsumeRightSwipe,
       indicatorFor,
       isNearViewport,
       isRenderedTextNode,
@@ -1727,6 +1728,30 @@
     return false;
   }
 
+  function canConsumeRightSwipe(target) {
+    for (
+      let element = target;
+      element;
+      element = element.parentElement || element.getRootNode?.().host
+    ) {
+      const style = getComputedStyle(element);
+      if (
+        element !== document.body &&
+        element !== document.documentElement &&
+        element !== document.scrollingElement &&
+        element.scrollWidth > element.clientWidth + 1 &&
+        /^(?:auto|scroll|overlay)$/.test(style.overflowX) &&
+        (style.direction === "rtl"
+          ? element.scrollLeft < -1
+          : element.scrollLeft > 1)
+      ) {
+        return true;
+      }
+      if (element === document.documentElement) break;
+    }
+    return false;
+  }
+
   function isOverlayLink(element) {
     if (!element || element.tagName !== "A") return false;
     if (element.matches?.(OVERLAY_LINK_SELECTOR)) return true;
@@ -1819,7 +1844,8 @@
       !target ||
       touch.clientX < SAFARI_EDGE_X ||
       target.isContentEditable ||
-      target.closest("input, textarea, select, button")
+      target.closest("input, textarea, select, button") ||
+      canConsumeRightSwipe(target)
     ) {
       clearSwipe();
       return;

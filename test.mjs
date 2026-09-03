@@ -50,6 +50,7 @@ const context = vm.createContext({
   },
   getComputedStyle: (element) => ({
     contentVisibility: element.contentVisibility,
+    direction: element.direction,
     display: element.display,
     overflowX: element.overflowX,
     visibility: element.visibility,
@@ -457,6 +458,35 @@ const broadContainer = {
   parentElement: body,
 };
 assert.equal(api.swipeElementFor(broadContainer), null);
+
+const scrollContainer = {
+  clientWidth: 320,
+  direction: "ltr",
+  overflowX: "auto",
+  parentElement: body,
+  scrollLeft: 80,
+  scrollWidth: 640,
+};
+const tableCell = { parentElement: scrollContainer };
+assert.equal(api.canConsumeRightSwipe(tableCell), true);
+scrollContainer.scrollLeft = 0;
+assert.equal(api.canConsumeRightSwipe(tableCell), false);
+
+Object.assign(scrollContainer, { direction: "rtl", scrollLeft: -80 });
+assert.equal(api.canConsumeRightSwipe(tableCell), true);
+scrollContainer.scrollLeft = 0;
+assert.equal(api.canConsumeRightSwipe(tableCell), false);
+
+Object.assign(documentElement, {
+  clientWidth: 320,
+  direction: "ltr",
+  overflowX: "auto",
+  scrollLeft: 80,
+  scrollWidth: 640,
+});
+document.scrollingElement = documentElement;
+const pageContent = { parentElement: documentElement };
+assert.equal(api.canConsumeRightSwipe(pageContent), false);
 
 const slottedTitle = {
   closest: () => null,

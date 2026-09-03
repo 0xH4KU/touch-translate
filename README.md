@@ -12,7 +12,7 @@ A private, touch-first bilingual translation userscript for iOS Safari and Tampe
 - Quickly tap with four fingers to start automatic page translation. The current and nearby content is translated first, then newly revealed or loaded blocks continue automatically as you scroll. Repeat the gesture to stop and remove the translations added by that automatic run.
 - Use the Tampermonkey menu to configure or clear the API settings, translate the page, import or export settings, and clear the cache.
 
-Swipes starting within 12px of the left screen edge are ignored to avoid triggering Safari's back gesture. Right swipes are reserved for translation, including inside horizontally scrollable regions. Container gaps that would select multiple nested text blocks are ignored.
+Swipes starting within 12px of the left screen edge are ignored to avoid triggering Safari's back gesture. Native horizontal scrolling takes priority while a scrollable table or other horizontal region can move with the gesture; a right swipe at its leading edge translates normally. Container gaps that would select multiple nested text blocks are ignored.
 
 The userscript is enabled on all regular websites, including frames where Tampermonkey can inject and open Shadow DOM content. Browser-protected pages such as Safari settings, extension stores, and other internal URLs do not allow userscripts to run.
 
