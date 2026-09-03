@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.12
+// @version      0.5.13
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -431,7 +431,7 @@
       errorMessageFor,
       groupRecords,
       hashCacheKey,
-      hasHorizontalScroller,
+      canConsumeRightSwipe,
       indicatorFor,
       isNearViewport,
       isRenderedTextNode,
@@ -1728,21 +1728,22 @@
     return false;
   }
 
-  function hasHorizontalScroller(target) {
+  function canConsumeRightSwipe(target) {
     for (
       let element = target;
       element;
       element = element.parentElement || element.getRootNode?.().host
     ) {
-      if (isPageLevelContainer(element)) {
-        if (element === document.documentElement) break;
-        continue;
-      }
-      const overflowX = getComputedStyle(element).overflowX;
+      const style = getComputedStyle(element);
       if (
+        element !== document.body &&
+        element !== document.documentElement &&
         element !== document.scrollingElement &&
         element.scrollWidth > element.clientWidth + 1 &&
-        /^(?:auto|scroll|overlay)$/.test(overflowX)
+        /^(?:auto|scroll|overlay)$/.test(style.overflowX) &&
+        (style.direction === "rtl"
+          ? element.scrollLeft < -1
+          : element.scrollLeft > 1)
       ) {
         return true;
       }
@@ -1843,8 +1844,7 @@
       !target ||
       touch.clientX < SAFARI_EDGE_X ||
       target.isContentEditable ||
-      target.closest("input, textarea, select, button") ||
-      hasHorizontalScroller(target)
+      target.closest("input, textarea, select, button")
     ) {
       clearSwipe();
       return;
@@ -1874,6 +1874,7 @@
       phase: "possible",
       ready: false,
       samples: [{ at: now, x: touch.clientX }],
+      target,
       x: touch.clientX,
       y: touch.clientY,
     };
@@ -1893,6 +1894,10 @@
     if (swipe.phase === "possible") {
       const intent = swipeIntent(dx, dy);
       if (intent === "horizontal") {
+        if (canConsumeRightSwipe(swipe.target)) {
+          clearSwipe();
+          return;
+        }
         swipe.phase = "horizontal";
       } else if (intent === "cancel") {
         clearSwipe();
@@ -1968,9 +1973,6 @@
     const style = document.createElement("style");
     style.dataset.touchTranslate = "";
     style.textContent = `
-      p, li, blockquote, h1, h2, h3, h4, h5, h6, [role="heading"], [slot] {
-        touch-action: pan-y pinch-zoom;
-      }
       .${TRANSLATION_CLASS} {
         box-sizing: border-box !important;
         opacity: 0.78 !important;

@@ -50,6 +50,7 @@ const context = vm.createContext({
   },
   getComputedStyle: (element) => ({
     contentVisibility: element.contentVisibility,
+    direction: element.direction,
     display: element.display,
     overflowX: element.overflowX,
     visibility: element.visibility,
@@ -75,6 +76,7 @@ assert.match(
   /@keyframes touch-translate-commit\s*\{\s*from \{ opacity: 0\.32; \}\s*to \{ opacity: 0\.82; \}/,
 );
 assert.doesNotMatch(source, /touch-translate-spin/);
+assert.doesNotMatch(source, /touch-action: pan-y/);
 assert.match(
   source,
   /data-state="error"\]::before[\s\S]{0,240}background: #c8453c/,
@@ -457,12 +459,24 @@ const scrollContainer = {
   clientWidth: 320,
   overflowX: "auto",
   parentElement: body,
+  scrollLeft: 80,
   scrollWidth: 640,
 };
 const tableCell = { parentElement: scrollContainer };
-assert.equal(api.hasHorizontalScroller(tableCell), true);
-scrollContainer.scrollWidth = 320;
-assert.equal(api.hasHorizontalScroller(tableCell), false);
+assert.equal(api.canConsumeRightSwipe(tableCell), true);
+scrollContainer.scrollLeft = 0;
+assert.equal(api.canConsumeRightSwipe(tableCell), false);
+
+Object.assign(scrollContainer, { direction: "rtl", scrollLeft: -80 });
+assert.equal(api.canConsumeRightSwipe(tableCell), true);
+scrollContainer.scrollLeft = 0;
+assert.equal(api.canConsumeRightSwipe(tableCell), false);
+Object.assign(scrollContainer, {
+  direction: "ltr",
+  scrollLeft: 80,
+  scrollWidth: 320,
+});
+assert.equal(api.canConsumeRightSwipe(tableCell), false);
 
 Object.assign(documentElement, {
   clientWidth: 320,
@@ -471,17 +485,20 @@ Object.assign(documentElement, {
 });
 document.scrollingElement = documentElement;
 const pageContent = { parentElement: documentElement };
-assert.equal(api.hasHorizontalScroller(pageContent), false);
+assert.equal(api.canConsumeRightSwipe(pageContent), false);
 
 const feedContainer = {
   clientWidth: 320,
   matches: (selector) => selector.includes("[role='feed']"),
   overflowX: "auto",
   parentElement: body,
+  scrollLeft: 0,
   scrollWidth: 640,
 };
 const feedPost = { parentElement: feedContainer };
-assert.equal(api.hasHorizontalScroller(feedPost), false);
+assert.equal(api.canConsumeRightSwipe(feedPost), false);
+feedContainer.scrollLeft = 20;
+assert.equal(api.canConsumeRightSwipe(feedPost), true);
 
 const mainLandmark = { parentElement: body };
 document.querySelector = (selector) =>
@@ -492,10 +509,13 @@ const appShell = {
   matches: () => false,
   overflowX: "auto",
   parentElement: body,
+  scrollLeft: 0,
   scrollWidth: 640,
 };
 const appPost = { parentElement: appShell };
-assert.equal(api.hasHorizontalScroller(appPost), false);
+assert.equal(api.canConsumeRightSwipe(appPost), false);
+appShell.scrollLeft = 20;
+assert.equal(api.canConsumeRightSwipe(appPost), true);
 
 const slottedTitle = {
   closest: () => null,
