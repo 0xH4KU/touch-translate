@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.9
+// @version      0.5.10
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -1686,9 +1686,9 @@
     ) {
       const overflowX = getComputedStyle(element).overflowX;
       if (
+        element !== document.scrollingElement &&
         element.scrollWidth > element.clientWidth + 1 &&
-        (element === document.scrollingElement ||
-          /^(?:auto|scroll|overlay)$/.test(overflowX))
+        /^(?:auto|scroll|overlay)$/.test(overflowX)
       ) {
         return true;
       }

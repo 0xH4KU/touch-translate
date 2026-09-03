@@ -448,4 +448,13 @@ assert.equal(api.hasHorizontalScroller(tableCell), true);
 scrollContainer.scrollWidth = 320;
 assert.equal(api.hasHorizontalScroller(tableCell), false);
 
+Object.assign(documentElement, {
+  clientWidth: 320,
+  overflowX: "auto",
+  scrollWidth: 640,
+});
+document.scrollingElement = documentElement;
+const pageContent = { parentElement: documentElement };
+assert.equal(api.hasHorizontalScroller(pageContent), false);
+
 console.log("Touch Translate self-check passed");
