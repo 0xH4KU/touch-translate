@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.15
+// @version      0.5.16
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -1829,7 +1829,6 @@
       clearSwipe();
       return;
     }
-    if (event.cancelable) event.preventDefault();
     const root = element.getRootNode();
     if (root !== document) addStyles(root);
     const now = Date.now();
@@ -1921,6 +1920,9 @@
       touch.clientX,
       now,
     );
+    if (gesture.phase === "possible") {
+      gesture.phase = swipeIntent(dx, touch.clientY - gesture.y);
+    }
     if (
       gesture.phase === "horizontal" &&
       swipeShouldCommit(dx, velocityX, gesture.ready)
@@ -2376,7 +2378,7 @@
   addStyles();
   document.addEventListener("touchstart", onTouchStart, {
     capture: true,
-    passive: false,
+    passive: true,
   });
   document.addEventListener("touchmove", onTouchMove, {
     capture: true,
