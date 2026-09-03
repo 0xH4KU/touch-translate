@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.10
+// @version      0.5.11
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -44,7 +44,7 @@
   const SWIPE_BATCH_MS = 80;
   const PAGE_REFRESH_MS = 160;
   const COMMIT_HOLD_MS = 140;
-  const SAFARI_EDGE_X = 30;
+  const SAFARI_EDGE_X = 12;
   const FOUR_FINGER_MAX_MOVE = 24;
   const FOUR_FINGER_MAX_MS = 700;
   const CONTENT_ROOT_SELECTOR = "main, [role='main']";
@@ -1668,6 +1668,7 @@
       if (element === document.body || element === document.documentElement) break;
       inline ||= element;
       const display = getComputedStyle(element).display;
+      if (element.matches("p, h1, h2, h3, h4, h5, h6")) return element;
       if (
         element.matches(BLOCK_SELECTOR) ||
         (display !== "contents" && !display.startsWith("inline"))

@@ -421,6 +421,22 @@ const citedBlock = {
 };
 assert.equal(api.swipeElementFor(citedBlock), citedBlock);
 
+const citation = {
+  children: [],
+  display: "block",
+  innerText: "Kyoko Sakura, Episode 7",
+  matches: () => false,
+};
+const quotedParagraph = {
+  children: [citation],
+  closest: () => null,
+  display: "block",
+  innerText: "Miracles aren't free. Kyoko Sakura, Episode 7",
+  matches: (selector) => selector.includes("p"),
+  parentElement: body,
+};
+assert.equal(api.swipeElementFor(quotedParagraph), quotedParagraph);
+
 const nestedTextBlock = {
   children: [],
   display: "block",
