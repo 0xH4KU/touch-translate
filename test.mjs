@@ -305,6 +305,11 @@ const successfulRequest = api.requestTranslations(["hello"], {
 });
 const requestBody = JSON.parse(requestOptions.data);
 assert.equal(requestBody.response_format.type, "json_schema");
+assert.match(
+  requestBody.messages[0].content,
+  /naturally into zh-TW[\s\S]*Do not add explanations or commentary[\s\S]*If paired \[\[TT0\]\]/,
+);
+assert.doesNotMatch(source, /prompt-v1/);
 assert.equal(
   requestBody.response_format.json_schema.schema.properties.translations.minItems,
   1,
