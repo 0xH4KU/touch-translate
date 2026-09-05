@@ -33,14 +33,18 @@ const document = {
 };
 let requestAborted = false;
 let requestOptions;
+const requestHistory = [];
 const context = vm.createContext({
   __TOUCH_TRANSLATE_TEST__: api,
   URL,
+  clearTimeout,
   console,
   document,
   NodeFilter,
+  setTimeout,
   GM_xmlhttpRequest: (options) => {
     requestOptions = options;
+    requestHistory.push(options);
     return {
       abort() {
         requestAborted = true;
@@ -100,12 +104,13 @@ assert.match(source, /field\(\s*"API Key",\s*"apiKey",\s*"password"/);
 assert.doesNotMatch(source, /\bprompt\(/);
 assert.match(source, /GM_deleteValue\(SETTINGS_KEY\)/);
 assert.match(source, /translateElements\(elements\)\.catch\(reportError\)/);
-assert.doesNotMatch(source, /\\\\00d7/);
+assert.doesNotMatch(source, /\\00d7/);
 assert.match(
   source,
   /data-action="remove"\][\s\S]{0,500}width: 8px !important;[\s\S]{0,200}linear-gradient\(45deg/,
 );
 assert.match(source, /new MutationObserver\(task\.refresh\)/);
+assert.match(source, /attributes: true,[\s\S]{0,300}"hidden"/);
 assert.equal(api.normalizeText("  hello\n  world "), "hello world");
 assert.equal(api.pageTextLooksUseful("https://example.com/path"), false);
 assert.equal(api.pageTextLooksUseful("2026-08-29"), false);
@@ -164,17 +169,61 @@ assert.throws(
   () => api.cleanSettings({ baseURL: "http://example.com", model: "m" }),
   /HTTPS/,
 );
+assert.equal(api.isPrivateOrLocalHost("localhost"), true);
+assert.equal(api.isPrivateOrLocalHost("127.0.0.1"), true);
+assert.equal(api.isPrivateOrLocalHost("::1"), true);
+assert.equal(api.isPrivateOrLocalHost("192.168.1.10"), true);
+assert.equal(api.isPrivateOrLocalHost("10.0.0.2"), true);
+assert.equal(api.isPrivateOrLocalHost("172.24.0.1"), true);
+assert.equal(api.isPrivateOrLocalHost("nas.local"), true);
+assert.equal(api.isPrivateOrLocalHost("router.lan"), true);
+assert.equal(api.isPrivateOrLocalHost("cluster.internal"), true);
+assert.equal(api.isPrivateOrLocalHost("gateway.home.arpa"), true);
+assert.equal(api.isPrivateOrLocalHost("example.com"), false);
+assert.equal(api.isPrivateOrLocalHost("172.35.0.1"), false);
+assert.equal(api.isPrivateOrLocalHost("8.8.8.8"), false);
 assert.equal(
-  api.hashCacheKey("same", {
-    baseURL: "https://api.example.com/v1",
-    model: "m",
-    targetLanguage: "zh-TW",
-  }),
-  api.hashCacheKey("same", {
-    baseURL: "https://api.example.com/v1",
-    model: "m",
-    targetLanguage: "zh-TW",
-  }),
+  api.cleanSettings({ baseURL: "http://192.168.1.100:11434", model: "m" }).baseURL,
+  "http://192.168.1.100:11434",
+);
+assert.equal(
+  api.cleanSettings({ baseURL: "http://ollama.local:11434", model: "m" }).baseURL,
+  "http://ollama.local:11434",
+);
+assert.equal(
+  api.cleanSettings({ baseURL: "https://api.openai.com/v1", model: "m" }).temperature,
+  0.2,
+);
+assert.equal(
+  api.cleanSettings({ baseURL: "https://api.openai.com/v1", model: "m", temperature: "0.65" }).temperature,
+  0.65,
+);
+assert.throws(
+  () => api.cleanSettings({ baseURL: "https://api.openai.com/v1", model: "m", temperature: "2.5" }),
+  /Temperature/,
+);
+assert.equal(
+  api.retryDelayFor({ responseHeaders: "Retry-After: 60" }, 0),
+  60000,
+);
+const retryAt = new Date(Date.now() + 60000).toUTCString();
+const retryAtDelay = api.retryDelayFor(
+  { responseHeaders: `Retry-After: ${retryAt}` },
+  0,
+);
+assert.ok(retryAtDelay >= 58000 && retryAtDelay <= 60000);
+const cacheSettings = {
+  baseURL: "https://api.example.com/v1",
+  model: "m",
+  targetLanguage: "zh-TW",
+};
+assert.equal(
+  api.hashCacheKey("same", cacheSettings),
+  api.hashCacheKey("same", cacheSettings),
+);
+assert.notEqual(
+  api.hashCacheKey("same", { ...cacheSettings, temperature: 0.2 }),
+  api.hashCacheKey("same", { ...cacheSettings, temperature: 2 }),
 );
 
 const records = [
@@ -215,6 +264,33 @@ assert.deepEqual(
 );
 assert.equal(api.isNearViewport({ top: 1500, bottom: 1580 }, 800), true);
 assert.equal(api.isNearViewport({ top: 1700, bottom: 1780 }, 800), false);
+assert.ok(
+  api.compareViewportPriority(
+    { top: 20, bottom: 100 },
+    { top: -500, bottom: -400 },
+    800,
+  ) < 0,
+);
+
+const pageBlock = {
+  classList: { contains: () => false },
+  closest: () => null,
+  display: "block",
+  getClientRects: () => [{}],
+  innerText: "A useful heading",
+  isConnected: true,
+  matches: () => true,
+  nextElementSibling: null,
+  querySelector: () => null,
+  visibility: "visible",
+};
+const pageRoot = { contains: (element) => element === pageBlock };
+assert.equal(api.isTranslatablePageBlock(pageBlock, [pageRoot]), true);
+pageBlock.querySelector = () => ({});
+assert.equal(api.isTranslatablePageBlock(pageBlock, [pageRoot]), false);
+pageBlock.querySelector = () => null;
+pageBlock.visibility = "hidden";
+assert.equal(api.isTranslatablePageBlock(pageBlock, [pageRoot]), false);
 
 const visibleRoot = {
   closest: () => null,
@@ -305,6 +381,7 @@ const successfulRequest = api.requestTranslations(["hello"], {
 });
 const requestBody = JSON.parse(requestOptions.data);
 assert.equal(requestBody.response_format.type, "json_schema");
+assert.equal(requestBody.temperature, 0.2);
 assert.match(
   requestBody.messages[0].content,
   /naturally into zh-TW[\s\S]*Do not add explanations or commentary[\s\S]*If paired \[\[TT0\]\]/,
@@ -377,6 +454,46 @@ requestOptions.onload({
   }),
 });
 assert.deepEqual([...(await rememberedFallback.promise)], ["again translated"]);
+
+const retrySettings = {
+  apiKey: "test",
+  baseURL: "https://api.example.com/v1",
+  model: "retry-model",
+  targetLanguage: "zh-TW",
+};
+const requestsBeforeRetry = requestHistory.length;
+const retryPromise = api.requestTranslations(["retry block"], retrySettings);
+assert.equal(requestHistory.length, requestsBeforeRetry + 1);
+requestOptions.onload({
+  status: 429,
+  responseHeaders: "Retry-After: 0",
+  responseText: JSON.stringify({
+    error: { message: "Rate limit reached for requests" },
+  }),
+});
+await new Promise((resolve) => setTimeout(resolve, 10));
+assert.equal(requestHistory.length, requestsBeforeRetry + 2);
+requestOptions.onload({
+  status: 200,
+  responseText: JSON.stringify({
+    choices: [
+      {
+        finish_reason: "stop",
+        message: { content: '{"translations":["retry translated"]}' },
+      },
+    ],
+  }),
+});
+assert.deepEqual([...(await retryPromise.promise)], ["retry translated"]);
+
+const quotaPromise = api.requestTranslations(["quota block"], retrySettings);
+requestOptions.onload({
+  status: 429,
+  responseText: JSON.stringify({
+    error: { message: "You exceeded your current quota" },
+  }),
+});
+await assert.rejects(quotaPromise.promise, /quota/i);
 
 const outerListItem = {
   display: "list-item",

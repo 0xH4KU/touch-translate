@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.18
+// @version      0.5.19
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -66,6 +66,8 @@
   const SAFARI_EDGE_X = 12;
   const FOUR_FINGER_MAX_MOVE = 24;
   const FOUR_FINGER_MAX_MS = 700;
+  const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+  const MAX_RETRIES = 2;
   const CONTENT_ROOT_SELECTOR = "main, [role='main']";
   const PAGE_CHROME_SELECTOR = [
     "nav",
@@ -109,6 +111,7 @@
     model: "",
     apiKey: "",
     targetLanguage: globalThis.navigator?.language || "English",
+    temperature: 0.2,
   };
 
   // Pure helpers
@@ -129,7 +132,74 @@
     return url.href;
   }
 
+  function isPrivateOrLocalHost(hostname) {
+    const host = String(hostname || "")
+      .replace(/^\[|\]$/g, "")
+      .toLowerCase();
+    if (
+      host === "localhost" ||
+      host.endsWith(".local") ||
+      host.endsWith(".internal") ||
+      host.endsWith(".lan") ||
+      host.endsWith(".home.arpa")
+    ) {
+      return true;
+    }
+    const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (ipv4) {
+      const [, a, b] = ipv4.map(Number);
+      if (a === 127) return true;
+      if (a === 10) return true;
+      if (a === 172 && b >= 16 && b <= 31) return true;
+      if (a === 192 && b === 168) return true;
+      if (a === 169 && b === 254) return true;
+      return false;
+    }
+    if (
+      host === "::1" ||
+      host === "0:0:0:0:0:0:0:1" ||
+      /^fe[89ab][0-9a-f]:/i.test(host) ||
+      /^f[cd][0-9a-f]{2}:/i.test(host)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function retryDelayFor(response, attempt) {
+    const headers = response?.responseHeaders || "";
+    const match =
+      typeof headers === "string" && headers.match(/^retry-after:\s*(.+)$/im);
+    if (match) {
+      const value = match[1].trim();
+      let delay;
+      if (/^\d+$/.test(value)) {
+        delay = Number(value) * 1000;
+      } else {
+        const retryAt = Date.parse(value);
+        if (!Number.isNaN(retryAt)) delay = retryAt - Date.now();
+      }
+      if (Number.isFinite(delay)) return Math.max(0, delay);
+    }
+    const base = 1000 * Math.pow(2, attempt);
+    const jitter = Math.floor(Math.random() * 250);
+    return Math.min(base + jitter, 10000);
+  }
+
   function cleanSettings(input = {}, fallback = DEFAULT_SETTINGS) {
+    let temperature = fallback.temperature ?? 0.2;
+    if (
+      input.temperature !== undefined &&
+      input.temperature !== null &&
+      input.temperature !== ""
+    ) {
+      const parsed = Number(input.temperature);
+      if (Number.isNaN(parsed) || parsed < 0 || parsed > 2) {
+        throw new Error("Temperature must be a number between 0 and 2.");
+      }
+      temperature = Math.round(parsed * 100) / 100;
+    }
+
     const value = {
       baseURL:
         typeof input.baseURL === "string"
@@ -145,16 +215,16 @@
         typeof input.targetLanguage === "string"
           ? input.targetLanguage.trim()
           : fallback.targetLanguage,
+      temperature,
     };
 
     if (value.baseURL) {
       const url = new URL(value.baseURL);
       const localHTTP =
-        url.protocol === "http:" &&
-        ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+        url.protocol === "http:" && isPrivateOrLocalHost(url.hostname);
       if (url.protocol !== "https:" && !localHTTP) {
         throw new Error(
-          "Base URL must use HTTPS; localhost is the only exception.",
+          "Base URL must use HTTPS; localhost or private network is the only exception.",
         );
       }
       value.baseURL = url.href.replace(/\/$/, "");
@@ -181,6 +251,7 @@
       settings.baseURL,
       settings.model,
       settings.targetLanguage,
+      settings.temperature ?? 0.2,
       text,
     ].join("\u0000");
     let hash = 0xcbf29ce484222325n;
@@ -250,6 +321,12 @@
     }
     if (rect.top > viewportHeight) return [1, rect.top - viewportHeight];
     return [2, -rect.bottom];
+  }
+
+  function compareViewportPriority(a, b, viewportHeight) {
+    const [aZone, aDistance] = viewportPriority(a, viewportHeight);
+    const [bZone, bDistance] = viewportPriority(b, viewportHeight);
+    return aZone - bZone || aDistance - bDistance;
   }
 
   function isNearViewport(rect, viewportHeight) {
@@ -427,6 +504,7 @@
   if (globalThis.__TOUCH_TRANSLATE_TEST__) {
     Object.assign(globalThis.__TOUCH_TRANSLATE_TEST__, {
       cleanSettings,
+      compareViewportPriority,
       endpointFor,
       errorMessageFor,
       groupRecords,
@@ -434,7 +512,9 @@
       canConsumeRightSwipe,
       indicatorFor,
       isNearViewport,
+      isPrivateOrLocalHost,
       isRenderedTextNode,
+      isTranslatablePageBlock,
       makeBatches,
       movedTooFar,
       normalizeText,
@@ -447,6 +527,7 @@
       recordMatchesElement,
       requestTranslations,
       resolveTargetElement,
+      retryDelayFor,
       sourceText,
       structuredOutputUnsupported,
       swipeIntent,
@@ -532,6 +613,17 @@
       "text",
       current.targetLanguage,
     );
+    const temperature = field(
+      "Temperature (0.0 - 2.0)",
+      "temperature",
+      "number",
+      current.temperature ?? 0.2,
+      false,
+    );
+    inputs.temperature.step = "0.05";
+    inputs.temperature.min = "0";
+    inputs.temperature.max = "2";
+    inputs.temperature.placeholder = "0.2";
     const apiKey = field(
       "API Key",
       "apiKey",
@@ -556,7 +648,7 @@
     save.dataset.action = "save";
     save.textContent = "Save";
     actions.append(cancel, save);
-    form.append(title, baseURL, model, targetLanguage, apiKey, error, actions);
+    form.append(title, baseURL, model, targetLanguage, temperature, apiKey, error, actions);
     dialog.append(form);
     (document.body || document.documentElement).append(dialog);
 
@@ -585,6 +677,7 @@
                 baseURL: data.get("baseURL"),
                 model: data.get("model"),
                 targetLanguage: data.get("targetLanguage"),
+                temperature: data.get("temperature"),
                 apiKey: data.get("apiKey") || current.apiKey,
               },
               current,
@@ -626,6 +719,7 @@
       baseURL: settings.baseURL,
       model: settings.model,
       targetLanguage: settings.targetLanguage,
+      temperature: settings.temperature ?? 0.2,
     };
     if (includeKey) exportedSettings.apiKey = settings.apiKey;
     const json = JSON.stringify(
@@ -720,18 +814,24 @@
         callback(value);
       };
       let request;
+      let retryTimer;
       abortRequest = () => {
         if (settled) return;
+        globalThis.clearTimeout?.(retryTimer);
         try {
           request?.abort?.();
         } finally {
           finish(reject, cancelledError());
         }
       };
-      const send = (structuredOutput) => {
+      const send = (structuredOutput, attempt = 0) => {
         const body = {
           model: settings.model,
           messages,
+          temperature:
+            typeof settings.temperature === "number"
+              ? settings.temperature
+              : 0.2,
         };
         if (structuredOutput) {
           body.response_format = {
@@ -772,6 +872,17 @@
               try {
                 responseBody = JSON.parse(responseText);
               } catch (error) {
+                if (
+                  RETRYABLE_STATUSES.has(response.status) &&
+                  attempt < MAX_RETRIES
+                ) {
+                  const delay = retryDelayFor(response, attempt);
+                  retryTimer = setTimeout(
+                    () => send(structuredOutput, attempt + 1),
+                    delay,
+                  );
+                  return;
+                }
                 throw new Error(
                   [
                     "The translation API returned invalid JSON.",
@@ -793,7 +904,22 @@
                   structuredOutputUnsupported(response.status, apiMessage)
                 ) {
                   unstructuredModels.add(compatibilityKey);
-                  send(false);
+                  send(false, attempt);
+                  return;
+                }
+                const isQuotaError = /quota|insufficient_quota|billing/i.test(
+                  String(apiMessage || ""),
+                );
+                if (
+                  RETRYABLE_STATUSES.has(response.status) &&
+                  !isQuotaError &&
+                  attempt < MAX_RETRIES
+                ) {
+                  const delay = retryDelayFor(response, attempt);
+                  retryTimer = setTimeout(
+                    () => send(structuredOutput, attempt + 1),
+                    delay,
+                  );
                   return;
                 }
                 throw new Error(
@@ -827,13 +953,33 @@
               finish(reject, error);
             }
           },
-          onerror: () =>
+          onerror: () => {
+            if (attempt < MAX_RETRIES) {
+              const delay =
+                1000 * Math.pow(2, attempt) + Math.floor(Math.random() * 200);
+              retryTimer = setTimeout(
+                () => send(structuredOutput, attempt + 1),
+                delay,
+              );
+              return;
+            }
             finish(
               reject,
               new Error("Could not connect to the translation API."),
-            ),
-          ontimeout: () =>
-            finish(reject, new Error("The translation API timed out.")),
+            );
+          },
+          ontimeout: () => {
+            if (attempt < MAX_RETRIES) {
+              const delay =
+                1000 * Math.pow(2, attempt) + Math.floor(Math.random() * 200);
+              retryTimer = setTimeout(
+                () => send(structuredOutput, attempt + 1),
+                delay,
+              );
+              return;
+            }
+            finish(reject, new Error("The translation API timed out."));
+          },
           onabort: () => finish(reject, cancelledError()),
         });
       };
@@ -1085,6 +1231,20 @@
     return text.length >= 160 || linkedCharacters / text.length <= 0.8;
   }
 
+  function isTranslatablePageBlock(element, roots, text) {
+    if (
+      !element?.isConnected ||
+      !roots.some((root) => root.contains(element)) ||
+      element.classList.contains(TRANSLATION_CLASS) ||
+      element.querySelector(BLOCK_SELECTOR) ||
+      translationAfter(element) ||
+      !isVisible(element)
+    ) {
+      return false;
+    }
+    return isUsefulPageBlock(element, text ?? sourceText(element));
+  }
+
   function collectPageBlocks(nearbyOnly = false) {
     const roots = pageContentRoots();
     const viewportHeight = innerHeight || document.documentElement.clientHeight;
@@ -1098,25 +1258,12 @@
         ({ rect }) => !nearbyOnly || isNearViewport(rect, viewportHeight),
       )
       .map((record) => ({ ...record, text: sourceText(record.element) }))
-      .filter(
-        ({ element, text }) =>
-          !element.classList.contains(TRANSLATION_CLASS) &&
-          !element.querySelector(BLOCK_SELECTOR) &&
-          !translationAfter(element) &&
-          isVisible(element) &&
-          isUsefulPageBlock(element, text),
+      .filter(({ element, text }) =>
+        isTranslatablePageBlock(element, roots, text),
       )
-      .sort((a, b) => {
-        const [aZone, aDistance] = viewportPriority(
-          a.rect,
-          viewportHeight,
-        );
-        const [bZone, bDistance] = viewportPriority(
-          b.rect,
-          viewportHeight,
-        );
-        return aZone - bZone || aDistance - bDistance;
-      })
+      .sort((a, b) =>
+        compareViewportPriority(a.rect, b.rect, viewportHeight),
+      )
       .map(({ element }) => element);
   }
 
@@ -1465,6 +1612,24 @@
     task.translations.clear();
   }
 
+  function observePageBlocks(task) {
+    if (!task.intersectionObserver) return 0;
+    const roots = pageContentRoots();
+    const elements = document.querySelectorAll(BLOCK_SELECTOR);
+    let count = 0;
+    for (const element of elements) {
+      if (
+        !task.observedBlocks.has(element) &&
+        isTranslatablePageBlock(element, roots)
+      ) {
+        task.observedBlocks.add(element);
+        task.intersectionObserver.observe(element);
+        count += 1;
+      }
+    }
+    return count;
+  }
+
   function stopPageTranslation(
     task,
     message = "",
@@ -1473,7 +1638,9 @@
     if (pageTask === task) pageTask = undefined;
     task.cancelled = true;
     clearTimeout(task.refreshTimer);
-    task.observer.disconnect();
+    clearTimeout(task.scheduleTimer);
+    task.observer?.disconnect();
+    task.intersectionObserver?.disconnect();
     globalThis.removeEventListener("scroll", task.refresh, true);
     [...task.jobs].forEach((job) => cancelJob(job.element));
     if (removeTranslations) undoPageTranslations(task);
@@ -1486,7 +1653,31 @@
       task.rerun = true;
       return;
     }
-    task.running = translateElements(collectPageBlocks(true), {
+    let blocks;
+    if (task.intersectionObserver) {
+      const roots = pageContentRoots();
+      const viewportHeight =
+        innerHeight || document.documentElement.clientHeight;
+      blocks = [...task.pendingBlocks]
+        .filter((element) => {
+          const eligible = isTranslatablePageBlock(element, roots);
+          if (!eligible) task.observedBlocks.delete(element);
+          return eligible;
+        })
+        .map((element) => ({
+          element,
+          rect: element.getBoundingClientRect(),
+        }))
+        .sort((a, b) =>
+          compareViewportPriority(a.rect, b.rect, viewportHeight),
+        )
+        .map(({ element }) => element);
+      task.pendingBlocks.clear();
+      if (!blocks.length) return;
+    } else {
+      blocks = collectPageBlocks(true);
+    }
+    task.running = translateElements(blocks, {
       showProgress,
       task,
     })
@@ -1516,28 +1707,76 @@
     if (!(await readySettings())) return;
     const task = {
       cancelled: false,
+      initialRun: true,
       jobs: new Set(),
+      observedBlocks: new WeakSet(),
+      pendingBlocks: new Set(),
       rerun: false,
       translations: new Set(),
     };
+    task.schedule = () => {
+      clearTimeout(task.scheduleTimer);
+      task.scheduleTimer = setTimeout(() => {
+        const isFirst = task.initialRun;
+        task.initialRun = false;
+        runPageTranslation(task, isFirst);
+      }, 60);
+    };
     task.refresh = () => {
       clearTimeout(task.refreshTimer);
-      task.refreshTimer = setTimeout(
-        () => runPageTranslation(task),
-        PAGE_REFRESH_MS,
-      );
+      task.refreshTimer = setTimeout(() => {
+        if (task.cancelled) return;
+        if (task.intersectionObserver) {
+          observePageBlocks(task);
+        } else {
+          runPageTranslation(task);
+        }
+      }, PAGE_REFRESH_MS);
     };
     task.observer = new MutationObserver(task.refresh);
     task.observer.observe(document.body || document.documentElement, {
+      attributes: true,
+      attributeFilter: [
+        "aria-expanded",
+        "aria-hidden",
+        "aria-selected",
+        "class",
+        "data-state",
+        "hidden",
+        "open",
+        "role",
+        "style",
+      ],
       childList: true,
       subtree: true,
     });
-    globalThis.addEventListener("scroll", task.refresh, {
-      capture: true,
-      passive: true,
-    });
+    if (typeof IntersectionObserver === "function") {
+      task.intersectionObserver = new IntersectionObserver(
+        (entries) => {
+          let hasNew = false;
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              task.pendingBlocks.add(entry.target);
+              task.intersectionObserver.unobserve(entry.target);
+              hasNew = true;
+            }
+          }
+          if (hasNew && !task.cancelled) {
+            task.schedule();
+          }
+        },
+        { rootMargin: "100% 0px 100% 0px" },
+      );
+      const observed = observePageBlocks(task);
+      if (!observed) toast("No new translatable blocks found");
+    } else {
+      globalThis.addEventListener("scroll", task.refresh, {
+        capture: true,
+        passive: true,
+      });
+      runPageTranslation(task, true);
+    }
     pageTask = task;
-    runPageTranslation(task, true);
   }
 
   // Notifications and menu actions

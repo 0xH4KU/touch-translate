@@ -9,7 +9,7 @@ A private, touch-first bilingual translation userscript for iOS Safari and Tampe
 - Swipe right on a visible HTML text block. A 60px drag or a shorter deliberate flick commits it; initial finger drift and a small release correction are tolerated once the rightward gesture is clear.
 - Swipe the same block again while it is loading to cancel. The network request is also aborted when no other block shares it. Swipe again after the translation appears to remove it.
 - Translation errors open a dialog with the provider or response-format details. Retry the failed blocks from the dialog or close it and leave the red status indicator in place.
-- Quickly tap with four fingers to start automatic page translation. The current and nearby content is translated first, then newly revealed or loaded blocks continue automatically as you scroll. Repeat the gesture to stop and remove the translations added by that automatic run.
+- Quickly tap with four fingers to start automatic page translation. Modern `IntersectionObserver` scheduling observes translatable content and translates visible blocks with prefetching as you scroll, avoiding layout thrashing. Repeat the gesture to stop and remove the translations added by that automatic run.
 - Use the Tampermonkey menu to configure or clear the API settings, translate the page, import or export settings, and clear the cache.
 
 Swipes starting within 12px of the left screen edge are ignored to avoid triggering Safari's back gesture. Native horizontal scrolling takes priority while a scrollable table or other horizontal region can move with the gesture; a right swipe at its leading edge translates normally. Container gaps that would select multiple nested text blocks are ignored.
@@ -24,7 +24,9 @@ Page translation skips navigation, forms, page headers and footers, plain URLs, 
 2. Open the [direct install link](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-translate.user.js) and confirm the installation in Tampermonkey.
 3. Open the Tampermonkey script menu and run Touch Translate's API setup command.
 
-Example Base URL: `https://api.openai.com/v1`. The script appends `/chat/completions`; you may also enter a complete `/chat/completions` URL. The endpoint must accept OpenAI Chat Completions requests with Bearer authentication. The script prefers strict JSON Schema output and retries without `response_format` for the current Base URL and model when the provider explicitly reports that structured output is unsupported.
+Example Base URL: `https://api.openai.com/v1`. The script appends `/chat/completions`; you may also enter a complete `/chat/completions` URL. Local and private network HTTP endpoints (e.g. `http://localhost:11434`, `http://127.0.0.1:11434`, `http://192.168.x.x`, or `http://*.local`) are also supported for self-hosted setups (Ollama, LocalAI, vLLM). The endpoint must accept OpenAI Chat Completions requests with Bearer authentication.
+
+The script defaults to a sampling `temperature` of `0.2` (customizable between `0.0` and `2.0`), prefers strict JSON Schema output, and automatically retries with exponential backoff on HTTP 429 rate limits and 5xx server errors (respecting `Retry-After` headers when provided).
 
 ## Privacy
 
