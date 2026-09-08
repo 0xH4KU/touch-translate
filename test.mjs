@@ -384,9 +384,10 @@ assert.equal(requestBody.response_format.type, "json_schema");
 assert.equal(requestBody.temperature, 0.2);
 assert.match(
   requestBody.messages[0].content,
-  /naturally into zh-TW[\s\S]*Do not add explanations or commentary[\s\S]*If paired \[\[TT0\]\]/,
+  /neutral, and impartial translation engine[\s\S]*naturally into zh-TW[\s\S]*without moral judgment[\s\S]*Do not add explanations or commentary[\s\S]*If paired \[\[TT0\]\]/,
 );
-assert.doesNotMatch(source, /prompt-v1/);
+assert.doesNotMatch(source, /prompt-v[12]\b/);
+assert.match(source, /prompt-v3/);
 assert.equal(
   requestBody.response_format.json_schema.schema.properties.translations.minItems,
   1,
@@ -650,5 +651,157 @@ assert.equal(
   api.resolveTargetElement(overlayLink, { clientX: 50, clientY: 50 }),
   underlyingText,
 );
+
+// Content filter detection
+const contentFilterRequest = api.requestTranslations(["filter test"], {
+  apiKey: "test",
+  baseURL: "https://api.example.com/v1",
+  model: "test-model",
+  targetLanguage: "zh-TW",
+});
+requestOptions.onload({
+  status: 200,
+  responseText: JSON.stringify({
+    choices: [
+      {
+        finish_reason: "content_filter",
+        message: { content: "" },
+      },
+    ],
+  }),
+});
+await assert.rejects(
+  contentFilterRequest.promise,
+  /blocked by the AI content safety filter/i,
+);
+
+// Empty response defense
+const emptyContentRequest = api.requestTranslations(["empty test"], {
+  apiKey: "test",
+  baseURL: "https://api.example.com/v1",
+  model: "test-model",
+  targetLanguage: "zh-TW",
+});
+requestOptions.onload({
+  status: 200,
+  responseText: JSON.stringify({
+    choices: [
+      {
+        finish_reason: "stop",
+        message: { content: "  " },
+      },
+    ],
+  }),
+});
+assert.equal(JSON.parse(requestOptions.data).response_format, undefined);
+requestOptions.onload({
+  status: 200,
+  responseText: JSON.stringify({ choices: [{ message: { content: "" } }] }),
+});
+await assert.rejects(
+  emptyContentRequest.promise,
+  /The AI returned an empty response/i,
+);
+
+// parseTranslations empty defense
+assert.throws(
+  () => api.parseTranslations("", 1),
+  /The AI output was empty/,
+);
+
+// Split only model response failures, never infrastructure/configuration errors.
+assert.throws(() => api.parseTranslations("", 1), api.shouldSplitBatch);
+for (const message of ["HTTP 400", "HTTP 401", "HTTP 429", "HTTP 503", "quota", "Could not connect"]) {
+  assert.equal(api.shouldSplitBatch(new Error(message)), false);
+}
+
+// Empty structured output can recover without any provider-specific fields.
+const recoveredRequest = api.requestTranslations(["hello"], retrySettings);
+assert.equal(JSON.parse(requestOptions.data).response_format.type, "json_schema");
+requestOptions.onload({ status: 200, responseText: '{"choices":[]}' });
+assert.equal(JSON.parse(requestOptions.data).response_format, undefined);
+assert.deepEqual(Object.keys(JSON.parse(requestOptions.data)).sort(), ["messages", "model", "temperature"]);
+requestOptions.onload({
+  status: 200,
+  responseText: JSON.stringify({ choices: [{ message: { content: '{"translations":["你好"]}' } }] }),
+});
+assert.deepEqual([...(await recoveredRequest.promise)], ["你好"]);
+
+// Exercise the real scheduler/job lifecycle with rendering and transport stubbed.
+async function checkBatchRecovery(mode) {
+  const elements = ["first", "second", "third"].map((text) => ({
+    text, isConnected: true, busy: null,
+    getAttribute() { return this.busy; },
+    setAttribute(_name, value) { this.busy = value; },
+    removeAttribute() { this.busy = null; },
+  }));
+  const task = { cancelled: false, jobs: new Set() };
+  const calls = [];
+  const translated = [];
+  let scheduler;
+  const responseFailure = Object.assign(new Error("empty response"), {
+    code: "TRANSLATION_RESPONSE_ERROR",
+  });
+  const sandbox = {
+    Error, Map, Set, WeakMap, clearTimeout,
+    BATCH_MAX_CHARS: 6000,
+    readySettings: async () => retrySettings,
+    loadCache: () => ({}), saveCache() {},
+    sourceText: (element) => element.text,
+    translationAfter: (element) => translated.includes(element),
+    translationRequestFor: (_element, text) => ({ requestText: text, segmentCount: 0 }),
+    hashCacheKey: (text) => text,
+    groupRecords: api.groupRecords, makeBatches: api.makeBatches,
+    parseInlineTranslation: api.parseInlineTranslation,
+    recordMatchesElement: (record) => record.element.isConnected,
+    shouldSplitBatch: api.shouldSplitBatch,
+    showIndicator() {}, removeIndicator() {}, toast() {},
+    insertTranslation(element) { translated.push(element); },
+    requestTranslations(texts) {
+      calls.push([...texts]);
+      let rejectRequest;
+      const promise = new Promise((resolve, reject) => {
+        rejectRequest = reject;
+        queueMicrotask(() => {
+          if (texts.length > 1 || (mode === "failure" && texts[0] === "first")) {
+            reject(responseFailure);
+          } else if (mode === "cancel" && texts[0] === "first") {
+            scheduler.cancelJob(elements[0]);
+          } else if (mode === "cancel-waiting" && texts[0] === "first") {
+            scheduler.cancelJob(elements[1]);
+            resolve(["translated"]);
+          } else if (mode === "http" && texts[0] === "first") {
+            reject(new Error("HTTP 401"));
+          } else {
+            resolve(["translated"]);
+          }
+        });
+      });
+      return { promise, abort() { rejectRequest(Object.assign(new Error("cancelled"), { name: "AbortError" })); } };
+    },
+  };
+  scheduler = vm.runInNewContext(
+    source.slice(source.indexOf("  const pendingJobs ="), source.indexOf("  function reportError(")) +
+      "\n({ translateElements, cancelJob })",
+    sandbox,
+  );
+  const run = scheduler.translateElements(elements, { task });
+  if (mode === "failure" || mode === "http") {
+    await assert.rejects(run, (error) => {
+      assert.equal(error.message, mode === "http" ? "HTTP 401" : "empty response");
+      assert.deepEqual(Array.from(error.retryElements), mode === "http" ? elements : [elements[0]]);
+      return true;
+    });
+  } else {
+    await run;
+  }
+  assert.equal(task.jobs.size, 0);
+  assert.ok(elements.every((element) => element.busy === null));
+  assert.deepEqual(translated, mode === "http" ? [] : mode === "cancel-waiting" ? [elements[0], elements[2]] : mode === "success" ? elements : elements.slice(1));
+  assert.equal(calls.length, mode === "http" ? 2 : mode === "cancel-waiting" ? 3 : 4);
+}
+for (const mode of ["success", "failure", "cancel", "cancel-waiting", "http"]) {
+  await checkBatchRecovery(mode);
+}
 
 console.log("Touch Translate self-check passed");
