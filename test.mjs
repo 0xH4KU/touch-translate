@@ -411,6 +411,120 @@ requestOptions.onload({
 });
 assert.deepEqual([...(await successfulRequest.promise)], ["hello translated"]);
 
+// Recognize Gemini names on official and proxy endpoints without leaking
+// Gemini-only options to other models. Exercise the native response parser too.
+const googleBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai";
+const safetyCategories = [
+  "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+  "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
+];
+for (const [baseURL, model, mode, temperature, effort] of [
+  [googleBaseURL, "gemini-3.1-flash-lite", "native", 1, "minimal"],
+  [googleBaseURL, "gemini-3.1-pro-preview", "native", 1, undefined],
+  [cacheSettings.baseURL, "google/GEMINI-3.1-flash-lite", "proxy", 1, "minimal"],
+  [cacheSettings.baseURL, "gemini-2.5-flash", "proxy", 0.4, undefined],
+  [cacheSettings.baseURL, "fast-model", "generic", 0.4, undefined],
+  [googleBaseURL, "other-model", "generic", 0.4, undefined],
+]) {
+  const texts = ['a "quoted" comment', "another comment"];
+  const request = api.requestTranslations(texts, {
+    ...cacheSettings, baseURL, model, apiKey: "test", temperature: 0.4,
+  });
+  const body = JSON.parse(requestOptions.data);
+  const native = mode === "native";
+  const safety = native ? body.safetySettings : body.safety_settings;
+  if (mode === "generic") {
+    assert.equal(safety, undefined);
+    assert.deepEqual(Object.keys(body).sort(), ["messages", "model", "response_format", "temperature"]);
+  } else {
+    assert.deepEqual(safety, safetyCategories.map(category => ({ category, threshold: "OFF" })));
+  }
+  if (native) {
+    assert.equal(requestOptions.url, `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`);
+    assert.equal(requestOptions.headers["x-goog-api-key"], "test");
+    assert.equal(requestOptions.headers.Authorization, undefined);
+    assert.equal(body.generationConfig.temperature, temperature);
+    assert.equal(body.generationConfig.thinkingConfig?.thinkingLevel, effort);
+    assert.equal(body.generationConfig.responseMimeType, "application/json");
+    assert.equal(body.generationConfig.responseJsonSchema.properties.translations.minItems, texts.length);
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), texts);
+    assert.match(body.systemInstruction.parts[0].text, /naturally into zh-TW/);
+    assert.equal(body.messages, undefined);
+  } else {
+    assert.equal(requestOptions.url, `${baseURL}/chat/completions`);
+    assert.equal(requestOptions.headers.Authorization, "Bearer test");
+    assert.equal(requestOptions.headers["x-goog-api-key"], undefined);
+    assert.equal(body.temperature, temperature);
+    assert.equal(body.reasoning_effort, effort);
+    assert.equal(body.response_format.type, "json_schema");
+    assert.deepEqual(JSON.parse(body.messages[1].content), texts);
+  }
+  const translations = ["一則留言", "另一則留言"];
+  requestOptions.onload({
+    status: 200,
+    responseText: JSON.stringify(native
+      ? { candidates: [{ finishReason: "STOP", content: { parts: [
+          { thought: true, text: "Internal thinking must not be parsed as the translation." },
+          { text: '{"translations":' }, { text: `${JSON.stringify(translations)}}` },
+        ] } }] }
+      : { choices: [{ message: { content: JSON.stringify({ translations }) } }] }),
+  });
+  assert.deepEqual([...(await request.promise)], translations);
+}
+assert.equal(
+  api.endpointFor(`${googleBaseURL}/chat/completions?test=1#ignored`, "models/gemini-3.1-flash-lite"),
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?test=1",
+);
+assert.equal(
+  api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", temperature: 0.2 }),
+  api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", temperature: 1 }),
+);
+
+// Schema fallback retains JSON mode AND safety settings on both transports.
+for (const baseURL of [googleBaseURL, cacheSettings.baseURL]) {
+  const native = baseURL === googleBaseURL;
+  const request = api.requestTranslations(["hello"], {
+    ...cacheSettings, baseURL, model: "gemini-3.1-flash-lite", apiKey: "test",
+  });
+  requestOptions.onload({ status: 400, responseText: JSON.stringify({
+    error: { message: native ? "Unsupported responseJsonSchema" : "Unsupported response_format json_schema" },
+  }) });
+  const body = JSON.parse(requestOptions.data);
+  assert.equal((native ? body.safetySettings : body.safety_settings).every(s => s.threshold === "OFF"), true);
+  if (native) {
+    assert.equal(body.generationConfig.responseMimeType, "application/json");
+    assert.equal(body.generationConfig.responseJsonSchema, undefined);
+  } else {
+    assert.equal(body.response_format.type, "json_object");
+  }
+  requestOptions.onload({ status: 200, responseText: JSON.stringify(native
+    ? { candidates: [{ finishReason: "STOP", content: { parts: [{ text: '{"translations":["你好"]}' }] } }] }
+    : { choices: [{ message: { content: '{"translations":["你好"]}' } }] }) });
+  assert.deepEqual([...(await request.promise)], ["你好"]);
+}
+
+for (const response of [
+  { promptFeedback: { blockReason: "SAFETY" } },
+  { candidates: [{ finishReason: "SAFETY" }] },
+  { candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{ text: '{"translations":[' }] } }] },
+]) {
+  const request = api.requestTranslations(["hello"], {
+    ...cacheSettings, baseURL: googleBaseURL, model: "gemini-3.1-flash-lite", apiKey: "test",
+  });
+  const count = requestHistory.length;
+  requestOptions.onload({ status: 200, responseText: JSON.stringify(response) });
+  await assert.rejects(request.promise, api.shouldSplitBatch);
+  assert.equal(requestHistory.length, count);
+}
+
+const unsupportedSafety = api.requestTranslations(["hello"], {
+  ...cacheSettings, model: "gemini-proxy-test", apiKey: "test",
+});
+const countBeforeSafetyError = requestHistory.length;
+requestOptions.onload({ status: 400, responseText: '{"error":{"message":"Unknown field safety_settings"}}' });
+await assert.rejects(unsupportedSafety.promise, /Unknown field safety_settings/);
+assert.equal(requestHistory.length, countBeforeSafetyError);
+
 const fallbackSettings = {
   apiKey: "test",
   baseURL: "https://api.example.com/v1",
@@ -503,21 +617,72 @@ const outerListItem = {
   parentElement: body,
 };
 const genericBlock = {
-  closest: () => outerListItem,
+  closest: () => null,
   display: "flow-root",
   innerText: "A generic text block",
   matches: () => false,
   parentElement: outerListItem,
 };
 const inlineText = {
-  closest: (selector) =>
-    selector === ".touch-translate__translation" ? null : outerListItem,
+  closest: () => null,
   display: "inline",
   innerText: "A generic text block",
   matches: () => false,
   parentElement: genericBlock,
 };
 assert.equal(api.swipeElementFor(inlineText), genericBlock);
+
+// YouTube's visible mobile comment is aria-hidden inside a labelled button.
+// Only the comment root gets this exception; hidden descendants stay excluded.
+const mobileComment = {
+  ...pageBlock,
+  display: "block",
+  visibility: "visible",
+  innerText: "A comment with a link",
+  matches(selector) {
+    return selector.split(", ").some((part) =>
+      ["p", "ytm-comment-renderer .YtmCommentRendererText", "[aria-hidden='true']"].includes(part),
+    );
+  },
+  closest(selector) { return this.matches(selector) ? this : null; },
+  querySelector: () => null,
+};
+const commentNode = { nodeValue: mobileComment.innerText, parentElement: mobileComment };
+const hiddenCommentNode = {
+  nodeValue: "Hidden metadata",
+  parentElement: {
+    display: "inline", visibility: "visible", parentElement: mobileComment,
+    matches: (selector) => selector.includes("[aria-hidden='true']"),
+  },
+};
+mobileComment.textNodes = [commentNode, hiddenCommentNode];
+assert.equal(api.isRenderedTextNode(commentNode, mobileComment), true);
+assert.equal(api.isRenderedTextNode(hiddenCommentNode, mobileComment), false);
+assert.equal(api.translationRequestFor(mobileComment, mobileComment.innerText).requestText, mobileComment.innerText);
+assert.equal(api.isTranslatablePageBlock(mobileComment, [{ contains: () => true }]), true);
+assert.equal(api.swipeElementFor(mobileComment), mobileComment);
+mobileComment.parentElement = { closest: () => ({ tagName: "NAV" }) };
+assert.equal(api.isTranslatablePageBlock(mobileComment, [{ contains: () => true }]), false);
+delete mobileComment.parentElement;
+const unrelatedHiddenText = {
+  ...mobileComment,
+  matches: (selector) => selector.split(", ").includes("[aria-hidden='true']"),
+};
+assert.equal(api.isRenderedTextNode({ parentElement: unrelatedHiddenText }, unrelatedHiddenText), false);
+
+const commentTranslation = { classList: { contains: () => true } };
+const expander = { nextElementSibling: commentTranslation };
+const desktopComment = {
+  matches: () => true,
+  closest: (selector) => selector.includes("ytd-expander") ? expander : null,
+  nextElementSibling: null,
+};
+assert.equal(api.translationAfter(desktopComment), commentTranslation);
+const mobileRenderer = { nextElementSibling: commentTranslation };
+assert.equal(api.translationAfter({
+  ...desktopComment,
+  closest: (selector) => selector.includes("ytm-comment-renderer") ? mobileRenderer : null,
+}), commentTranslation);
 
 const largerParent = {
   display: "block",

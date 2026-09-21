@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.20
+// @version      0.5.21
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -20,8 +20,14 @@
 
   // Constants and defaults
 
+  const YOUTUBE_COMMENT_SELECTOR = [
+    "yt-attributed-string#content-text",
+    "yt-formatted-string#content-text",
+    "ytm-comment-renderer .YtmCommentRendererText",
+    "ytm-comment-renderer .comment-text",
+  ].join(", ");
   const BLOCK_SELECTOR =
-    "p, li, blockquote, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header']";
+    `p, li, blockquote, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header'], ${YOUTUBE_COMMENT_SELECTOR}`;
   const TITLE_BLOCK_SELECTOR =
     "p, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header']";
   const OVERLAY_LINK_SELECTOR = [
@@ -126,14 +132,25 @@
     return error?.code === "TRANSLATION_RESPONSE_ERROR";
   }
 
-  function endpointFor(baseURL) {
+  function endpointFor(baseURL, model = "") {
     const url = new URL(baseURL);
+    if (/gemini/i.test(model) && url.hostname === "generativelanguage.googleapis.com") {
+      url.pathname = `/v1beta/models/${encodeURIComponent(model.replace(/^models\//, ""))}:generateContent`;
+      url.hash = "";
+      return url.href;
+    }
     let path = url.pathname.replace(/\/+$/, "");
     if (!path) path = "/v1";
     if (!path.endsWith("/chat/completions")) path += "/chat/completions";
     url.pathname = path;
     url.hash = "";
     return url.href;
+  }
+
+  function temperatureFor(settings) {
+    return /gemini-3(?:[.-]|$)/i.test(settings.model)
+      ? 1
+      : typeof settings.temperature === "number" ? settings.temperature : 0.2;
   }
 
   function isPrivateOrLocalHost(hostname) {
@@ -245,17 +262,17 @@
     ) {
       throw new Error("Complete the API setup first.");
     }
-    endpointFor(settings.baseURL);
+    endpointFor(settings.baseURL, settings.model);
     return settings;
   }
 
   function hashCacheKey(text, settings) {
     const input = [
-      "prompt-v3",
+      /gemini/i.test(settings.model) ? "prompt-v3-gemini-v1" : "prompt-v3",
       settings.baseURL,
       settings.model,
       settings.targetLanguage,
-      settings.temperature ?? 0.2,
+      temperatureFor(settings),
       text,
     ].join("\u0000");
     let hash = 0xcbf29ce484222325n;
@@ -493,7 +510,11 @@
       element;
       element = element.parentElement
     ) {
-      if (element.matches(NON_TEXT_SELECTOR)) return false;
+      // Mobile YouTube repeats the visible comment in its button's aria-label.
+      if (
+        element.matches(NON_TEXT_SELECTOR) &&
+        !(element === root && element.matches(YOUTUBE_COMMENT_SELECTOR))
+      ) return false;
       const style = getComputedStyle(element);
       if (
         style.display === "none" ||
@@ -520,6 +541,7 @@
       hashCacheKey,
       canConsumeRightSwipe,
       indicatorFor,
+      insertTranslation,
       isNearViewport,
       isPrivateOrLocalHost,
       isRenderedTextNode,
@@ -539,6 +561,8 @@
       resolveTargetElement,
       retryDelayFor,
       sourceText,
+      translationAfter,
+      translationRequestFor,
       structuredOutputUnsupported,
       swipeIntent,
       swipeShouldCommit,
@@ -624,7 +648,7 @@
       current.targetLanguage,
     );
     const temperature = field(
-      "Temperature (0.0 - 2.0)",
+      "Temperature (0.0 - 2.0; Gemini 3 uses 1.0)",
       "temperature",
       "number",
       current.temperature ?? 0.2,
@@ -817,6 +841,16 @@
       { role: "user", content: JSON.stringify(texts) },
     ];
     const compatibilityKey = `${settings.baseURL}\u0000${settings.model}`;
+    const gemini = /gemini/i.test(settings.model);
+    const geminiFlashLite = /gemini-3\.1-flash-lite(?:-|$)/i.test(settings.model);
+    const url = endpointFor(settings.baseURL, settings.model);
+    const nativeGemini = gemini && new URL(url).hostname === "generativelanguage.googleapis.com";
+    const safetySettings = gemini ? [
+      "HARM_CATEGORY_HARASSMENT",
+      "HARM_CATEGORY_HATE_SPEECH",
+      "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+      "HARM_CATEGORY_DANGEROUS_CONTENT",
+    ].map((category) => ({ category, threshold: "OFF" })) : null;
     let abortRequest = () => {};
     const promise = new Promise((resolve, reject) => {
       let settled = false;
@@ -837,14 +871,12 @@
         }
       };
       const send = (structuredOutput, attempt = 0) => {
-        const body = {
+        let body = {
           model: settings.model,
           messages,
-          temperature:
-            typeof settings.temperature === "number"
-              ? settings.temperature
-              : 0.2,
+          temperature: temperatureFor(settings),
         };
+        if (geminiFlashLite) body.reasoning_effort = "minimal";
         if (structuredOutput) {
           body.response_format = {
             type: "json_schema",
@@ -867,11 +899,35 @@
             },
           };
         }
+        if (nativeGemini) {
+          const generationConfig = {
+            temperature: body.temperature,
+            responseMimeType: "application/json",
+          };
+          if (structuredOutput) {
+            generationConfig.responseJsonSchema = body.response_format.json_schema.schema;
+          }
+          if (geminiFlashLite) {
+            generationConfig.thinkingConfig = { thinkingLevel: "minimal" };
+          }
+          body = {
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ role: "user", parts: [{ text: messages[1].content }] }],
+            generationConfig,
+            safetySettings,
+          };
+        } else if (gemini) {
+          // Chat Completions gateways must forward this Gemini extension.
+          body.safety_settings = safetySettings;
+          if (!structuredOutput) body.response_format = { type: "json_object" };
+        }
         request = GM_xmlhttpRequest({
           method: "POST",
-          url: endpointFor(settings.baseURL),
+          url,
           headers: {
-            Authorization: `Bearer ${settings.apiKey}`,
+            ...(nativeGemini
+              ? { "x-goog-api-key": settings.apiKey }
+              : { Authorization: `Bearer ${settings.apiKey}` }),
             "Content-Type": "application/json",
           },
           data: JSON.stringify(body),
@@ -938,7 +994,16 @@
                   `Translation API error (HTTP ${response.status}).\n${apiMessage || "No error details were returned."}`,
                 );
               }
-              const choice = responseBody?.choices?.[0];
+              const blockedPrompt = nativeGemini && responseBody?.promptFeedback?.blockReason;
+              if (blockedPrompt) {
+                throw Object.assign(
+                  new Error(`Gemini blocked the translation prompt. Reason: ${blockedPrompt}`),
+                  { code: "TRANSLATION_RESPONSE_ERROR" },
+                );
+              }
+              const choice = nativeGemini
+                ? responseBody?.candidates?.[0]
+                : responseBody?.choices?.[0];
               const refusal = choice?.message?.refusal;
               if (refusal) {
                 throw Object.assign(
@@ -946,12 +1011,16 @@
                   { code: "TRANSLATION_RESPONSE_ERROR" },
                 );
               }
-              let content = choice?.message?.content;
+              let content = nativeGemini
+                ? choice?.content?.parts
+                : choice?.message?.content;
               if (Array.isArray(content)) {
-                content = content.map((part) => part?.text || "").join("");
+                content = content
+                  .filter((part) => !nativeGemini || !part?.thought)
+                  .map((part) => part?.text || "").join("");
               }
               const finishReason = String(
-                choice?.finish_reason || "",
+                (nativeGemini ? choice?.finishReason : choice?.finish_reason) || "",
               ).toLowerCase();
               if (
                 finishReason === "content_filter" ||
@@ -1078,8 +1147,15 @@
     return hashCacheKey(requestText, settings) === record.formatKey;
   }
 
+  function translationAnchor(source) {
+    // Avoid clipping and keep the note outside mobile's labelled button.
+    return source.matches?.(YOUTUBE_COMMENT_SELECTOR)
+      ? source.closest("ytd-expander, ytm-comment-renderer") || source
+      : source;
+  }
+
   function translationAfter(source) {
-    const next = source.nextElementSibling;
+    const next = translationAnchor(source).nextElementSibling;
     return next?.classList.contains(TRANSLATION_CLASS) ? next : null;
   }
 
@@ -1142,7 +1218,17 @@
       typeof result === "string" ? result : result?.translation;
     if (!normalizeText(translation)) return;
 
-    const translated = source.cloneNode(true);
+    // A custom element clone can rerender itself and erase the translation.
+    const translated = source.tagName.includes("-")
+      ? document.createElement("div")
+      : source.cloneNode(true);
+    if (source.tagName.includes("-")) {
+      translated.className = source.className;
+      translated.style.cssText = source.style.cssText;
+      translated.append(
+        ...Array.from(source.childNodes, (node) => node.cloneNode(true)),
+      );
+    }
     translated
       .querySelectorAll(NON_TEXT_SELECTOR)
       .forEach((node) => node.remove());
@@ -1181,7 +1267,13 @@
     ).matches;
     if (animateIn) translated.style.setProperty("opacity", "0", "important");
 
-    source.insertAdjacentElement("afterend", translated);
+    const anchor = translationAnchor(source);
+    if (anchor !== source || source.tagName.includes("-")) {
+      const style = getComputedStyle(source);
+      translated.style.font = style.font;
+      translated.style.color = style.color;
+    }
+    anchor.insertAdjacentElement("afterend", translated);
     translations?.add(translated);
     const nodes = contentTextNodes(translated);
     const segments = Array.isArray(result?.segments) ? result.segments : null;
@@ -1243,7 +1335,10 @@
   }
 
   function isUsefulPageBlock(element, text) {
-    if (!pageTextLooksUseful(text) || element.closest(PAGE_CHROME_SELECTOR)) {
+    const chrome = element.matches?.(YOUTUBE_COMMENT_SELECTOR)
+      ? element.parentElement?.closest(PAGE_CHROME_SELECTOR)
+      : element.closest(PAGE_CHROME_SELECTOR);
+    if (!pageTextLooksUseful(text) || chrome) {
       return false;
     }
     const outerChrome = element.closest("header, footer");
@@ -1269,7 +1364,7 @@
     if (
       !element?.isConnected ||
       !roots.some((root) => root.contains(element)) ||
-      element.classList.contains(TRANSLATION_CLASS) ||
+      element.closest(`.${TRANSLATION_CLASS}`) ||
       element.querySelector(BLOCK_SELECTOR) ||
       translationAfter(element) ||
       !isVisible(element)
@@ -1992,6 +2087,8 @@
   function swipeElementFor(target) {
     const translation = target?.closest?.(`.${TRANSLATION_CLASS}`);
     if (translation) return translation;
+    const comment = target?.closest?.(YOUTUBE_COMMENT_SELECTOR);
+    if (comment) return comment;
 
     let inline = null;
     for (
@@ -2145,11 +2242,13 @@
       event.composedPath?.().find((node) => node instanceof Element) ||
       (event.target instanceof Element ? event.target : null);
     const target = resolveTargetElement(rawTarget, touch);
+    const control = target?.closest("input, textarea, select, button");
+    const comment = target?.closest(YOUTUBE_COMMENT_SELECTOR);
     if (
       !target ||
       touch.clientX < SAFARI_EDGE_X ||
       target.isContentEditable ||
-      target.closest("input, textarea, select, button") ||
+      (control && !(comment && control.contains(comment))) ||
       canConsumeRightSwipe(target)
     ) {
       clearSwipe();
@@ -2279,6 +2378,10 @@
     style.textContent = `
       .${TRANSLATION_CLASS} {
         box-sizing: border-box !important;
+        display: block !important;
+        max-height: none !important;
+        -webkit-line-clamp: unset !important;
+        overflow: visible !important;
         opacity: 0.78 !important;
         margin-block-start: 0.54em !important;
         padding-inline-start: 0.42em !important;
