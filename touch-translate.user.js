@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.21
+// @version      0.5.23
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -113,6 +113,7 @@
     "[class*='visually-hidden']",
   ].join(", ");
   const DEFAULT_SETTINGS = {
+    apiFormat: "chat-completions",
     baseURL: "https://api.openai.com/v1",
     model: "",
     apiKey: "",
@@ -132,23 +133,31 @@
     return error?.code === "TRANSLATION_RESPONSE_ERROR";
   }
 
-  function endpointFor(baseURL, model = "") {
+  function endpointFor(baseURL, model = "", apiFormat = "chat-completions") {
     const url = new URL(baseURL);
-    if (/gemini/i.test(model) && url.hostname === "generativelanguage.googleapis.com") {
-      url.pathname = `/v1beta/models/${encodeURIComponent(model.replace(/^models\//, ""))}:generateContent`;
-      url.hash = "";
-      return url.href;
-    }
     let path = url.pathname.replace(/\/+$/, "");
-    if (!path) path = "/v1";
-    if (!path.endsWith("/chat/completions")) path += "/chat/completions";
+    if (apiFormat === "gemini-native") {
+      if (/\/(?:openai|compat|chat\/completions)$/.test(path)) {
+        throw new Error("Gemini (native) needs a native Base URL, such as https://generativelanguage.googleapis.com/v1beta or your gateway's /google-ai-studio route.");
+      }
+      const modelID = model.replace(/^(?:google(?:-ai-studio)?\/)?(?:models\/)?/i, "");
+      path = path.replace(/\/models\/[^/]+:generateContent$/, "");
+      if (!/\/v1(?:beta)?$/.test(path)) path += "/v1beta";
+      path += `/models/${encodeURIComponent(modelID)}:generateContent`;
+    } else {
+      if (path.endsWith(":generateContent")) {
+        throw new Error("Select Gemini (native) for a generateContent endpoint.");
+      }
+      if (!path) path = "/v1";
+      if (!path.endsWith("/chat/completions")) path += "/chat/completions";
+    }
     url.pathname = path;
     url.hash = "";
     return url.href;
   }
 
   function temperatureFor(settings) {
-    return /gemini-3(?:[.-]|$)/i.test(settings.model)
+    return settings.apiFormat === "gemini-native" && /gemini-3(?:[.-]|$)/i.test(settings.model)
       ? 1
       : typeof settings.temperature === "number" ? settings.temperature : 0.2;
   }
@@ -222,6 +231,8 @@
     }
 
     const value = {
+      // Older settings without a format default to Chat Completions.
+      apiFormat: input.apiFormat ?? DEFAULT_SETTINGS.apiFormat,
       baseURL:
         typeof input.baseURL === "string"
           ? input.baseURL.trim()
@@ -239,6 +250,9 @@
       temperature,
     };
 
+    if (!["chat-completions", "gemini-native"].includes(value.apiFormat)) {
+      throw new Error("API format must be Chat Completions or Gemini (native).");
+    }
     if (value.baseURL) {
       const url = new URL(value.baseURL);
       const localHTTP =
@@ -262,13 +276,13 @@
     ) {
       throw new Error("Complete the API setup first.");
     }
-    endpointFor(settings.baseURL, settings.model);
+    endpointFor(settings.baseURL, settings.model, settings.apiFormat);
     return settings;
   }
 
   function hashCacheKey(text, settings) {
     const input = [
-      /gemini/i.test(settings.model) ? "prompt-v3-gemini-v1" : "prompt-v3",
+      settings.apiFormat === "gemini-native" ? "prompt-v3-gemini-v1" : "prompt-v3",
       settings.baseURL,
       settings.model,
       settings.targetLanguage,
@@ -615,13 +629,13 @@
     const inputs = {};
     const field = (labelText, name, type, value, required = true) => {
       const label = document.createElement("label");
-      const input = document.createElement("input");
+      const input = document.createElement(type === "select" ? "select" : "input");
       const id = `touch-translate-settings-${name}`;
       label.htmlFor = id;
       label.textContent = labelText;
       input.id = id;
       input.name = name;
-      input.type = type;
+      if (type !== "select") input.type = type;
       input.value = value;
       input.required = required;
       input.autocomplete = "off";
@@ -634,8 +648,20 @@
       return label;
     };
 
+    const apiFormat = field("API format", "apiFormat", "select", "");
+    for (const [value, text] of [
+      ["chat-completions", "Chat Completions"],
+      ["gemini-native", "Gemini (native)"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      inputs.apiFormat.append(option);
+    }
+    inputs.apiFormat.value = current.apiFormat;
+
     const baseURL = field(
-      "Chat Completions Base URL",
+      "Base URL",
       "baseURL",
       "url",
       current.baseURL,
@@ -648,7 +674,7 @@
       current.targetLanguage,
     );
     const temperature = field(
-      "Temperature (0.0 - 2.0; Gemini 3 uses 1.0)",
+      "Temperature (0.0 - 2.0; native Gemini 3 uses 1.0)",
       "temperature",
       "number",
       current.temperature ?? 0.2,
@@ -682,7 +708,7 @@
     save.dataset.action = "save";
     save.textContent = "Save";
     actions.append(cancel, save);
-    form.append(title, baseURL, model, targetLanguage, temperature, apiKey, error, actions);
+    form.append(title, apiFormat, baseURL, model, targetLanguage, temperature, apiKey, error, actions);
     dialog.append(form);
     (document.body || document.documentElement).append(dialog);
 
@@ -708,6 +734,7 @@
           result = requireReadySettings(
             cleanSettings(
               {
+                apiFormat: data.get("apiFormat"),
                 baseURL: data.get("baseURL"),
                 model: data.get("model"),
                 targetLanguage: data.get("targetLanguage"),
@@ -750,6 +777,7 @@
       Boolean(settings.apiKey) &&
       confirm("Include the API key as plain text in the export?");
     const exportedSettings = {
+      apiFormat: settings.apiFormat,
       baseURL: settings.baseURL,
       model: settings.model,
       targetLanguage: settings.targetLanguage,
@@ -840,12 +868,19 @@
       { role: "system", content: systemPrompt },
       { role: "user", content: JSON.stringify(texts) },
     ];
-    const compatibilityKey = `${settings.baseURL}\u0000${settings.model}`;
-    const gemini = /gemini/i.test(settings.model);
-    const geminiFlashLite = /gemini-3\.1-flash-lite(?:-|$)/i.test(settings.model);
-    const url = endpointFor(settings.baseURL, settings.model);
-    const nativeGemini = gemini && new URL(url).hostname === "generativelanguage.googleapis.com";
-    const safetySettings = gemini ? [
+    const nativeGemini = settings.apiFormat === "gemini-native";
+    const compatibilityKey = `${nativeGemini}\u0000${settings.baseURL}\u0000${settings.model}`;
+    const url = new URL(endpointFor(settings.baseURL, settings.model, settings.apiFormat));
+    const headers = { "Content-Type": "application/json" };
+    if (!nativeGemini) {
+      headers.Authorization = `Bearer ${settings.apiKey}`;
+    } else if (/^(?:\/v1\/[^/]+\/[^/]+)?\/google-ai-studio\//.test(url.pathname)) {
+      // Cloudflare uses its stored Google key (BYOK) or Unified Billing.
+      headers["cf-aig-authorization"] = `Bearer ${settings.apiKey}`;
+    } else {
+      headers["x-goog-api-key"] = settings.apiKey;
+    }
+    const safetySettings = nativeGemini ? [
       "HARM_CATEGORY_HARASSMENT",
       "HARM_CATEGORY_HATE_SPEECH",
       "HARM_CATEGORY_SEXUALLY_EXPLICIT",
@@ -876,7 +911,6 @@
           messages,
           temperature: temperatureFor(settings),
         };
-        if (geminiFlashLite) body.reasoning_effort = "minimal";
         if (structuredOutput) {
           body.response_format = {
             type: "json_schema",
@@ -907,7 +941,7 @@
           if (structuredOutput) {
             generationConfig.responseJsonSchema = body.response_format.json_schema.schema;
           }
-          if (geminiFlashLite) {
+          if (/gemini-3\.1-flash-lite(?:-|$)/i.test(settings.model)) {
             generationConfig.thinkingConfig = { thinkingLevel: "minimal" };
           }
           body = {
@@ -916,20 +950,11 @@
             generationConfig,
             safetySettings,
           };
-        } else if (gemini) {
-          // Chat Completions gateways must forward this Gemini extension.
-          body.safety_settings = safetySettings;
-          if (!structuredOutput) body.response_format = { type: "json_object" };
         }
         request = GM_xmlhttpRequest({
           method: "POST",
-          url,
-          headers: {
-            ...(nativeGemini
-              ? { "x-goog-api-key": settings.apiKey }
-              : { Authorization: `Bearer ${settings.apiKey}` }),
-            "Content-Type": "application/json",
-          },
+          url: url.href,
+          headers,
           data: JSON.stringify(body),
           anonymous: true,
           timeout: 60000,
@@ -2609,7 +2634,8 @@
         font: 600 13px/1.25 -apple-system, BlinkMacSystemFont, sans-serif !important;
         letter-spacing: 0 !important;
       }
-      .${SETTINGS_DIALOG_CLASS} input {
+      .${SETTINGS_DIALOG_CLASS} input,
+      .${SETTINGS_DIALOG_CLASS} select {
         -webkit-appearance: none !important;
         appearance: none !important;
         width: 100% !important;
@@ -2624,7 +2650,12 @@
         font: 16px/1.25 -apple-system, BlinkMacSystemFont, sans-serif !important;
         letter-spacing: 0 !important;
       }
-      .${SETTINGS_DIALOG_CLASS} input:focus-visible {
+      .${SETTINGS_DIALOG_CLASS} select {
+        -webkit-appearance: auto !important;
+        appearance: auto !important;
+      }
+      .${SETTINGS_DIALOG_CLASS} input:focus-visible,
+      .${SETTINGS_DIALOG_CLASS} select:focus-visible {
         border-color: #2878d0 !important;
         outline: 2px solid #2878d0 !important;
         outline-offset: 1px !important;
@@ -2776,7 +2807,8 @@
         .${ERROR_DIALOG_CLASS} > pre {
           border-color: rgba(255, 255, 255, 0.14) !important;
         }
-        .${SETTINGS_DIALOG_CLASS} input {
+        .${SETTINGS_DIALOG_CLASS} input,
+        .${SETTINGS_DIALOG_CLASS} select {
           border-color: rgba(255, 255, 255, 0.22) !important;
           background: #2c2c2e !important;
           color: #f5f5f7 !important;
@@ -2831,7 +2863,7 @@
   GM_registerMenuCommand("Touch Translate: Clear API settings", () => {
     if (
       !confirm(
-        "Remove the saved Base URL, model, target language, and API key?",
+        "Remove the saved API format, Base URL, model, target language, and API key?",
       )
     ) {
       return;

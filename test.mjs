@@ -202,6 +202,10 @@ assert.throws(
   () => api.cleanSettings({ baseURL: "https://api.openai.com/v1", model: "m", temperature: "2.5" }),
   /Temperature/,
 );
+assert.equal(api.cleanSettings({ model: "gemini-3.1-flash-lite" }).apiFormat, "chat-completions");
+assert.equal(api.cleanSettings({ apiFormat: "gemini-native" }).apiFormat, "gemini-native");
+assert.equal(api.cleanSettings({}, { apiFormat: "gemini-native" }).apiFormat, "chat-completions");
+assert.throws(() => api.cleanSettings({ apiFormat: "unknown" }), /API format/);
 assert.equal(
   api.retryDelayFor({ responseHeaders: "Retry-After: 60" }, 0),
   60000,
@@ -411,9 +415,13 @@ requestOptions.onload({
 });
 assert.deepEqual([...(await successfulRequest.promise)], ["hello translated"]);
 
-// Recognize Gemini names on official and proxy endpoints without leaking
-// Gemini-only options to other models. Exercise the native response parser too.
-const googleBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai";
+// Only the selected API format enables native Gemini parameters and parsing.
+// Model aliases need no Gemini keyword; Chat Completions stays generic on any host.
+const googleBaseURL = "https://generativelanguage.googleapis.com/v1beta";
+const googleChatBaseURL = `${googleBaseURL}/openai`;
+// A gateway ID named "compat" is still a valid native provider route.
+const gatewayBaseURL = "https://gateway.ai.cloudflare.com/v1/account/compat/google-ai-studio";
+const customGatewayBaseURL = "https://ai.example.com/google-ai-studio";
 const safetyCategories = [
   "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
   "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
@@ -421,17 +429,24 @@ const safetyCategories = [
 for (const [baseURL, model, mode, temperature, effort] of [
   [googleBaseURL, "gemini-3.1-flash-lite", "native", 1, "minimal"],
   [googleBaseURL, "gemini-3.1-pro-preview", "native", 1, undefined],
-  [cacheSettings.baseURL, "google/GEMINI-3.1-flash-lite", "proxy", 1, "minimal"],
-  [cacheSettings.baseURL, "gemini-2.5-flash", "proxy", 0.4, undefined],
+  [gatewayBaseURL, "gemini-3.1-flash-lite", "gateway", 1, "minimal"],
+  [customGatewayBaseURL, "gemini-3.1-flash-lite", "gateway", 1, "minimal"],
+  ["https://ai.example.com/compat", "google/gemini-3.1-flash-lite", "generic", 0.4, undefined],
+  [customGatewayBaseURL, "translation-alias", "gateway", 0.4, undefined],
+  [googleBaseURL, "translation-alias", "native", 0.4, undefined],
+  [cacheSettings.baseURL, "google/GEMINI-3.1-flash-lite", "generic", 0.4, undefined],
+  [cacheSettings.baseURL, "gemini-2.5-flash", "generic", 0.4, undefined],
   [cacheSettings.baseURL, "fast-model", "generic", 0.4, undefined],
-  [googleBaseURL, "other-model", "generic", 0.4, undefined],
+  [googleChatBaseURL, "gemini-3.1-flash-lite", "generic", 0.4, undefined],
+  ["https://proxy.example.com/v1beta", "translation-alias", "native", 0.4, undefined],
 ]) {
   const texts = ['a "quoted" comment', "another comment"];
+  const native = mode === "native" || mode === "gateway";
   const request = api.requestTranslations(texts, {
     ...cacheSettings, baseURL, model, apiKey: "test", temperature: 0.4,
+    apiFormat: native ? "gemini-native" : "chat-completions",
   });
   const body = JSON.parse(requestOptions.data);
-  const native = mode === "native";
   const safety = native ? body.safetySettings : body.safety_settings;
   if (mode === "generic") {
     assert.equal(safety, undefined);
@@ -440,9 +455,12 @@ for (const [baseURL, model, mode, temperature, effort] of [
     assert.deepEqual(safety, safetyCategories.map(category => ({ category, threshold: "OFF" })));
   }
   if (native) {
-    assert.equal(requestOptions.url, `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`);
-    assert.equal(requestOptions.headers["x-goog-api-key"], "test");
+    const prefix = mode === "gateway" ? `${baseURL}/v1beta` : baseURL;
+    assert.equal(requestOptions.url, `${prefix}/models/${model}:generateContent`);
+    assert.equal(requestOptions.headers["x-goog-api-key"], mode === "gateway" ? undefined : "test");
+    assert.equal(requestOptions.headers["cf-aig-authorization"], mode === "gateway" ? "Bearer test" : undefined);
     assert.equal(requestOptions.headers.Authorization, undefined);
+    assert.equal(body.safety_settings, undefined);
     assert.equal(body.generationConfig.temperature, temperature);
     assert.equal(body.generationConfig.thinkingConfig?.thinkingLevel, effort);
     assert.equal(body.generationConfig.responseMimeType, "application/json");
@@ -454,6 +472,7 @@ for (const [baseURL, model, mode, temperature, effort] of [
     assert.equal(requestOptions.url, `${baseURL}/chat/completions`);
     assert.equal(requestOptions.headers.Authorization, "Bearer test");
     assert.equal(requestOptions.headers["x-goog-api-key"], undefined);
+    assert.equal(requestOptions.headers["cf-aig-authorization"], undefined);
     assert.equal(body.temperature, temperature);
     assert.equal(body.reasoning_effort, effort);
     assert.equal(body.response_format.type, "json_schema");
@@ -472,36 +491,80 @@ for (const [baseURL, model, mode, temperature, effort] of [
   assert.deepEqual([...(await request.promise)], translations);
 }
 assert.equal(
-  api.endpointFor(`${googleBaseURL}/chat/completions?test=1#ignored`, "models/gemini-3.1-flash-lite"),
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?test=1",
+  api.endpointFor(`${googleChatBaseURL}/chat/completions?test=1#ignored`, "models/gemini-3.1-flash-lite"),
+  `${googleChatBaseURL}/chat/completions?test=1`,
 );
+for (const baseURL of [gatewayBaseURL, customGatewayBaseURL]) {
+  for (const [suffix, version] of [["/", "v1beta"], ["/v1", "v1"], ["/v1beta/", "v1beta"], ["/v1beta/models/old-model:generateContent", "v1beta"]]) {
+    for (const model of ["gemini-3.1-flash-lite", "models/gemini-3.1-flash-lite", "google/gemini-3.1-flash-lite", "google-ai-studio/gemini-3.1-flash-lite"]) {
+      assert.equal(
+        api.endpointFor(`${baseURL}${suffix}?test=1#ignored`, model, "gemini-native"),
+        `${baseURL}/${version}/models/gemini-3.1-flash-lite:generateContent?test=1`,
+      );
+    }
+  }
+}
 assert.equal(
+  api.endpointFor("https://ai.example.com/google-ai-studio-other", "gemini-3.1-flash-lite"),
+  "https://ai.example.com/google-ai-studio-other/chat/completions",
+);
+for (const baseURL of [googleChatBaseURL, "https://ai.example.com/compat", "https://api.example.com/v1/chat/completions"]) {
+  assert.throws(() => api.endpointFor(baseURL, "alias", "gemini-native"), /native Base URL/);
+}
+assert.throws(
+  () => api.endpointFor(`${googleBaseURL}/models/alias:generateContent`, "alias"),
+  /Select Gemini/,
+);
+assert.notEqual(
   api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", temperature: 0.2 }),
   api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", temperature: 1 }),
 );
+assert.equal(
+  api.hashCacheKey("same", { ...cacheSettings, apiFormat: "gemini-native", model: "gemini-3.1-flash-lite", temperature: 0.2 }),
+  api.hashCacheKey("same", { ...cacheSettings, apiFormat: "gemini-native", model: "gemini-3.1-flash-lite", temperature: 1 }),
+);
+assert.notEqual(
+  api.hashCacheKey("same", cacheSettings),
+  api.hashCacheKey("same", { ...cacheSettings, apiFormat: "gemini-native" }),
+);
 
-// Schema fallback retains JSON mode AND safety settings on both transports.
-for (const baseURL of [googleBaseURL, cacheSettings.baseURL]) {
-  const native = baseURL === googleBaseURL;
+// Native fallback retains JSON mode and safety settings; Chat Completions
+// keeps its generic fallback even when the model name contains Gemini.
+for (const baseURL of [googleBaseURL, customGatewayBaseURL, cacheSettings.baseURL]) {
+  const native = baseURL !== cacheSettings.baseURL;
   const request = api.requestTranslations(["hello"], {
     ...cacheSettings, baseURL, model: "gemini-3.1-flash-lite", apiKey: "test",
+    apiFormat: native ? "gemini-native" : "chat-completions",
   });
   requestOptions.onload({ status: 400, responseText: JSON.stringify({
     error: { message: native ? "Unsupported responseJsonSchema" : "Unsupported response_format json_schema" },
   }) });
   const body = JSON.parse(requestOptions.data);
-  assert.equal((native ? body.safetySettings : body.safety_settings).every(s => s.threshold === "OFF"), true);
+  assert.equal(requestOptions.headers["cf-aig-authorization"], baseURL === customGatewayBaseURL ? "Bearer test" : undefined);
+  assert.equal(body.safety_settings, undefined);
   if (native) {
+    assert.equal(body.safetySettings.every(s => s.threshold === "OFF"), true);
     assert.equal(body.generationConfig.responseMimeType, "application/json");
     assert.equal(body.generationConfig.responseJsonSchema, undefined);
   } else {
-    assert.equal(body.response_format.type, "json_object");
+    assert.deepEqual(Object.keys(body).sort(), ["messages", "model", "temperature"]);
   }
   requestOptions.onload({ status: 200, responseText: JSON.stringify(native
     ? { candidates: [{ finishReason: "STOP", content: { parts: [{ text: '{"translations":["你好"]}' }] } }] }
     : { choices: [{ message: { content: '{"translations":["你好"]}' } }] }) });
   assert.deepEqual([...(await request.promise)], ["你好"]);
 }
+
+// A schema failure in native mode must not disable Chat Completions schemas
+// after switching formats on the same Base URL and model.
+const switchedFormat = api.requestTranslations(["hello"], {
+  ...cacheSettings, baseURL: customGatewayBaseURL, model: "gemini-3.1-flash-lite", apiKey: "test",
+  apiFormat: "chat-completions",
+});
+assert.equal(JSON.parse(requestOptions.data).response_format.type, "json_schema");
+assert.equal(JSON.parse(requestOptions.data).safety_settings, undefined);
+requestOptions.onload({ status: 200, responseText: '{"choices":[{"message":{"content":"{\\"translations\\":[\\"你好\\"]}"}}]}' });
+assert.deepEqual([...(await switchedFormat.promise)], ["你好"]);
 
 for (const response of [
   { promptFeedback: { blockReason: "SAFETY" } },
@@ -510,20 +573,13 @@ for (const response of [
 ]) {
   const request = api.requestTranslations(["hello"], {
     ...cacheSettings, baseURL: googleBaseURL, model: "gemini-3.1-flash-lite", apiKey: "test",
+    apiFormat: "gemini-native",
   });
   const count = requestHistory.length;
   requestOptions.onload({ status: 200, responseText: JSON.stringify(response) });
   await assert.rejects(request.promise, api.shouldSplitBatch);
   assert.equal(requestHistory.length, count);
 }
-
-const unsupportedSafety = api.requestTranslations(["hello"], {
-  ...cacheSettings, model: "gemini-proxy-test", apiKey: "test",
-});
-const countBeforeSafetyError = requestHistory.length;
-requestOptions.onload({ status: 400, responseText: '{"error":{"message":"Unknown field safety_settings"}}' });
-await assert.rejects(unsupportedSafety.promise, /Unknown field safety_settings/);
-assert.equal(requestHistory.length, countBeforeSafetyError);
 
 const fallbackSettings = {
   apiKey: "test",
