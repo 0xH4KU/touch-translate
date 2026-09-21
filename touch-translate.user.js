@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.23
+// @version      0.5.24
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -12,6 +12,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
+// @grant        GM_info
 // @connect      *
 // ==/UserScript==
 
@@ -137,8 +138,11 @@
     const url = new URL(baseURL);
     let path = url.pathname.replace(/\/+$/, "");
     if (apiFormat === "gemini-native") {
-      if (/\/(?:openai|compat|chat\/completions)$/.test(path)) {
-        throw new Error("Gemini (native) needs a native Base URL, such as https://generativelanguage.googleapis.com/v1beta or your gateway's /google-ai-studio route.");
+      if (
+        /\/(?:openai|compat|chat\/completions)$/.test(path) ||
+        /^(?:\/v1\/[^/]+\/[^/]+)?\/compat(?:\/|$)/.test(path)
+      ) {
+        throw new Error("Gemini (native) needs a native Base URL, such as https://generativelanguage.googleapis.com/v1beta or your gateway's /google-ai-studio route. Do not put /google-ai-studio after /compat.");
       }
       const modelID = model.replace(/^(?:google(?:-ai-studio)?\/)?(?:models\/)?/i, "");
       path = path.replace(/\/models\/[^/]+:generateContent$/, "");
@@ -1078,6 +1082,34 @@
               }
               finish(resolve, parseTranslations(content, texts.length));
             } catch (error) {
+              if (response.status < 200 || response.status >= 300) {
+                const details = [
+                  `API format: ${nativeGemini ? "Gemini (native)" : "Chat Completions"}`,
+                ];
+                if (typeof GM_info !== "undefined" && GM_info.script?.version) {
+                  details.push(`Touch Translate: ${GM_info.script.version}`);
+                }
+                for (const [label, value] of [
+                  ["Request URL", url.href],
+                  ["Response URL", response.finalUrl],
+                ]) {
+                  if (!value) continue;
+                  try {
+                    const endpoint = new URL(value);
+                    // Omit URL credentials, query keys, and fragments from diagnostics.
+                    details.push(`${label}: ${endpoint.origin}${endpoint.pathname}`);
+                  } catch { /* A malformed finalUrl must not hide the API error. */ }
+                }
+                for (const name of ["cf-ray", "cf-aig-log-id"]) {
+                  const match = String(response.responseHeaders || "")
+                    .match(new RegExp(`^${name}:\\s*(.+)$`, "im"));
+                  if (match) details.push(`${name}: ${match[1].trim()}`);
+                }
+                error.message += `\n\n${details.join("\n")}`;
+                if (settings.apiKey) {
+                  error.message = error.message.split(settings.apiKey).join("[redacted]");
+                }
+              }
               finish(reject, error);
             }
           },

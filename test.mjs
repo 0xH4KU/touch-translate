@@ -42,6 +42,7 @@ const context = vm.createContext({
   document,
   NodeFilter,
   setTimeout,
+  GM_info: { script: { version: source.match(/@version\s+(\S+)/)[1] } },
   GM_xmlhttpRequest: (options) => {
     requestOptions = options;
     requestHistory.push(options);
@@ -508,13 +509,59 @@ assert.equal(
   api.endpointFor("https://ai.example.com/google-ai-studio-other", "gemini-3.1-flash-lite"),
   "https://ai.example.com/google-ai-studio-other/chat/completions",
 );
-for (const baseURL of [googleChatBaseURL, "https://ai.example.com/compat", "https://api.example.com/v1/chat/completions"]) {
+for (const baseURL of [
+  googleChatBaseURL,
+  "https://api.example.com/v1/chat/completions",
+  "https://ai.example.com/compat",
+  "https://ai.example.com/compat/google-ai-studio",
+  "https://ai.example.com/compat/google-ai-studio/v1beta/models/alias:generateContent",
+  "https://gateway.ai.cloudflare.com/v1/account/gateway/compat/google-ai-studio",
+]) {
   assert.throws(() => api.endpointFor(baseURL, "alias", "gemini-native"), /native Base URL/);
 }
 assert.throws(
   () => api.endpointFor(`${googleBaseURL}/models/alias:generateContent`, "alias"),
   /Select Gemini/,
 );
+
+// HTTP errors expose the sent and final routes without URL credentials or keys.
+for (const native of [true, false]) {
+  const settings = {
+    ...cacheSettings,
+    apiFormat: native ? "gemini-native" : "chat-completions",
+    baseURL: "https://url-user:url-password@ai.example.com/google-ai-studio?key=query-secret#fragment-secret",
+    model: "gemini-3.1-flash-lite",
+    apiKey: "diagnostic-api-secret",
+  };
+  const request = api.requestTranslations(["hello"], settings);
+  const sent = new URL(requestOptions.url);
+  const finalPath = `/compat${sent.pathname}`;
+  const count = requestHistory.length;
+  requestOptions.onload({
+    status: 400,
+    finalUrl: native
+      ? `https://redirect-user:redirect-password@ai.example.com${finalPath}?key=redirect-secret`
+      : "http://[", // An invalid transport URL must not replace the original error.
+    responseHeaders: "CF-Ray: test-ray-NRT\r\ncf-aig-log-id: test-log\r\n",
+    responseText: native
+      ? JSON.stringify({ message: `Compatibility endpoint: ${sent.pathname.slice(1)} is not supported. ${settings.apiKey}` })
+      : `Invalid request: ${settings.apiKey}`,
+  });
+  await assert.rejects(request.promise, (error) => {
+    assert.match(error.message, native ? /HTTP 400[\s\S]*Compatibility endpoint/ : /returned invalid JSON/);
+    assert.ok(error.message.includes(`API format: ${native ? "Gemini (native)" : "Chat Completions"}`));
+    assert.ok(error.message.includes(`Touch Translate: ${context.GM_info.script.version}`));
+    assert.ok(error.message.includes(`Request URL: https://ai.example.com${sent.pathname}`));
+    if (native) assert.ok(error.message.includes(`Response URL: https://ai.example.com${finalPath}`));
+    else assert.doesNotMatch(error.message, /Response URL:/);
+    assert.match(error.message, /cf-ray: test-ray-NRT[\s\S]*cf-aig-log-id: test-log/);
+    assert.match(error.message, /\[redacted\]/);
+    assert.doesNotMatch(error.message, /url-user|url-password|redirect-user|redirect-password|query-secret|fragment-secret|redirect-secret|diagnostic-api-secret/);
+    assert.equal(api.shouldSplitBatch(error), false);
+    return true;
+  });
+  assert.equal(requestHistory.length, count);
+}
 assert.notEqual(
   api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", temperature: 0.2 }),
   api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", temperature: 1 }),
