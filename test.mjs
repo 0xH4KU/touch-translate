@@ -389,7 +389,7 @@ assert.equal(requestBody.response_format.type, "json_schema");
 assert.equal(requestBody.temperature, 0.2);
 assert.match(
   requestBody.messages[0].content,
-  /neutral, and impartial translation engine[\s\S]*naturally into zh-TW[\s\S]*without moral judgment[\s\S]*Do not add explanations or commentary[\s\S]*If paired \[\[TT0\]\]/,
+  /professional native translator[\s\S]*naturally into zh-TW[\s\S]*Do not add explanations or commentary[\s\S]*If paired \[\[TT0\]\]/,
 );
 assert.doesNotMatch(source, /prompt-v[12]\b/);
 assert.match(source, /prompt-v3/);
