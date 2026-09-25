@@ -466,7 +466,8 @@ for (const [baseURL, model, mode, temperature, effort] of [
     assert.equal(body.generationConfig.thinkingConfig?.thinkingLevel, effort);
     assert.equal(body.generationConfig.responseMimeType, "application/json");
     assert.equal(body.generationConfig.responseJsonSchema.properties.translations.minItems, texts.length);
-    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), texts);
+    assert.match(body.contents[0].parts[0].text, /^Translate the following web page content into zh-TW:\n\n/);
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text.replace(/^[\s\S]*?\n\n/, "")), texts);
     assert.match(body.systemInstruction.parts[0].text, /naturally into zh-TW/);
     assert.equal(body.messages, undefined);
   } else {
@@ -477,7 +478,8 @@ for (const [baseURL, model, mode, temperature, effort] of [
     assert.equal(body.temperature, temperature);
     assert.equal(body.reasoning_effort, effort);
     assert.equal(body.response_format.type, "json_schema");
-    assert.deepEqual(JSON.parse(body.messages[1].content), texts);
+    assert.match(body.messages[1].content, /^Translate the following web page content into zh-TW:\n\n/);
+    assert.deepEqual(JSON.parse(body.messages[1].content.replace(/^[\s\S]*?\n\n/, "")), texts);
   }
   const translations = ["一則留言", "另一則留言"];
   requestOptions.onload({

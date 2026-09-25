@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.5.25
+// @version      0.5.26
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -866,9 +866,14 @@
       'Return a JSON object with a "translations" array in the same order and length.',
     ].join(" ");
 
+    const userPrompt = [
+      `Translate the following web page content into ${settings.targetLanguage}:`,
+      JSON.stringify(texts),
+    ].join("\n\n");
+
     const messages = [
       { role: "system", content: systemPrompt },
-      { role: "user", content: JSON.stringify(texts) },
+      { role: "user", content: userPrompt },
     ];
     const nativeGemini = settings.apiFormat === "gemini-native";
     const compatibilityKey = `${nativeGemini}\u0000${settings.baseURL}\u0000${settings.model}`;
