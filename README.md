@@ -34,9 +34,9 @@ The script defaults to a sampling `temperature` of `0.2` (customizable between `
 
 Select **Gemini (native)** to enable the native request and response format, including:
 
-- Set the four adjustable content filters (harassment, hate speech, sexually explicit, and dangerous content) to `OFF`.
+- Set the five adjustable content filters (harassment, hate speech, sexually explicit, dangerous content, and civic integrity) to `OFF`.
 - Send the source strings as JSON and request JSON Schema output, retaining JSON mode if schema support is unavailable.
-- Use temperature `1.0` for Gemini 3, as [recommended by Google](https://ai.google.dev/gemini-api/docs/gemini-3#temperature), and minimal thinking for Gemini 3.1 Flash-Lite. Other models keep their configured temperature.
+- Use minimal thinking for Gemini 3.1 Flash-Lite while respecting your configured temperature.
 
 For Google directly, use Base URL `https://generativelanguage.googleapis.com/v1beta` and your Google API key. The script appends `/models/{model}:generateContent` and sends `safetySettings` with `x-goog-api-key` authentication. Native proxies can use their own Base URL. An explicit `/v1` or `/v1beta` is preserved; `/v1beta` is added when neither is present. Google's `/v1beta/openai` URL belongs to Chat Completions and is not rewritten to the native API.
 
@@ -48,17 +48,17 @@ The selected API format is saved and included in settings exports. Older setting
 
 ## Privacy
 
-- API request bodies contain only extracted visible text, lightweight inline-segment markers, the selected model, and the translation instruction. The page HTML, URL, and title are not included. The API provider may still receive normal network metadata such as your IP address.
+- API request bodies contain only extracted visible plain text, the selected model, and the translation instruction. The page HTML, URL, and title are not included. The API provider may still receive normal network metadata such as your IP address.
 - API requests use Tampermonkey's `anonymous` mode.
 - The script includes no analytics, tracking, or unrelated external requests.
 - The API key is entered in a masked field and stored in Tampermonkey storage, not in the userscript source. Use the clear API settings menu command to delete it and the other API settings.
-- The cache stores only 64-bit hashes of the settings, source text, and inline layout plus the translation, translated segments, and a timestamp. It never stores the source text and is limited to 500 entries.
+- The cache stores only 64-bit hashes of the settings and source text plus the translation and a timestamp. It never stores the source text and is limited to 500 entries.
 - `@connect *` allows custom API domains. The script only connects to the configured Base URL.
 - Settings exports omit the API key by default. If included, the key is stored as plain text and the exported JSON must be treated as sensitive.
 
 ## Limitations
 
-Browser-protected pages, frames that deny extension access, closed Shadow DOM, Canvas, PDFs, images, and video subtitles remain inaccessible because they do not expose ordinary HTML text to userscripts. Existing inline elements, classes, styles, and colors are preserved when the provider returns the segment markers intact. If it changes those markers, the script safely falls back to plain text without retrying or spending additional quota. New API requests are limited to 6,000 characters per text block. API responses are never inserted as HTML.
+Browser-protected pages, frames that deny extension access, closed Shadow DOM, Canvas, PDFs, images, and video subtitles remain inaccessible because they do not expose ordinary HTML text to userscripts. The script sends pure plain text to the model so sentence structure and word order can be translated naturally, then reassembles the translation container and line breaks in the DOM. New API requests are limited to 6,000 characters per text block. API responses are never inserted as HTML.
 
 ## Self-check
 

@@ -389,10 +389,11 @@ assert.equal(requestBody.response_format.type, "json_schema");
 assert.equal(requestBody.temperature, 0.2);
 assert.match(
   requestBody.messages[0].content,
-  /professional native translator[\s\S]*naturally into zh-TW[\s\S]*Do not add explanations or commentary[\s\S]*If paired \[\[TT0\]\]/,
+  /professional native translator[\s\S]*naturally into zh-TW[\s\S]*without omissions, moral judgment, lecturing, or self-censorship[\s\S]*idiomatic phrasing and natural target-language word order[\s\S]*Do not add explanations or commentary/,
 );
-assert.doesNotMatch(source, /prompt-v[12]\b/);
-assert.match(source, /prompt-v3/);
+assert.doesNotMatch(requestBody.messages[0].content, /\[\[TT0\]\]/);
+assert.doesNotMatch(source, /prompt-v[123]\b/);
+assert.match(source, /prompt-v4/);
 assert.equal(
   requestBody.response_format.json_schema.schema.properties.translations.minItems,
   1,
@@ -426,12 +427,13 @@ const customGatewayBaseURL = "https://ai.example.com/google-ai-studio";
 const safetyCategories = [
   "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
   "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
+  "HARM_CATEGORY_CIVIC_INTEGRITY",
 ];
 for (const [baseURL, model, mode, temperature, effort] of [
-  [googleBaseURL, "gemini-3.1-flash-lite", "native", 1, "minimal"],
-  [googleBaseURL, "gemini-3.1-pro-preview", "native", 1, undefined],
-  [gatewayBaseURL, "gemini-3.1-flash-lite", "gateway", 1, "minimal"],
-  [customGatewayBaseURL, "gemini-3.1-flash-lite", "gateway", 1, "minimal"],
+  [googleBaseURL, "gemini-3.1-flash-lite", "native", 0.4, "minimal"],
+  [googleBaseURL, "gemini-3.1-pro-preview", "native", 0.4, undefined],
+  [gatewayBaseURL, "gemini-3.1-flash-lite", "gateway", 0.4, "minimal"],
+  [customGatewayBaseURL, "gemini-3.1-flash-lite", "gateway", 0.4, "minimal"],
   ["https://ai.example.com/compat", "google/gemini-3.1-flash-lite", "generic", 0.4, undefined],
   [customGatewayBaseURL, "translation-alias", "gateway", 0.4, undefined],
   [googleBaseURL, "translation-alias", "native", 0.4, undefined],
@@ -568,7 +570,7 @@ assert.notEqual(
   api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", temperature: 0.2 }),
   api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", temperature: 1 }),
 );
-assert.equal(
+assert.notEqual(
   api.hashCacheKey("same", { ...cacheSettings, apiFormat: "gemini-native", model: "gemini-3.1-flash-lite", temperature: 0.2 }),
   api.hashCacheKey("same", { ...cacheSettings, apiFormat: "gemini-native", model: "gemini-3.1-flash-lite", temperature: 1 }),
 );
@@ -997,6 +999,43 @@ requestOptions.onload({
 });
 assert.deepEqual([...(await recoveredRequest.promise)], ["你好"]);
 
+// Multi-node elements extract clean plain text without [[TT0]] markers or button/hidden noise.
+const multiNodeElement = {
+  display: "block",
+  innerText: "Read Copy this article by John.",
+  matches: () => false,
+  parentElement: null,
+  visibility: "visible",
+};
+const buttonParent = {
+  display: "inline-block",
+  matches: (selector) => selector.includes("button"),
+  parentElement: multiNodeElement,
+  visibility: "visible",
+};
+multiNodeElement.textNodes = [
+  { nodeValue: "Read ", parentElement: multiNodeElement },
+  { nodeValue: "Copy", parentElement: buttonParent },
+  { nodeValue: "this article", parentElement: multiNodeElement },
+  { nodeValue: " by ", parentElement: multiNodeElement },
+  { nodeValue: "John.", parentElement: multiNodeElement },
+];
+assert.equal(api.sourceText(multiNodeElement), "Read this article by John.");
+assert.deepEqual(
+  { ...api.translationRequestFor(multiNodeElement, api.sourceText(multiNodeElement)) },
+  { requestText: "Read this article by John.", segmentCount: 0 },
+);
+
+// Non-title blocks (like <li> cards) with nested text blocks are excluded from page translation.
+const cardListItem = {
+  ...pageBlock,
+  children: [nestedTextBlock],
+  innerText: "Card header and nested paragraph",
+  matches: (selector) => selector.includes("li") && !selector.includes("h1"),
+  querySelector: () => null,
+};
+assert.equal(api.isTranslatablePageBlock(cardListItem, [{ contains: () => true }]), false);
+
 // Exercise the real scheduler/job lifecycle with rendering and transport stubbed.
 async function checkBatchRecovery(mode) {
   const elements = ["first", "second", "third"].map((text) => ({
@@ -1005,7 +1044,7 @@ async function checkBatchRecovery(mode) {
     setAttribute(_name, value) { this.busy = value; },
     removeAttribute() { this.busy = null; },
   }));
-  const task = { cancelled: false, jobs: new Set() };
+  const task = { autoPage: mode === "auto-failure", cancelled: false, jobs: new Set() };
   const calls = [];
   const translated = [];
   let scheduler;
@@ -1033,7 +1072,7 @@ async function checkBatchRecovery(mode) {
       const promise = new Promise((resolve, reject) => {
         rejectRequest = reject;
         queueMicrotask(() => {
-          if (texts.length > 1 || (mode === "failure" && texts[0] === "first")) {
+          if (texts.length > 1 || ((mode === "failure" || mode === "auto-failure") && texts[0] === "first")) {
             reject(responseFailure);
           } else if (mode === "cancel" && texts[0] === "first") {
             scheduler.cancelJob(elements[0]);
@@ -1070,7 +1109,7 @@ async function checkBatchRecovery(mode) {
   assert.deepEqual(translated, mode === "http" ? [] : mode === "cancel-waiting" ? [elements[0], elements[2]] : mode === "success" ? elements : elements.slice(1));
   assert.equal(calls.length, mode === "http" ? 2 : mode === "cancel-waiting" ? 3 : 4);
 }
-for (const mode of ["success", "failure", "cancel", "cancel-waiting", "http"]) {
+for (const mode of ["success", "failure", "auto-failure", "cancel", "cancel-waiting", "http"]) {
   await checkBatchRecovery(mode);
 }
 
