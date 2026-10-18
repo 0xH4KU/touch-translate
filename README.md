@@ -8,7 +8,8 @@ A private, touch-first bilingual translation userscript for iOS Safari and Tampe
 
 - Swipe right on a visible HTML text block. A 60px drag or a shorter deliberate flick commits it; initial finger drift and a small release correction are tolerated once the rightward gesture is clear.
 - Swipe the same block again while it is loading to cancel. The network request is also aborted when no other block shares it. Swipe again after the translation appears to remove it.
-- Translation errors open a dialog with the provider or response-format details. HTTP errors also show the API format, script version, request and response URLs, and Cloudflare request identifiers when available; diagnostic URLs omit credentials and query parameters. Retry the failed blocks from the dialog or close it and leave the red status indicator in place.
+- Tap the translate button in the top-right corner of a content image (`>= 120×100px`) to translate visible text in the image (Babel Lens mode). Numbered bounding boxes (`[1]`, `[2]`, ...) are overlaid on the image without altering the artwork, and matching numbered translations are inserted in a quote block below the image. Tap any region box or translation row to highlight the pair; tap the `×` button on the image or swipe right on the translation block to remove both.
+- Translation errors open a dialog with the provider or response-format details. HTTP errors also show the API format, script version, request and response URLs, and Cloudflare request identifiers when available; diagnostic URLs omit credentials and query parameters. Retry the failed blocks or images from the dialog or close it and leave the red status indicator in place.
 - Quickly tap with four fingers to start automatic page translation. Modern `IntersectionObserver` scheduling observes translatable content and translates visible blocks with prefetching as you scroll, avoiding layout thrashing. Repeat the gesture to stop and remove the translations added by that automatic run.
 - Use the Tampermonkey menu to configure or clear the API settings, translate the page, import or export settings, and clear the cache.
 
@@ -30,6 +31,10 @@ For Chat Completions, use a Base URL such as `https://api.openai.com/v1`. The sc
 
 The script defaults to a sampling `temperature` of `0.2` (customizable between `0.0` and `2.0`), prefers strict JSON Schema output, and automatically retries with exponential backoff on HTTP 429 rate limits and 5xx server errors (respecting `Retry-After` headers when provided).
 
+Image translation requires a model that accepts image input. Images are resized to a maximum edge of 1,600 pixels and normalized to PNG to preserve transparency. Region boxes follow the image's scaling, cropping, and position; changing an image's source cancels its pending request and clears its previous translation.
+
+For Gemini native image requests, the script uses a small output schema and validates region bounds locally. If the API returns HTTP 400 `INVALID_ARGUMENT`, it retries once in JSON mode without the output schema, keeping the image, temperature, and safety settings. A successful fallback is reused for image requests to that endpoint and model during the current page session; text requests retain their own schema support.
+
 ### Gemini native configuration
 
 Select **Gemini (native)** to enable the native request and response format, including:
@@ -48,17 +53,17 @@ The selected API format is saved and included in settings exports. Older setting
 
 ## Privacy
 
-- API request bodies contain only extracted visible plain text, the selected model, and the translation instruction. The page HTML, URL, and title are not included. The API provider may still receive normal network metadata such as your IP address.
+- API request bodies contain only extracted visible plain text (or the normalized image when you explicitly tap an image's translate button), the selected model, and the translation instruction. The page HTML, URL, and title are not included. The API provider may still receive normal network metadata such as your IP address.
 - API requests use Tampermonkey's `anonymous` mode.
 - The script includes no analytics, tracking, or unrelated external requests.
 - The API key is entered in a masked field and stored in Tampermonkey storage, not in the userscript source. Use the clear API settings menu command to delete it and the other API settings.
-- The cache stores only 64-bit hashes of the settings and source text plus the translation and a timestamp. It never stores the source text and is limited to 500 entries.
-- `@connect *` allows custom API domains. The script only connects to the configured Base URL.
+- The cache stores only 64-bit hashes of the settings and source text or image URL plus the translation and a timestamp. It never stores the source text and is limited to 500 entries.
+- `@connect *` allows custom API domains and cross-origin image fetching when you trigger image translation.
 - Settings exports omit the API key by default. If included, the key is stored as plain text and the exported JSON must be treated as sensitive.
 
 ## Limitations
 
-Browser-protected pages, frames that deny extension access, closed Shadow DOM, Canvas, PDFs, images, and video subtitles remain inaccessible because they do not expose ordinary HTML text to userscripts. The script sends pure plain text to the model so sentence structure and word order can be translated naturally, then reassembles the translation container and line breaks in the DOM. New API requests are limited to 6,000 characters per text block. API responses are never inserted as HTML.
+Browser-protected pages, frames that deny extension access, closed Shadow DOM, Canvas, PDFs, and video subtitles remain inaccessible because they do not expose ordinary HTML text to userscripts. The script sends pure plain text to the model so sentence structure and word order can be translated naturally, then reassembles the translation container and line breaks in the DOM. New API requests are limited to 6,000 characters per text block and 10 MB per image. API responses are never inserted as HTML.
 
 ## Self-check
 

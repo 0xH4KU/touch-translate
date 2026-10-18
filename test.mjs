@@ -1113,4 +1113,530 @@ for (const mode of ["success", "failure", "auto-failure", "cancel", "cancel-wait
   await checkBatchRecovery(mode);
 }
 
+// Image translation: region normalization and structured output parsing
+const normalizedRegion = api.normalizeImageRegion({ box_2d: [100, 200, 300, 800], translation: "  第一句  " });
+assert.deepEqual([...normalizedRegion.box_2d], [100, 200, 300, 800]);
+assert.equal(normalizedRegion.translation, "第一句");
+const normalizedTupleRegion = api.normalizeImageRegion([50, 120, 250, 640]);
+assert.deepEqual([...normalizedTupleRegion.box_2d], [50, 120, 250, 640]);
+assert.equal(api.normalizeImageRegion({ box_2d: [300, 200, 100, 800], translation: "bad y" }), null);
+assert.equal(api.normalizeImageRegion({ box_2d: [100, 800, 300, 200], translation: "bad x" }), null);
+assert.equal(api.normalizeImageRegion({ box_2d: [-1, 0, 100, 100], translation: "neg" }), null);
+assert.equal(api.normalizeImageRegion({ box_2d: [0, 0, 1001, 100], translation: "over" }), null);
+
+const parsedImage = api.parseImageTranslation(
+  '```json\n{"has_text":true,"translation":"[[BABEL_REGION_1]] 歡迎光臨\\n[[BABEL_REGION_2]] 今日特餐","regions":[[100,150,240,850],[400,150,550,850]]}\n```',
+);
+assert.equal(parsedImage.hasText, true);
+assert.equal(parsedImage.regions.length, 2);
+assert.deepEqual([...parsedImage.regions[0].box_2d], [100, 150, 240, 850]);
+assert.equal(parsedImage.regions[0].translation, "歡迎光臨");
+assert.equal(parsedImage.translation, "[1] 歡迎光臨\n\n[2] 今日特餐");
+
+const synthesizedImage = api.parseImageTranslation(
+  '{"has_text":true,"translation":"","regions":[{"box_2d":[50,50,200,500],"translation":"自動編號一"},{"box_2d":[300,50,450,500],"translation":"自動編號二"}]}',
+);
+assert.equal(synthesizedImage.hasText, true);
+assert.equal(synthesizedImage.translation, "[1] 自動編號一\n\n[2] 自動編號二");
+
+const noTextImage = api.parseImageTranslation('{"has_text":false,"translation":"","regions":[]}');
+assert.equal(noTextImage.hasText, false);
+assert.equal(noTextImage.translation, "");
+assert.equal(noTextImage.regions.length, 0);
+
+assert.throws(() => api.parseImageTranslation(""), /The AI output was empty/);
+assert.throws(() => api.parseImageTranslation("not json"), /Response format mismatch/);
+
+// Image content box and SVG region layout
+context.getComputedStyle = (element) => ({
+  contentVisibility: element?.contentVisibility,
+  direction: element?.direction,
+  display: element?.display || "block",
+  objectFit: element?.objectFit || "fill",
+  objectPosition: element?.objectPosition || "50% 50%",
+  overflowX: element?.overflowX,
+  visibility: element?.visibility || "visible",
+});
+const containBox = api.imageContentBox(1000, 500, 400, 400, "contain");
+assert.deepEqual({ ...containBox }, { left: 0, top: 100, width: 400, height: 200 });
+const coverBox = api.imageContentBox(1000, 500, 300, 300, "cover");
+assert.deepEqual({ ...coverBox }, { left: -150, top: 0, width: 600, height: 300 });
+const croppedRegion = api.computeRegionBoxLayout(coverBox.width, coverBox.height, [
+  { box_2d: [200, 400, 400, 600] },
+])[0];
+assert.equal(coverBox.left + croppedRegion.x, 90);
+assert.equal(croppedRegion.boxWidth, 120);
+assert.equal(api.imageContentBox(1000, 500, 300, 300, "cover", "100% 0%").left, -300);
+assert.equal(api.imageContentBox(1000, 500, 400, 400, "contain", "0% calc(100% - 10px)").top, 190);
+assert.equal(api.imageContentBox(1000, 500, 400, 400, "contain", "top").top, 0);
+assert.deepEqual(
+  { ...api.imageContentBox(1000, 500, 300, 300, "none", "25% 50%") },
+  { left: -175, top: -100, width: 1000, height: 500 },
+);
+
+const layoutItems = api.computeRegionBoxLayout(400, 200, parsedImage.regions);
+assert.equal(layoutItems.length, 2);
+assert.equal(layoutItems[0].label, "1");
+assert.equal(layoutItems[0].x, 60);
+assert.equal(layoutItems[0].y, 20);
+assert.equal(layoutItems[0].boxWidth, 280);
+assert.equal(layoutItems[0].boxHeight, 28);
+
+const svgMarkupDefault = api.buildRegionBoxesMarkup(400, 200, parsedImage.regions);
+assert.match(svgMarkupDefault, /viewBox="0 0 400 200"/);
+assert.match(svgMarkupDefault, /data-region="1"/);
+assert.match(svgMarkupDefault, /#5865f2/);
+assert.doesNotMatch(svgMarkupDefault, /data-active="true"/);
+
+const svgMarkupActive = api.buildRegionBoxesMarkup(400, 200, parsedImage.regions, "2");
+assert.match(svgMarkupActive, /data-region="2" data-active="true"/);
+assert.match(svgMarkupActive, /#f59e0b/);
+
+// Image eligibility & anchor resolution
+const eligibleImg = {
+  complete: true,
+  currentSrc: "https://example.com/manga.jpg",
+  display: "block",
+  getBoundingClientRect: () => ({ left: 10, top: 20, width: 320, height: 240 }),
+  getClientRects: () => [{}],
+  isConnected: true,
+  naturalWidth: 800,
+  naturalHeight: 600,
+  tagName: "IMG",
+  visibility: "visible",
+  closest: () => null,
+};
+assert.equal(api.isTranslatableImage(eligibleImg), true);
+assert.equal(
+  api.isTranslatableImage({ ...eligibleImg, currentSrc: "data:image/svg+xml;base64,PHN2Zz4=" }),
+  false,
+);
+assert.equal(
+  api.isTranslatableImage({
+    ...eligibleImg,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 80, height: 80 }),
+  }),
+  false,
+);
+
+const singleImageLink = {
+  tagName: "A",
+  innerText: "",
+  parentElement: body,
+};
+const pictureWrapper = {
+  tagName: "PICTURE",
+  parentElement: singleImageLink,
+  closest: (sel) => (sel === "a" ? singleImageLink : null),
+};
+assert.equal(
+  api.imageAnchor({
+    ...eligibleImg,
+    closest: (sel) => (sel === "picture" ? pictureWrapper : null),
+  }),
+  singleImageLink,
+);
+
+// Image translation transport: Chat Completions and Gemini (native)
+const sampleImageData = {
+  mimeType: "image/jpeg",
+  dataBase64: "aGVsbG8=",
+  byteLength: 5,
+};
+for (const native of [false, true]) {
+  const imgReq = api.requestImageTranslation(sampleImageData, {
+    ...cacheSettings,
+    baseURL: native ? googleBaseURL : cacheSettings.baseURL,
+    model: "vision-model",
+    apiKey: "test",
+    apiFormat: native ? "gemini-native" : "chat-completions",
+  });
+  const sentBody = JSON.parse(requestOptions.data);
+  if (native) {
+    assert.equal(sentBody.generationConfig.responseMimeType, "application/json");
+    assert.equal(
+      sentBody.generationConfig.responseJsonSchema.properties.has_text.type,
+      "boolean",
+    );
+    assert.equal(sentBody.contents[0].parts[1].inlineData.mimeType, "image/jpeg");
+    assert.equal(sentBody.contents[0].parts[1].inlineData.data, "aGVsbG8=");
+  } else {
+    assert.equal(sentBody.response_format.type, "json_schema");
+    assert.equal(
+      sentBody.response_format.json_schema.name,
+      "babel_lens_translation",
+    );
+    assert.equal(
+      sentBody.messages[1].content[1].image_url.url,
+      "data:image/jpeg;base64,aGVsbG8=",
+    );
+  }
+  const modelJson = JSON.stringify({
+    has_text: true,
+    translation: "[[BABEL_REGION_1]] 圖片翻譯測試",
+    regions: [[100, 100, 300, 900]],
+  });
+  requestOptions.onload({
+    status: 200,
+    responseText: JSON.stringify(
+      native
+        ? { candidates: [{ finishReason: "STOP", content: { parts: [{ text: modelJson }] } }] }
+        : { choices: [{ finish_reason: "stop", message: { content: modelJson } }] },
+    ),
+  });
+  const res = await imgReq.promise;
+  assert.equal(res.hasText, true);
+  assert.equal(res.regions.length, 1);
+  assert.equal(res.regions[0].translation, "圖片翻譯測試");
+}
+
+// Gemini can reject an image schema with only a generic INVALID_ARGUMENT error.
+const visionSettings = {
+  ...cacheSettings,
+  apiFormat: "gemini-native",
+  baseURL: customGatewayBaseURL,
+  model: "gemini-3.5-flash-lite",
+  apiKey: "test",
+};
+const nativeImageResponse = JSON.stringify({ candidates: [{
+  finishReason: "STOP",
+  content: { parts: [{ text: JSON.stringify({
+    has_text: true,
+    translation: "[[BABEL_REGION_1]] 圖片翻譯",
+    regions: [[100, 100, 300, 900]],
+  }) }] },
+}] });
+const imageFallback = api.requestImageTranslation(sampleImageData, visionSettings);
+const schemaBody = JSON.parse(requestOptions.data);
+const fallbackCount = requestHistory.length;
+requestOptions.onload({ status: 400, responseText: JSON.stringify({ error: {
+  code: 400, status: "INVALID_ARGUMENT", message: "Request contains an invalid argument.",
+} }) });
+const jsonBody = JSON.parse(requestOptions.data);
+assert.equal(requestHistory.length, fallbackCount + 1);
+assert.equal(jsonBody.generationConfig.responseJsonSchema, undefined);
+assert.equal(jsonBody.generationConfig.responseMimeType, "application/json");
+delete schemaBody.generationConfig.responseJsonSchema;
+assert.deepEqual(jsonBody, schemaBody);
+requestOptions.onload({ status: 200, responseText: nativeImageResponse });
+assert.equal((await imageFallback.promise).regions[0].translation, "圖片翻譯");
+
+const cachedImageFallback = api.requestImageTranslation(sampleImageData, visionSettings);
+assert.equal(JSON.parse(requestOptions.data).generationConfig.responseJsonSchema, undefined);
+cachedImageFallback.abort();
+await assert.rejects(cachedImageFallback.promise, { name: "AbortError" });
+
+// An image fallback must not disable text schemas or retry unrelated text 400s.
+const textAfterImageFallback = api.requestTranslations(["hello"], visionSettings);
+assert.ok(JSON.parse(requestOptions.data).generationConfig.responseJsonSchema);
+const text400Count = requestHistory.length;
+requestOptions.onload({ status: 400, responseText: JSON.stringify({ error: {
+  status: "INVALID_ARGUMENT", message: "Request contains an invalid argument.",
+} }) });
+await assert.rejects(textAfterImageFallback.promise, /HTTP 400/);
+assert.equal(requestHistory.length, text400Count);
+
+// A failed JSON retry stops after one attempt and does not poison schema support.
+const failedVisionSettings = { ...visionSettings, model: "failed-image-model" };
+const failedImageFallback = api.requestImageTranslation(sampleImageData, failedVisionSettings);
+const failedFallbackCount = requestHistory.length;
+for (let attempt = 0; attempt < 2; attempt += 1) {
+  requestOptions.onload({ status: 400, responseText: JSON.stringify({ error: {
+    message: "Request contains an invalid argument.",
+  } }) });
+}
+await assert.rejects(failedImageFallback.promise, (error) => {
+  assert.match(error.message, /HTTP 400/);
+  assert.match(error.message, /Output schema: disabled/);
+  assert.match(error.message, /Image MIME type: image\/jpeg/);
+  return true;
+});
+assert.equal(requestHistory.length, failedFallbackCount + 1);
+const schemaAfterFailure = api.requestImageTranslation(sampleImageData, failedVisionSettings);
+assert.ok(JSON.parse(requestOptions.data).generationConfig.responseJsonSchema);
+schemaAfterFailure.abort();
+await assert.rejects(schemaAfterFailure.promise, { name: "AbortError" });
+
+// DOM overlay, numbered badges, bidirectional region highlighting, and cleanup
+function createMockDomElement(tagName) {
+  const attrs = new Map();
+  const classes = new Set();
+  const listeners = new Map();
+  return {
+    tagName: String(tagName || "DIV").toUpperCase(),
+    children: [],
+    dataset: {},
+    hidden: false,
+    isConnected: true,
+    nextElementSibling: null,
+    parentElement: null,
+    style: {
+      props: new Map(),
+      setProperty(k, v) { this.props.set(k, v); },
+      removeProperty(k) { this.props.delete(k); },
+    },
+    textContent: "",
+    classList: {
+      add(c) { classes.add(c); },
+      contains(c) { return classes.has(c); },
+    },
+    set className(val) {
+      classes.clear();
+      String(val || "").split(/\s+/).filter(Boolean).forEach((c) => classes.add(c));
+    },
+    get className() {
+      return [...classes].join(" ");
+    },
+    setAttribute(k, v) {
+      attrs.set(k, String(v));
+      if (k === "class") this.className = v;
+      if (k.startsWith("data-")) {
+        const prop = k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+        this.dataset[prop] = String(v);
+      }
+    },
+    getAttribute(k) {
+      return attrs.has(k) ? attrs.get(k) : null;
+    },
+    removeAttribute(k) {
+      attrs.delete(k);
+      if (k.startsWith("data-")) {
+        const prop = k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+        delete this.dataset[prop];
+      }
+    },
+    append(...nodes) {
+      for (const n of nodes) {
+        if (n && typeof n === "object") {
+          n.parentElement = this;
+          this.children.push(n);
+        }
+      }
+    },
+    prepend(...nodes) {
+      for (const n of nodes.reverse()) {
+        if (n && typeof n === "object") {
+          n.parentElement = this;
+          this.children.unshift(n);
+        }
+      }
+    },
+    replaceChildren(...nodes) {
+      this.children = [];
+      this.append(...nodes);
+    },
+    remove() {
+      this.isConnected = false;
+      if (this.previousElementSibling) this.previousElementSibling.nextElementSibling = this.nextElementSibling;
+      if (this.nextElementSibling) this.nextElementSibling.previousElementSibling = this.previousElementSibling;
+      if (this.parentElement?.children) {
+        const idx = this.parentElement.children.indexOf(this);
+        if (idx !== -1) this.parentElement.children.splice(idx, 1);
+      }
+      this.parentElement = null;
+      this.previousElementSibling = null;
+      this.nextElementSibling = null;
+    },
+    addEventListener(type, fn) {
+      listeners.set(type, fn);
+    },
+    dispatchClick() {
+      listeners.get("click")?.({
+        preventDefault() {},
+        stopPropagation() {},
+      });
+    },
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null;
+    },
+    querySelectorAll(selector) {
+      const results = [];
+      const matchNode = (node) => {
+        if (selector.startsWith(".")) {
+          return node.classList?.contains?.(selector.slice(1));
+        }
+        return node.tagName?.toLowerCase() === selector.toLowerCase();
+      };
+      const walk = (node) => {
+        for (const child of node.children || []) {
+          if (matchNode(child)) results.push(child);
+          walk(child);
+        }
+      };
+      walk(this);
+      return results;
+    },
+    getBoundingClientRect: () => ({ left: 10, top: 20, width: 320, height: 240 }),
+  };
+}
+
+document.createElement = (tag) => createMockDomElement(tag);
+document.createElementNS = (_ns, tag) => createMockDomElement(tag);
+document.createTextNode = (text) => ({ nodeValue: text, textContent: text });
+document.createDocumentFragment = () => createMockDomElement("fragment");
+
+const mockContainer = createMockDomElement("div");
+const mockImg = Object.assign(createMockDomElement("img"), {
+  complete: true,
+  currentSrc: "https://example.com/panel.png",
+  display: "block",
+  visibility: "visible",
+  naturalWidth: 640,
+  naturalHeight: 480,
+  getClientRects: () => [{}],
+  closest: () => null,
+  insertAdjacentElement(position, element) {
+    element.parentElement = mockContainer;
+    element.isConnected = true;
+    const index = mockContainer.children.indexOf(this);
+    if (position === "beforebegin") {
+      element.previousElementSibling = this.previousElementSibling;
+      if (this.previousElementSibling) this.previousElementSibling.nextElementSibling = element;
+      this.previousElementSibling = element;
+      element.nextElementSibling = this;
+      mockContainer.children.splice(index, 0, element);
+    } else if (position === "afterend") {
+      element.nextElementSibling = this.nextElementSibling;
+      if (this.nextElementSibling) this.nextElementSibling.previousElementSibling = element;
+      element.previousElementSibling = this;
+      this.nextElementSibling = element;
+      mockContainer.children.splice(index + 1, 0, element);
+    }
+  },
+});
+mockContainer.append(mockImg);
+
+const overlayState = api.ensureImageOverlay(mockImg);
+assert.ok(overlayState);
+assert.equal(overlayState.button.dataset.state, "idle");
+
+const insertedBlock = api.insertImageTranslation(mockImg, parsedImage);
+assert.ok(insertedBlock);
+assert.equal(overlayState.button.dataset.state, "done");
+assert.equal(api.translationAfter(mockImg), insertedBlock);
+
+const regionGroups = overlayState.overlay.querySelectorAll(".touch-translate__image-region");
+const translationItems = insertedBlock.querySelectorAll(".touch-translate__image-item");
+assert.equal(regionGroups.length, 2);
+assert.equal(translationItems.length, 2);
+
+// Click region 1 -> highlights both region 1 box and item 1 row
+regionGroups[0].dispatchClick();
+assert.equal(regionGroups[0].getAttribute("data-active"), "true");
+assert.equal(translationItems[0].getAttribute("data-active"), "true");
+assert.equal(regionGroups[1].getAttribute("data-active"), null);
+
+// Click item 1 row again -> toggles highlight off
+translationItems[0].dispatchClick();
+assert.equal(regionGroups[0].getAttribute("data-active"), null);
+assert.equal(translationItems[0].getAttribute("data-active"), null);
+
+// Removing the translation block also clears the SVG region boxes and resets button to idle
+api.removeTranslation(insertedBlock);
+assert.equal(overlayState.button.dataset.state, "idle");
+assert.equal(overlayState.overlay.querySelectorAll(".touch-translate__image-region").length, 0);
+
+// Source changes clear completed results even when a gallery reuses the same img.
+const oldImageBlock = api.insertImageTranslation(mockImg, parsedImage);
+mockImg.currentSrc = "https://example.com/replacement.png";
+api.syncImageOverlay(mockImg);
+assert.equal(oldImageBlock.isConnected, false);
+assert.equal(api.translationAfter(mockImg), null);
+assert.equal(overlayState.button.dataset.state, "idle");
+assert.equal(overlayState.regions.length, 0);
+const disconnectedBlock = api.insertImageTranslation(mockImg, parsedImage);
+mockImg.isConnected = false;
+api.syncImageOverlay(mockImg);
+assert.equal(disconnectedBlock.isConnected, false);
+mockImg.isConnected = true;
+api.ensureImageOverlay(mockImg);
+
+// Repeated scans of a hidden image must not write the same hidden attribute again.
+let overlayHidden = overlayState.overlay.hidden;
+let hiddenWrites = 0;
+Object.defineProperty(overlayState.overlay, "hidden", {
+  get: () => overlayHidden,
+  set(value) { overlayHidden = value; hiddenWrites += 1; },
+});
+mockImg.display = "none";
+api.syncImageOverlay(mockImg);
+api.syncImageOverlay(mockImg);
+assert.equal(hiddenWrites, 1);
+mockImg.display = "block";
+api.syncImageOverlay(mockImg);
+assert.equal(overlayHidden, false);
+
+// Ignore an old response even if it arrives before the source-change observer runs.
+context.GM_getValue = (key, fallback) => key === "settings-v1"
+  ? { ...cacheSettings, apiKey: "test" }
+  : fallback;
+context.GM_setValue = () => {};
+for (const observeBeforeReply of [false, true]) {
+  mockImg.currentSrc = "data:image/png;base64,iVBORw0KGgo=";
+  api.syncImageOverlay(mockImg);
+  requestAborted = false;
+  const pendingImage = api.translateImage(mockImg);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const oldRequest = requestOptions;
+  assert.equal(oldRequest.method, "POST");
+  mockImg.currentSrc = "data:image/png;base64,aGVsbG8=";
+  if (observeBeforeReply) {
+    api.syncImageOverlay(mockImg);
+    assert.equal(requestAborted, true);
+  } else {
+    oldRequest.onload({ status: 200, responseText: JSON.stringify({ choices: [{
+      finish_reason: "stop",
+      message: { content: JSON.stringify({
+        has_text: true,
+        translation: "[[BABEL_REGION_1]] 舊圖片的譯文",
+        regions: [[100, 100, 300, 900]],
+      }) },
+    }] }) });
+  }
+  assert.equal(await pendingImage, null);
+  assert.equal(api.translationAfter(mockImg), null);
+  assert.equal(overlayState.button.dataset.state, "idle");
+  assert.equal(mockImg.getAttribute("aria-busy"), null);
+}
+
+// extractNormalizedImage: data URL and GM_xmlhttpRequest binary ArrayBuffer
+context.btoa = (bin) => Buffer.from(bin, "binary").toString("base64");
+const dataUrlExtracted = await api.extractNormalizedImage({
+  currentSrc: "data:image/png;base64,iVBORw0KGgo=",
+});
+assert.equal(dataUrlExtracted.mimeType, "image/png");
+assert.equal(dataUrlExtracted.base64, "iVBORw0KGgo=");
+
+const binaryPromise = api.extractNormalizedImage({
+  currentSrc: "https://cdn.example.com/comic.bin",
+});
+requestOptions.onload({
+  status: 200,
+  response: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).buffer,
+});
+const binaryExtracted = await binaryPromise;
+assert.equal(binaryExtracted.mimeType, "image/png");
+assert.equal(binaryExtracted.base64, "iVBORw0KGgo=");
+
+// Resizing must preserve PNG transparency instead of flattening it to black JPEG.
+const createElementBeforeCanvas = document.createElement;
+let encodedImageType;
+document.createElement = (tag) => tag === "canvas" ? {
+  getContext: () => ({ drawImage() {} }),
+  toDataURL(type) {
+    encodedImageType = type;
+    return `data:${type};base64,iVBORw0KGgo=`;
+  },
+} : createElementBeforeCanvas(tag);
+const resizedImage = await api.extractNormalizedImage({
+  currentSrc: "data:image/png;base64,iVBORw0KGgo=",
+  complete: true,
+  naturalWidth: 2000,
+  naturalHeight: 500,
+});
+assert.equal(encodedImageType, "image/png");
+assert.equal(resizedImage.width, 1600);
+assert.equal(resizedImage.height, 400);
+document.createElement = createElementBeforeCanvas;
+
 console.log("Touch Translate self-check passed");
