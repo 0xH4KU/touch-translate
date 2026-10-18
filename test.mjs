@@ -1231,13 +1231,49 @@ assert.equal(mergedDense.regions[1].translation, "第二段第一行\n第二段�
 assert.equal(mergedDense.regions[2].translation, "底部獨立標題");
 
 const synthesizedImage = imageApi.parseImageTranslation(
-  '{"has_text":true,"translation":"","regions":[{"box_2d":[50,50,200,500],"translation":"自動編號一"},{"box_2d":[300,50,450,500],"translation":"自動編號二"}]}',
+  '{"has_text":true,"regions":[{"box_2d":[50.4,49.8,200.2,500],"translation":"自動編號一"},{"box_2d":[300,50,450,500],"translation":"自動編號二"}]}',
 );
 assert.equal(synthesizedImage.hasText, true);
+assert.deepEqual([...synthesizedImage.regions[0].box_2d], [50, 50, 200, 500]);
 assert.equal(synthesizedImage.translation, "[1] 自動編號一\n\n[2] 自動編號二");
 
+const invalidBoxImage = {
+  has_text: true,
+  regions: [
+    { box_2d: [100, 100, 200, 400], translation: "第一區譯文" },
+    { box_2d: [300, 100, 300, 400], translation: "第二區譯文" },
+  ],
+};
+for (const box of [[300, 100, 300, 400], [-1, 100, 200, 400], [300, 100, 400]]) {
+  const textOnlyImage = imageApi.parseImageTranslation(JSON.stringify({
+    ...invalidBoxImage,
+    regions: [invalidBoxImage.regions[0], { ...invalidBoxImage.regions[1], box_2d: box }],
+  }));
+  assert.equal(textOnlyImage.hasText, true);
+  assert.equal(textOnlyImage.regions.length, 0);
+  assert.equal(textOnlyImage.translation, "[1] 第一區譯文\n\n[2] 第二區譯文");
+}
+assert.throws(
+  () => imageApi.parseImageTranslation('{"has_text":true,"regions":[{"box_2d":[100,100,100,400],"translation":""}]}'),
+  /Response format mismatch/,
+);
+
+// Separate blocks with different widths or larger gaps stay distinct even when > 5 regions
+const separateBlocksJson = JSON.stringify({
+  has_text: true,
+  regions: [
+    { box_2d: [50, 100, 90, 320], translation: "短標題" },
+    { box_2d: [105, 100, 150, 820], translation: "下方較寬的內文區塊" },
+    { box_2d: [190, 100, 240, 820], translation: "間距較大的下一個獨立對話框" },
+    { box_2d: [300, 100, 350, 500], translation: "區塊四" },
+    { box_2d: [420, 100, 470, 500], translation: "區塊五" },
+    { box_2d: [540, 100, 590, 500], translation: "區塊六" },
+  ],
+});
+assert.equal(imageApi.parseImageTranslation(separateBlocksJson).regions.length, 6);
+
 const noTextImage = imageApi.parseImageTranslation(
-  '{"has_text":false,"translation":"","regions":[]}',
+  '{"has_text":false,"regions":[]}',
 );
 assert.equal(noTextImage.hasText, false);
 assert.equal(noTextImage.translation, "");
@@ -1245,6 +1281,34 @@ assert.equal(noTextImage.regions.length, 0);
 
 assert.throws(() => imageApi.parseImageTranslation(""), /The AI output was empty/);
 assert.throws(() => imageApi.parseImageTranslation("not json"), /Response format mismatch/);
+
+// Two long lines, a one-letter final line, and punctuation must all stay inside the box.
+const shortLineWidth = 240;
+const shortLineHeight = 140;
+const shortLinePixels = new Uint8ClampedArray(shortLineWidth * shortLineHeight * 4).fill(255);
+const shortLineBox = [107, 104, 786, 855];
+const setShortLinePixel = (x, y) => {
+  const idx = (y * shortLineWidth + x) * 4;
+  shortLinePixels[idx] = shortLinePixels[idx + 1] = shortLinePixels[idx + 2] = 0;
+};
+const shortLineGlyph = ["10001", "10001", "10001", "11111", "10001", "10001", "10001"];
+for (const [top, count] of [[20, 12], [50, 12], [90, 1]]) {
+  for (let i = 0; i < count; i += 1) {
+    shortLineGlyph.forEach((row, y) => {
+      [...row].forEach((bit, x) => {
+        if (bit !== "1") return;
+        for (let dy = 0; dy < 2; dy += 1) {
+          for (let dx = 0; dx < 2; dx += 1) {
+            setShortLinePixel(30 + i * 14 + x * 2 + dx, top + y * 2 + dy);
+          }
+        }
+      });
+    });
+  }
+}
+for (let y = 102; y <= 103; y += 1) {
+  for (let x = 200; x <= 201; x += 1) setShortLinePixel(x, y);
+}
 
 // Image content box and Spotlight SVG region layout
 context.getComputedStyle = (element) => ({
@@ -1283,6 +1347,11 @@ assert.equal(layoutItems[0].x, 60);
 assert.equal(layoutItems[0].y, 20);
 assert.equal(layoutItems[0].boxWidth, 280);
 assert.equal(layoutItems[0].boxHeight, 28);
+const subpixelItem = imageApi.computeRegionBoxLayout(333, 250, [
+  { box_2d: [125, 123, 375, 456] },
+])[0];
+assert.equal(subpixelItem.x, 40.96);
+assert.equal(subpixelItem.y, 31.25);
 
 // Spotlight Mode SVG markup: unselected boxes have stroke-opacity="0", active box has stroke-opacity="0.95"
 const svgMarkupDefault = imageApi.buildRegionBoxesMarkup(400, 200, parsedImage.regions);
@@ -1351,19 +1420,29 @@ const sampleImageData = {
   byteLength: 5,
 };
 for (const native of [false, true]) {
-  const imgReq = imageApi.requestImageTranslation(sampleImageData, {
+  const imageSettings = {
     ...cacheSettings,
     baseURL: native ? googleBaseURL : cacheSettings.baseURL,
     model: "vision-model",
     apiKey: "test",
     apiFormat: native ? "gemini-native" : "chat-completions",
-  });
+  };
+  const imgReq = imageApi.requestImageTranslation({
+    ...sampleImageData,
+    width: shortLineWidth,
+    height: shortLineHeight,
+    pixels: shortLinePixels,
+  }, imageSettings);
   const sentBody = JSON.parse(requestOptions.data);
   if (native) {
     assert.equal(sentBody.generationConfig.responseMimeType, "application/json");
     assert.equal(
       sentBody.generationConfig.responseJsonSchema.properties.has_text.type,
       "boolean",
+    );
+    assert.deepEqual(
+      sentBody.generationConfig.responseJsonSchema.properties.regions.items.required,
+      ["box_2d", "translation"],
     );
     assert.equal(sentBody.contents[0].parts[1].inlineData.mimeType, "image/jpeg");
     assert.equal(sentBody.contents[0].parts[1].inlineData.data, "aGVsbG8=");
@@ -1373,6 +1452,10 @@ for (const native of [false, true]) {
       sentBody.response_format.json_schema.name,
       "babel_lens_translation",
     );
+    assert.deepEqual(
+      sentBody.response_format.json_schema.schema.properties.regions.items.required,
+      ["box_2d", "translation"],
+    );
     assert.equal(
       sentBody.messages[1].content[1].image_url.url,
       "data:image/jpeg;base64,aGVsbG8=",
@@ -1380,8 +1463,7 @@ for (const native of [false, true]) {
   }
   const modelJson = JSON.stringify({
     has_text: true,
-    translation: "[[BABEL_REGION_1]] 圖片翻譯測試",
-    regions: [[100, 100, 300, 900]],
+    regions: [{ box_2d: shortLineBox, translation: "圖片翻譯測試" }],
   });
   requestOptions.onload({
     status: 200,
@@ -1395,6 +1477,23 @@ for (const native of [false, true]) {
   assert.equal(res.hasText, true);
   assert.equal(res.regions.length, 1);
   assert.equal(res.regions[0].translation, "圖片翻譯測試");
+  assert.deepEqual([...res.regions[0].box_2d], shortLineBox);
+
+  const textOnlyRequest = imageApi.requestImageTranslation(sampleImageData, imageSettings);
+  const textOnlyRequestCount = requestHistory.length;
+  const textOnlyJson = JSON.stringify(invalidBoxImage);
+  requestOptions.onload({
+    status: 200,
+    responseText: JSON.stringify(
+      native
+        ? { candidates: [{ finishReason: "STOP", content: { parts: [{ text: textOnlyJson }] } }] }
+        : { choices: [{ finish_reason: "stop", message: { content: textOnlyJson } }] },
+    ),
+  });
+  assert.equal(requestHistory.length, textOnlyRequestCount);
+  const textOnlyResult = await textOnlyRequest.promise;
+  assert.equal(textOnlyResult.regions.length, 0);
+  assert.equal(textOnlyResult.translation, "[1] 第一區譯文\n\n[2] 第二區譯文");
 }
 
 // Gemini can reject an image schema with only a generic INVALID_ARGUMENT error.
