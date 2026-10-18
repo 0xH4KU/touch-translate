@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Image Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.3
+// @version      0.1.4
 // @description  Swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
 // @author       HAKU
 // @match        *://*/*
