@@ -3,7 +3,7 @@
 A private, touch-first bilingual translation userscript suite for iOS Safari and Tampermonkey:
 
 - **[Touch Translate (`touch-translate.user.js`)](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-translate.user.js)** — Pure text translation via right-swipe on paragraphs and four-finger tap for full-page translation. Keeps the source DOM intact and inserts each translation as a clearly separated block below the original.
-- **[Touch Image Translate (`touch-image-translate.user.js`)](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-image-translate.user.js)** — Standalone Babel Lens image translation userscript with a top-right translate button on images, dense macro-block merging, Spotlight Mode, and a full-screen zoomable lightbox viewer.
+- **[Touch Image Translate (`touch-image-translate.user.js`)](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-image-translate.user.js)** — Standalone Babel Lens image translation userscript triggered by swiping right on an image, featuring dense macro-block merging, Spotlight Mode, and a full-screen zoomable lightbox viewer.
 
 ## Text Translation (`touch-translate.user.js`)
 
@@ -21,10 +21,12 @@ YouTube comment text is recognized on both desktop and mobile pages, including m
 
 ## Image Translation (`touch-image-translate.user.js`)
 
-- Tap the translate button in the top-right corner of a content image (`>= 120×90px`) to translate visible text in the image without cluttering the webpage layout or drawing boxes over small in-page thumbnails.
+- **Right-Swipe on an Image**: Swipe right on any content image (`>= 120×90px`) to translate visible text in the image. Idle images have **zero floating buttons**, keeping your view completely unobstructed while browsing. Transparent links within the same image card work even when the image itself cannot receive touches; opaque notices and text overlays are ignored.
 - **Macro-Block Merging**: Dense text (paragraphs, consecutive list items, speech bubbles, UI panels, or multi-line sections) is grouped into coarse logical regions with internal line breaks (`\n`) rather than boxing individual lines.
-- **Full-Screen Zoomable Viewer**: When translation completes, a dedicated full-screen viewer opens automatically. Pinch to zoom (`1x`–`5x`), drag to pan, double-tap to zoom (`1x` ↔ `2.4x`), or use the mouse wheel. Closing the viewer returns immediately to your exact reading position on the page; tapping the image's `done` button re-opens the viewer from cache without re-requesting the API.
+- **Full-Screen Zoomable Viewer**: When translation completes, a dedicated full-screen viewer opens automatically. Pinch to zoom (`1x`–`5x`), drag to pan, or double-tap to zoom (`1x` ↔ `2.4x`). Closing the viewer returns immediately to your exact reading position on the page; swiping right on the image again (or tapping its `done` badge) re-opens the viewer from cache without re-requesting the API.
 - **Spotlight Mode & Floating Sheet**: Unselected regions show only compact numbered badges (`1`, `2`, ...) with no bounding box clutter. Only the active region illuminates its full amber bounding box (`#f59e0b`) and displays its translation in the bottom floating card, with `Prev` / `Next` navigation, an `All (N)` expandable list of all regions, and a `Hide pins` toggle to inspect the raw image.
+
+Region pins keep a readable size and a 44px touch area while zooming, and follow the displayed image when the screen rotates.
 
 ## Installation
 
@@ -58,8 +60,9 @@ The selected API format is saved and included in settings exports. Older setting
 
 ## Privacy
 
-- API request bodies contain only extracted visible plain text (or the normalized image when you explicitly tap an image's translate button), the selected model, and the translation instruction. The page HTML, URL, and title are not included. The API provider may still receive normal network metadata such as your IP address.
-- API requests use Tampermonkey's `anonymous` mode in `touch-translate.user.js`.
+- API request bodies contain only extracted visible plain text (or the normalized image when you explicitly swipe right on an image), the selected model, and the translation instruction. The page HTML, URL, and title are not included. The API provider may still receive normal network metadata such as your IP address.
+- API requests use Tampermonkey's `anonymous` mode.
+- Provider error diagnostics omit URL credentials, query strings, and fragments, and redact the configured API key before displaying or logging them.
 - The scripts include no analytics, tracking, or unrelated external requests.
 - The API key is entered in a masked field and stored in Tampermonkey storage, not in the userscript source. Use the clear API settings menu command to delete it and the other API settings.
 - The cache stores only 64-bit hashes of the settings and source text or image URL plus the translation and a timestamp. It never stores the source text.

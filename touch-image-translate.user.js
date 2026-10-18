@@ -1,16 +1,19 @@
 // ==UserScript==
 // @name         Touch Image Translate
-// @namespace    https://github.com/haku/touch-translate
-// @version      0.1.0
-// @description  Translate images with a Babel Lens full-screen zoomable spotlight viewer
+// @namespace    https://github.com/0xh4ku/touch-translate
+// @version      0.1.3
+// @description  Swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
+// @author       HAKU
 // @match        *://*/*
+// @run-at       document-idle
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
+// @grant        GM_info
 // @connect      *
-// @run-at       document-end
 // ==/UserScript==
 
 (() => {
@@ -21,6 +24,13 @@
   const CACHE_LIMIT = 150;
   const REQUEST_TIMEOUT_MS = 60000;
   const MAX_RETRIES = 2;
+
+  const SWIPE_MIN_X = 60;
+  const SWIPE_FLICK_MIN_X = 24;
+  const SWIPE_INTENT_PX = 16;
+  const SWIPE_SCROLL_PX = 24;
+  const SWIPE_PROJECTION_MS = 90;
+  const SAFARI_EDGE_X = 12;
 
   const IMAGE_MIN_WIDTH = 120;
   const IMAGE_MIN_HEIGHT = 90;
@@ -51,14 +61,14 @@
   const SETTINGS_DIALOG_CLASS = "touch-image-translate__settings";
   const TOAST_CLASS = "touch-image-translate__toast";
 
-  const DEFAULT_SETTINGS = Object.freeze({
+  const DEFAULT_SETTINGS = {
     apiFormat: "chat-completions",
     baseURL: "https://api.openai.com/v1",
-    model: "gpt-4.1-mini",
+    model: "",
     apiKey: "",
-    targetLanguage: "Traditional Chinese",
+    targetLanguage: globalThis.navigator?.language || "English",
     temperature: 0.2,
-  });
+  };
 
   const imageStates = new WeakMap();
   const trackedImages = new Set();
@@ -73,100 +83,84 @@
 
   function isPrivateOrLocalHost(hostname) {
     const host = String(hostname || "")
-      .toLowerCase()
-      .replace(/^\[|\]$/g, "");
+      .replace(/^\[|\]$/g, "")
+      .toLowerCase();
     if (
       host === "localhost" ||
       host.endsWith(".localhost") ||
-      host === "0.0.0.0" ||
-      host === "127.0.0.1" ||
-      host.startsWith("127.") ||
-      host === "::1"
+      host.endsWith(".local") ||
+      host.endsWith(".internal") ||
+      host.endsWith(".lan") ||
+      host.endsWith(".home.arpa")
     ) {
       return true;
     }
-    if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-    if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-    const match172 = /^172\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
-    if (match172) {
-      const second = Number(match172[1]);
-      if (second >= 16 && second <= 31) return true;
+    const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (ipv4) {
+      const [, a, b] = ipv4.map(Number);
+      if (a === 0 || a === 127) return true;
+      if (a === 10) return true;
+      if (a === 172 && b >= 16 && b <= 31) return true;
+      if (a === 192 && b === 168) return true;
+      if (a === 169 && b === 254) return true;
+      return false;
     }
-    if (host.endsWith(".local")) return true;
-    if (/^(?:fc|fd)[0-9a-f]{2}:/i.test(host)) return true;
-    if (/^fe80:/i.test(host)) return true;
+    if (
+      host === "::1" ||
+      host === "0:0:0:0:0:0:0:1" ||
+      /^fe[89ab][0-9a-f]:/i.test(host) ||
+      /^f[cd][0-9a-f]{2}:/i.test(host)
+    ) {
+      return true;
+    }
     return false;
   }
 
-  function encodeGeminiModelPath(model) {
-    const raw = String(model || "").trim();
-    if (
-      !raw ||
-      raw.startsWith("/") ||
-      raw.endsWith("/") ||
-      raw.includes("//") ||
-      /[?#\\]/.test(raw)
-    ) {
-      throw new Error("Invalid Gemini model name.");
-    }
-    const segments = raw.split("/");
-    if (segments.some((segment) => segment === "." || segment === "..")) {
-      throw new Error("Invalid Gemini model name.");
-    }
-    if (segments.length === 1) {
-      return `models/${encodeURIComponent(segments[0])}`;
-    }
-    if (segments.length === 2 && segments[0] === "models" && segments[1]) {
-      return `models/${encodeURIComponent(segments[1])}`;
-    }
-    throw new Error(
-      'Gemini model must be "<model>" or "models/<model>".',
-    );
-  }
-
-  function endpointFor(
-    baseURL,
-    model = "",
-    apiFormat = DEFAULT_SETTINGS.apiFormat,
-  ) {
-    const normalized = String(baseURL || "")
-      .trim()
-      .replace(/\/+$/, "");
+  function endpointFor(baseURL, model = "", apiFormat = "chat-completions") {
+    const url = new URL(baseURL);
+    let path = url.pathname.replace(/\/+$/, "");
     if (apiFormat === "gemini-native") {
-      if (/:(?:generateContent|streamGenerateContent)$/i.test(normalized)) {
+      if (
+        /\/(?:openai|compat|chat\/completions)$/.test(path) ||
+        /^(?:\/v1\/[^/]+\/[^/]+)?\/compat(?:\/|$)/.test(path)
+      ) {
         throw new Error(
-          "For Gemini (native), enter the API root or /v1beta Base URL without :generateContent.",
+          "Gemini (native) needs a native Base URL, such as https://generativelanguage.googleapis.com/v1beta or your gateway's /google-ai-studio route. Do not put /google-ai-studio after /compat.",
         );
       }
-      if (/\/chat\/completions$/i.test(normalized)) {
-        throw new Error(
-          "Base URL ends with /chat/completions, which is not a Gemini (native) endpoint.",
-        );
+      const modelID = String(model || "")
+        .trim()
+        .replace(/^(?:google(?:-ai-studio)?\/)?(?:models\/)?/i, "");
+      if (
+        !modelID ||
+        modelID.includes("/") ||
+        modelID === "." ||
+        modelID === ".." ||
+        /[?#\\]/.test(modelID)
+      ) {
+        throw new Error("Invalid Gemini model name.");
       }
-      const modelPath = encodeGeminiModelPath(model);
-      if (/\/models$/i.test(normalized)) {
-        return `${normalized}/${modelPath.replace(/^models\//, "")}:generateContent`;
+      path = path.replace(/\/models\/[^/]+:(?:generateContent|streamGenerateContent)$/i, "");
+      if (/\/models$/i.test(path)) {
+        path += `/${encodeURIComponent(modelID)}:generateContent`;
+      } else {
+        if (!/\/v1(?:beta\d*)?$/i.test(path)) path += "/v1beta";
+        path += `/models/${encodeURIComponent(modelID)}:generateContent`;
       }
-      if (/\/v1(?:beta\d*)?$/i.test(normalized)) {
-        return `${normalized}/${modelPath}:generateContent`;
+    } else {
+      if (/:(?:generateContent|streamGenerateContent)$/i.test(path)) {
+        throw new Error("Select Gemini (native) for a generateContent endpoint.");
       }
-      return `${normalized}/v1beta/${modelPath}:generateContent`;
+      if (!path) path = "/v1";
+      if (!path.endsWith("/chat/completions")) path += "/chat/completions";
     }
-    if (/:(?:generateContent|streamGenerateContent)$/i.test(normalized)) {
-      throw new Error(
-        "Base URL points to a Gemini :generateContent endpoint; switch API format to Gemini (native).",
-      );
-    }
-    return normalized.endsWith("/chat/completions")
-      ? normalized
-      : `${normalized}/chat/completions`;
+    url.pathname = path;
+    url.hash = "";
+    return url.href;
   }
 
   function temperatureFor(settings) {
-    const value = Number(settings?.temperature);
-    return Number.isFinite(value) && value >= 0 && value <= 2
-      ? Math.round(value * 100) / 100
-      : DEFAULT_SETTINGS.temperature;
+    return typeof settings?.temperature === "number" ? settings.temperature : 0.2;
   }
 
   function retryDelayFor(attempt, headers = "") {
@@ -201,6 +195,7 @@
     }
 
     const value = {
+      // Older settings without a format default to Chat Completions.
       apiFormat: input.apiFormat ?? DEFAULT_SETTINGS.apiFormat,
       baseURL:
         typeof input.baseURL === "string"
@@ -624,11 +619,7 @@
       2,
       4,
     );
-    const labelHeight = clampNumber(
-      Math.round(Math.min(width, height) / 22),
-      18,
-      26,
-    );
+    const labelHeight = 28;
     return regions.map((region, index) => {
       const label = String(index + 1);
       const [ymin, xmin, ymax, xmax] = region.box_2d;
@@ -725,11 +716,86 @@
     return error;
   }
 
+  function parseImportedSettings(payload, current = DEFAULT_SETTINGS) {
+    const rawSettings =
+      payload?.version === 1 &&
+      payload.settings &&
+      typeof payload.settings === "object" &&
+      !Array.isArray(payload.settings)
+        ? payload.settings
+        : payload &&
+            typeof payload === "object" &&
+            !Array.isArray(payload) &&
+            ("baseURL" in payload || "model" in payload || "apiFormat" in payload)
+          ? payload
+          : null;
+    if (!rawSettings) {
+      throw new Error("Unsupported settings file format.");
+    }
+    const next = cleanSettings(rawSettings, current);
+    if (!next.baseURL || !next.model || !next.targetLanguage) {
+      throw new Error(
+        "The settings file is missing the Base URL, model, or target language.",
+      );
+    }
+    return next;
+  }
+
+  function projectedSwipeX(dx, velocityX = 0) {
+    return dx + velocityX * SWIPE_PROJECTION_MS;
+  }
+
+  function swipeIntent(dx, dy) {
+    const absX = Math.abs(dx);
+    const absY = Math.abs(dy);
+    if (dx >= SWIPE_INTENT_PX && dx >= absY) return "horizontal";
+    if (
+      dx <= -SWIPE_INTENT_PX ||
+      (absY >= SWIPE_SCROLL_PX && absY > absX * 1.25)
+    ) {
+      return "cancel";
+    }
+    return "possible";
+  }
+
+  function swipeShouldCommit(dx, velocityX = 0, ready = false) {
+    if (ready) return dx >= SWIPE_FLICK_MIN_X;
+    return (
+      dx >= SWIPE_MIN_X ||
+      (dx >= SWIPE_FLICK_MIN_X &&
+        velocityX > 0 &&
+        projectedSwipeX(dx, velocityX) >= SWIPE_MIN_X)
+    );
+  }
+
+  function swipeVelocity(samples) {
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    return first && last && last.at > first.at
+      ? (last.x - first.x) / (last.at - first.at)
+      : 0;
+  }
+
+  function pointFor(touches, identifier) {
+    return Array.from(touches || []).find(
+      (touch) => touch.identifier === identifier,
+    );
+  }
+
+  function recordSwipeSample(gesture, x, at) {
+    gesture.samples.push({ at, x });
+    gesture.samples = gesture.samples
+      .filter((sample) => at - sample.at <= 100)
+      .slice(-4);
+    return swipeVelocity(gesture.samples);
+  }
+
   // Test interface
 
   if (globalThis.__TOUCH_IMAGE_TRANSLATE_TEST__) {
     Object.assign(globalThis.__TOUCH_IMAGE_TRANSLATE_TEST__, {
       buildRegionBoxesMarkup,
+      canConsumeRightSwipe,
       cancelImageJob,
       cleanSettings,
       closeImageViewer,
@@ -739,6 +805,7 @@
       errorMessageFor,
       extractNormalizedImage,
       handleImageButtonClick,
+      handleImageSwipe,
       hashImageCacheKey,
       imageAnchor,
       imageContentBox,
@@ -749,12 +816,19 @@
       normalizeText,
       openImageViewer,
       parseImageTranslation,
+      parseImportedSettings,
       parseRegionTranslation,
+      pointFor,
+      projectedSwipeX,
       removeImageTranslation,
       requestImageTranslation,
+      resolveTargetImage,
       retryDelayFor,
       setActiveImageRegion,
       structuredOutputUnsupported,
+      swipeIntent,
+      swipeShouldCommit,
+      swipeVelocity,
       syncImageOverlay,
       translateImage,
     });
@@ -950,15 +1024,59 @@
     }
   }
 
-  function exportSettings() {
+  async function exportSettings() {
     const settings = loadSettings();
-    const blob = new Blob([`${JSON.stringify(settings, null, 2)}\n`], {
+    if (!settings.baseURL || !settings.model) {
+      alert("There are no complete settings to export.");
+      return;
+    }
+    const includeKey =
+      Boolean(settings.apiKey) &&
+      confirm("Include the API key as plain text in the export?");
+    const exportedSettings = {
+      apiFormat: settings.apiFormat,
+      baseURL: settings.baseURL,
+      model: settings.model,
+      targetLanguage: settings.targetLanguage,
+      temperature: settings.temperature ?? 0.2,
+    };
+    if (includeKey) exportedSettings.apiKey = settings.apiKey;
+    const json = JSON.stringify(
+      {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        settings: exportedSettings,
+      },
+      null,
+      2,
+    );
+    const file = new File([json], "touch-translate.settings.json", {
       type: "application/json",
     });
+
+    try {
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: "Touch Translate settings",
+        });
+        return;
+      }
+    } catch (error) {
+      if (error.name === "AbortError") return;
+    }
+    if (typeof GM_setClipboard === "function") {
+      GM_setClipboard(json, "text");
+      alert(
+        "This browser cannot share files. The settings JSON was copied to the clipboard.",
+      );
+      return;
+    }
+    const blob = new Blob([`${json}\n`], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "touch-image-translate-settings.json";
+    link.download = "touch-translate.settings.json";
     link.style.display = "none";
     (document.body || document.documentElement).append(link);
     link.click();
@@ -970,30 +1088,43 @@
   function importSettings() {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = "application/json,.json";
-    input.style.display = "none";
+    input.accept = ".json,application/json";
     input.addEventListener(
       "change",
       async () => {
-        const file = input.files?.[0];
-        input.remove();
-        if (!file) return;
         try {
-          const parsed = JSON.parse(await file.text());
-          const next = cleanSettings(parsed, loadSettings());
+          const file = input.files?.[0];
+          if (!file) return;
+          const payload = JSON.parse(await file.text());
+          const next = parseImportedSettings(payload, loadSettings());
           GM_setValue(SETTINGS_KEY, next);
-          toast("Settings imported");
+          alert(
+            next.apiKey
+              ? "Settings imported."
+              : "Settings imported. Configure the API key separately.",
+          );
         } catch (error) {
-          reportError(error);
+          alert(`Import failed: ${error.message}`);
         }
       },
       { once: true },
     );
-    (document.body || document.documentElement).append(input);
     input.click();
   }
 
   // Provider transport
+
+  function redactProviderDiagnostic(message, apiKey) {
+    const text = String(message || "").replace(/https?:\/\/[^\s"'<>]+/gi, (value) => {
+      try {
+        const url = new URL(value);
+        return `${url.origin}${url.pathname}`;
+      } catch {
+        return "[redacted URL]";
+      }
+    });
+    return apiKey ? text.split(apiKey).join("[redacted]") : text;
+  }
 
   function extractErrorMessage(responseText) {
     try {
@@ -1030,10 +1161,20 @@
       settings.model,
       settings.apiFormat,
     );
+    const url = new URL(endpoint);
     const modelKey =
       compatibilityKey ||
       `${nativeGemini}\u0000${settings.baseURL}\u0000${settings.model}`;
     const temperature = temperatureFor(settings);
+    const safetySettings = nativeGemini
+      ? [
+          "HARM_CATEGORY_HARASSMENT",
+          "HARM_CATEGORY_HATE_SPEECH",
+          "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "HARM_CATEGORY_CIVIC_INTEGRITY",
+        ].map((category) => ({ category, threshold: "OFF" }))
+      : null;
     let currentRequest = null;
     let retryTimer = null;
     let aborted = false;
@@ -1049,6 +1190,9 @@
         if (useSchema) {
           generationConfig.responseJsonSchema = schema;
         }
+        if (/gemini-3\.1-flash-lite(?:-|$)/i.test(settings.model)) {
+          generationConfig.thinkingConfig = { thinkingLevel: "minimal" };
+        }
         return {
           systemInstruction: {
             parts: [{ text: systemPrompt }],
@@ -1060,6 +1204,7 @@
             },
           ],
           generationConfig,
+          safetySettings,
         };
       }
       const payload = {
@@ -1114,10 +1259,14 @@
         const headers = {
           "Content-Type": "application/json",
         };
-        if (nativeGemini) {
-          headers["x-goog-api-key"] = settings.apiKey;
-        } else {
+        if (!nativeGemini) {
           headers.Authorization = `Bearer ${settings.apiKey}`;
+        } else if (
+          /^(?:\/v1\/[^/]+\/[^/]+)?\/google-ai-studio\//.test(url.pathname)
+        ) {
+          headers["cf-aig-authorization"] = `Bearer ${settings.apiKey}`;
+        } else {
+          headers["x-goog-api-key"] = settings.apiKey;
         }
 
         try {
@@ -1126,6 +1275,7 @@
             url: endpoint,
             headers,
             data: JSON.stringify(buildPayload(useSchema)),
+            anonymous: true,
             timeout: REQUEST_TIMEOUT_MS,
             onload: (response) => {
               currentRequest = null;
@@ -1289,6 +1439,13 @@
       };
 
       sendAttempt(false);
+    }).catch((error) => {
+      const failure = new Error(
+        redactProviderDiagnostic(errorMessageFor(error), settings.apiKey),
+      );
+      failure.name = error?.name || "Error";
+      if (error?.code) failure.code = error.code;
+      throw failure;
     });
 
     return {
@@ -1426,6 +1583,107 @@
     return true;
   }
 
+  function canConsumeRightSwipe(target) {
+    for (
+      let element = target;
+      element;
+      element = element.parentElement || element.getRootNode?.().host
+    ) {
+      const style = getComputedStyle(element);
+      if (
+        element !== document.body &&
+        element !== document.documentElement &&
+        element !== document.scrollingElement &&
+        element.scrollWidth > element.clientWidth + 1 &&
+        /^(?:auto|scroll|overlay)$/.test(style?.overflowX || "") &&
+        (style?.direction === "rtl"
+          ? element.scrollLeft < -1
+          : element.scrollLeft > 1)
+      ) {
+        return true;
+      }
+      if (element === document.documentElement) break;
+    }
+    return false;
+  }
+
+  function resolveTargetImage(target, touch) {
+    if (
+      target?.closest?.(
+        `.${IMAGE_VIEWER_CLASS}, .${ERROR_DIALOG_CLASS}, .${SETTINGS_DIALOG_CLASS}`,
+      )
+    ) {
+      return null;
+    }
+    const isEligibleImage = (node) =>
+      Boolean(
+        node?.tagName === "IMG" &&
+          (isTranslatableImage(node) ||
+            imageStates.get(node)?.job ||
+            imageStates.get(node)?.result),
+      );
+    if (isEligibleImage(target)) return target;
+    if (!Number.isFinite(touch?.clientX) || !Number.isFinite(touch?.clientY)) {
+      return null;
+    }
+    const elements = typeof document.elementsFromPoint === "function"
+      ? document.elementsFromPoint(touch.clientX, touch.clientY)
+      : [target];
+    // Document hit testing may expose only the host of a shadow tree.
+    if (target && !elements.includes(target)) elements.unshift(target);
+    const containsPoint = (rect) =>
+      touch.clientX >= rect.left &&
+      touch.clientX <= (rect.right ?? rect.left + rect.width) &&
+      touch.clientY >= rect.top &&
+      touch.clientY <= (rect.bottom ?? rect.top + rect.height);
+    const unobstructed = (img) => {
+      const ancestors = new Set();
+      for (let node = img; node; node = node.assignedSlot || node.parentElement || node.getRootNode?.().host) {
+        ancestors.add(node);
+      }
+      for (const element of elements) {
+        if (element === img) return true;
+        if (ancestors.has(element) || element.closest?.(`.${IMAGE_OVERLAY_CLASS}`)) continue;
+        const style = getComputedStyle(element);
+        if (Number(style?.opacity) === 0) continue;
+        if (/^(?:img|svg|canvas|video|iframe|object|embed)$/i.test(element.tagName || "")) return false;
+        const background = style?.backgroundImage || "none";
+        const src = String(img.currentSrc || img.src || "");
+        if (src && background.includes(src)) continue;
+        const color = style?.backgroundColor || "transparent";
+        const transparent = color === "transparent" ||
+          /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/i.test(color) ||
+          /\/\s*0(?:\.0+)?%?\s*\)$/.test(color);
+        if (!transparent || background !== "none") return false;
+        if (normalizeText(element.innerText ?? element.textContent)) {
+          if (typeof document.createRange !== "function") return false;
+          const range = document.createRange();
+          for (const child of element.childNodes) {
+            if (child.nodeType !== 3 || !normalizeText(child.nodeValue)) continue;
+            range.selectNodeContents(child);
+            if ([...range.getClientRects()].some(containsPoint)) return false;
+          }
+        }
+      }
+      return true;
+    };
+    for (
+      let scope = target;
+      scope && scope !== document.body && scope !== document.documentElement;
+      scope = scope.parentElement || scope.getRootNode?.().host
+    ) {
+      if (scope.matches?.("main, [role='main'], [role='feed'], [role='application']")) break;
+      for (const candidate of scope.querySelectorAll?.("img") || []) {
+        if (!isEligibleImage(candidate)) continue;
+        if (containsPoint(candidate.getBoundingClientRect()) && unobstructed(candidate)) {
+          return candidate;
+        }
+      }
+      if (scope.matches?.("article, [role='article']")) break;
+    }
+    return null;
+  }
+
   function createSvgElement(tagName, attributes = {}) {
     const element =
       typeof document.createElementNS === "function"
@@ -1481,19 +1739,49 @@
     container.replaceChildren(...nodes);
   }
 
-  function setImageButtonState(img, state) {
+  function setImageButtonState(
+    img,
+    state,
+    progress = 0,
+    action = "translate",
+    ready = false,
+  ) {
     const record = imageStates.get(img);
     const button = record?.button;
     if (!button) return;
     button.dataset.state = state;
+    if (state === "gesture") {
+      const turn = Math.min(Math.max(progress, 0), 1);
+      button.style?.setProperty?.(
+        "--touch-image-translate-progress",
+        `${Math.round(turn * 360)}deg`,
+        "important",
+      );
+      button.dataset.action = action;
+      if (ready) button.dataset.ready = "true";
+      else delete button.dataset.ready;
+    } else {
+      delete button.dataset.action;
+      delete button.dataset.ready;
+      button.style?.removeProperty?.("--touch-image-translate-progress");
+    }
     const labels = {
       done: "View image translation",
       error: "Retry image translation",
+      gesture: "Swipe right to translate image",
       idle: "Translate image",
       loading: "Cancel image translation",
     };
     button.setAttribute("aria-label", labels[state] || labels.idle);
     button.title = labels[state] || labels.idle;
+    const isIdle = state === "idle";
+    button.hidden = isIdle;
+    if (record?.overlay) {
+      record.overlay.hidden = isIdle;
+      if (!isIdle && !record.positioned) {
+        syncImageOverlay(img);
+      }
+    }
   }
 
   function applySpotlightToSvg(svgRoot, activeLabel = "") {
@@ -1625,7 +1913,21 @@
         y: textY,
       });
       text.textContent = item.label;
-      group.append?.(boxRect, labelRect, text);
+      const hitRect = createSvgElement("rect", {
+        "aria-hidden": "true",
+        fill: "transparent",
+        "pointer-events": "all",
+        width: 44,
+        height: 44,
+        x: item.labelX + (item.labelWidth - 44) / 2,
+        y: item.labelY + (item.labelHeight - 44) / 2,
+      });
+      const pin = createSvgElement("g", {
+        "data-pin-x": item.x,
+        "data-pin-y": item.y,
+      });
+      pin.append?.(labelRect, text, hitRect);
+      group.append?.(boxRect, pin);
       group.addEventListener?.("click", (event) => {
         event.preventDefault?.();
         event.stopPropagation?.();
@@ -1714,26 +2016,7 @@
     viewerImg.alt = img.alt || "Translated image";
     canvas.append(viewerImg);
 
-    const baseWidth = Math.max(
-      240,
-      Number(img.naturalWidth) ||
-        Number(img.getBoundingClientRect?.()?.width) ||
-        600,
-    );
-    const baseHeight = Math.max(
-      180,
-      Number(img.naturalHeight) ||
-        Number(img.getBoundingClientRect?.()?.height) ||
-        400,
-    );
-    const svg = buildSpotlightSvgElement(
-      img,
-      baseWidth,
-      baseHeight,
-      regions,
-      state?.activeRegion || (regions.length ? "1" : ""),
-    );
-    if (svg) canvas.append(svg);
+    let svg = null;
     stage.append(canvas);
 
     // Bottom floating sheet
@@ -1816,6 +2099,15 @@
     let expanded = false;
     let pinsHidden = false;
 
+    // Keep pins and touch targets at screen size while the image zooms.
+    const syncPinScale = () => {
+      for (const pin of svg?.querySelectorAll?.("[data-pin-x]") || []) {
+        const x = Number(pin.getAttribute("data-pin-x"));
+        const y = Number(pin.getAttribute("data-pin-y"));
+        pin.setAttribute("transform", `translate(${x} ${y}) scale(${1 / scale}) translate(${-x} ${-y})`);
+      }
+    };
+
     const updateTransform = () => {
       if (scale <= 1.01) {
         scale = 1;
@@ -1829,7 +2121,31 @@
       );
       resetZoomBtn.hidden = scale <= 1.01;
       resetZoomBtn.textContent = `${Math.round(scale * 100)}%`;
+      syncPinScale();
     };
+
+    let renderedWidth = 0;
+    let renderedHeight = 0;
+    const syncRegions = () => {
+      if (!dialog.isConnected || !viewerImg.complete || !viewerImg.naturalWidth) return;
+      const rect = viewerImg.getBoundingClientRect?.();
+      const transformScale = Math.round(scale * 1000) / 1000;
+      const width = rect?.width / transformScale || 0;
+      const height = rect?.height / transformScale || 0;
+      if (!width || !height || (width === renderedWidth && height === renderedHeight)) return;
+      renderedWidth = width;
+      renderedHeight = height;
+      svg?.remove();
+      svg = buildSpotlightSvgElement(img, width, height, regions, state?.activeRegion || "");
+      if (svg) canvas.append(svg);
+      syncPinScale();
+    };
+    viewerImg.addEventListener?.("load", syncRegions);
+    const resizeObserver = typeof ResizeObserver === "function"
+      ? new ResizeObserver(syncRegions)
+      : null;
+    if (resizeObserver) resizeObserver.observe(viewerImg);
+    else globalThis.addEventListener?.("resize", syncRegions);
 
     const setZoom = (nextScale, focalX = 0, focalY = 0) => {
       const clamped = clampNumber(nextScale, 1, 5);
@@ -2031,7 +2347,11 @@
     );
 
     activeImageViewer = {
-      cleanup() {},
+      cleanup() {
+        resizeObserver?.disconnect();
+        viewerImg.removeEventListener?.("load", syncRegions);
+        globalThis.removeEventListener?.("resize", syncRegions);
+      },
       dialog,
       img,
       setZoom,
@@ -2043,6 +2363,7 @@
 
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
+    syncRegions();
     return dialog;
   }
 
@@ -2076,7 +2397,13 @@
     ) {
       anchor.insertAdjacentElement("beforebegin", state.overlay);
     }
-    if (state.overlay.hidden) state.overlay.hidden = false;
+    const isIdle =
+      (state.button?.dataset?.state || "idle") === "idle" &&
+      !state.job &&
+      !state.result;
+    if (state.button) state.button.hidden = isIdle;
+    state.overlay.hidden = isIdle;
+    if (isIdle) return true;
     const rect = img.getBoundingClientRect?.() || {
       height: 0,
       left: 0,
@@ -2526,43 +2853,180 @@
     }
   }
 
+  function handleImageSwipe(img) {
+    if (!img?.isConnected) return null;
+    syncImageOverlay(img);
+    if (cancelImageJob(img)) return null;
+    const state = imageStates.get(img);
+    if (state?.result) {
+      return openImageViewer(img, state.result);
+    }
+    const promise = translateImage(img);
+    promise.catch(reportError);
+    return promise;
+  }
+
   function handleImageButtonClick(img, event) {
     event?.preventDefault?.();
     event?.stopPropagation?.();
-    if (!img?.isConnected) return;
-    syncImageOverlay(img);
-    if (cancelImageJob(img)) return;
+    handleImageSwipe(img);
+  }
+
+  let swipe = null;
+  let lastSwipeCommitAt = 0;
+
+  function restoreImageGestureIndicator(gesture) {
+    const img = gesture?.img;
+    if (!img) return;
     const state = imageStates.get(img);
-    if (state?.result) {
-      openImageViewer(img, state.result);
+    if (state?.button?.dataset?.state !== "gesture") return;
+    if (state.job) {
+      setImageButtonState(img, "loading");
+    } else if (state.result) {
+      setImageButtonState(img, "done");
+    } else if (gesture.buttonState && gesture.buttonState !== "gesture") {
+      setImageButtonState(img, gesture.buttonState);
+    } else {
+      setImageButtonState(img, "idle");
+    }
+  }
+
+  function clearSwipe() {
+    restoreImageGestureIndicator(swipe);
+    swipe = null;
+  }
+
+  function resetTouches() {
+    clearSwipe();
+  }
+
+  function onTouchStart(event) {
+    if (event.touches?.length !== 1) {
+      clearSwipe();
       return;
     }
-    translateImage(img).catch(reportError);
+    const touch = event.touches[0];
+    if (!touch || touch.clientX < SAFARI_EDGE_X) {
+      clearSwipe();
+      return;
+    }
+    const rawTarget =
+      event.composedPath?.().find((node) => node instanceof Element) ||
+      (event.target && typeof event.target === "object" ? event.target : null);
+    if (
+      rawTarget?.closest?.(
+        `.${IMAGE_VIEWER_CLASS}, .${ERROR_DIALOG_CLASS}, .${SETTINGS_DIALOG_CLASS}`,
+      ) ||
+      rawTarget?.isContentEditable
+    ) {
+      clearSwipe();
+      return;
+    }
+    const img = resolveTargetImage(rawTarget, touch);
+    const control = rawTarget?.closest?.("input, textarea, select, button");
+    if (
+      !img ||
+      (control &&
+        !control.classList?.contains?.(IMAGE_BUTTON_CLASS) &&
+        !control.contains?.(img)) ||
+      canConsumeRightSwipe(rawTarget || img) ||
+      (rawTarget !== img && canConsumeRightSwipe(img))
+    ) {
+      clearSwipe();
+      return;
+    }
+    const root = img.getRootNode?.();
+    if (root && root !== document && typeof root.querySelector === "function") {
+      addStyles(root);
+    }
+    const state = ensureImageOverlay(img);
+    const currentState = state?.button?.dataset?.state || "idle";
+    const now = Date.now();
+    swipe = {
+      action: state?.job
+        ? "cancel"
+        : state?.result
+          ? "open"
+          : currentState === "error"
+            ? "retry"
+            : "translate",
+      at: now,
+      buttonState: currentState,
+      identifier: touch.identifier,
+      img,
+      phase: "possible",
+      ready: false,
+      samples: [{ at: now, x: touch.clientX }],
+      x: touch.clientX,
+      y: touch.clientY,
+    };
+  }
+
+  function onTouchMove(event) {
+    if (!swipe) return;
+    const touch = pointFor(event.touches, swipe.identifier);
+    if (!touch) return;
+    const dx = touch.clientX - swipe.x;
+    const dy = touch.clientY - swipe.y;
+    if (swipe.phase === "possible") {
+      const intent = swipeIntent(dx, dy);
+      if (intent === "horizontal") {
+        swipe.phase = "horizontal";
+      } else if (intent === "cancel") {
+        clearSwipe();
+        return;
+      }
+    }
+    if (swipe.phase !== "horizontal") return;
+    if (event.cancelable) event.preventDefault();
+    event.stopPropagation?.();
+    const now = Date.now();
+    const velocityX = recordSwipeSample(swipe, touch.clientX, now);
+    swipe.ready = swipeShouldCommit(dx, velocityX, swipe.ready);
+    setImageButtonState(
+      swipe.img,
+      "gesture",
+      swipe.ready ? 1 : dx / SWIPE_MIN_X,
+      swipe.action,
+      swipe.ready,
+    );
+    syncImageOverlay(swipe.img);
+  }
+
+  function onTouchEnd(event) {
+    if (!swipe || event.touches?.length) return;
+    const gesture = swipe;
+    swipe = null;
+    const touch = pointFor(event.changedTouches, gesture.identifier);
+    if (!touch) {
+      restoreImageGestureIndicator(gesture);
+      return;
+    }
+    const dx = touch.clientX - gesture.x;
+    const now = Date.now();
+    const velocityX = recordSwipeSample(gesture, touch.clientX, now);
+    if (gesture.phase === "possible") {
+      gesture.phase = swipeIntent(dx, touch.clientY - gesture.y);
+    }
+    if (
+      gesture.phase === "horizontal" &&
+      swipeShouldCommit(dx, velocityX, gesture.ready)
+    ) {
+      if (event.cancelable) event.preventDefault();
+      event.stopPropagation?.();
+      lastSwipeCommitAt = now;
+      handleImageSwipe(gesture.img);
+    } else {
+      restoreImageGestureIndicator(gesture);
+    }
   }
 
   let imageScanTimer;
-  let imageIntersectionObserver;
-  const observedPageImages = new WeakSet();
 
   function scanPageImages() {
     imageScanTimer = undefined;
     for (const img of [...trackedImages]) {
       syncImageOverlay(img);
-    }
-    const images = document.querySelectorAll?.("img") || [];
-    for (const img of images) {
-      if (imageStates.has(img)) {
-        syncImageOverlay(img);
-        continue;
-      }
-      if (imageIntersectionObserver) {
-        if (!observedPageImages.has(img)) {
-          observedPageImages.add(img);
-          imageIntersectionObserver.observe(img);
-        }
-      } else if (isTranslatableImage(img)) {
-        ensureImageOverlay(img);
-      }
     }
   }
 
@@ -2572,33 +3036,46 @@
   }
 
   function initImageTranslation() {
-    if (typeof IntersectionObserver === "function") {
-      imageIntersectionObserver = new IntersectionObserver(
-        (entries) => {
-          for (const entry of entries) {
-            const img = entry.target;
-            if (entry.isIntersecting) {
-              if (isTranslatableImage(img)) {
-                ensureImageOverlay(img);
-              }
-            } else if (
-              imageStates.has(img) &&
-              !imageStates.get(img)?.job &&
-              !imageStates.get(img)?.result
-            ) {
-              const state = imageStates.get(img);
-              if (state?.overlay && !state.overlay.hidden) {
-                state.overlay.hidden = true;
-              }
-            }
-          }
-        },
-        { rootMargin: "200px 0px 200px 0px" },
-      );
-    }
+    const touchTarget =
+      typeof globalThis.addEventListener === "function" ? globalThis : document;
+    touchTarget.addEventListener?.("touchstart", onTouchStart, {
+      capture: true,
+      passive: true,
+    });
+    touchTarget.addEventListener?.("touchmove", onTouchMove, {
+      capture: true,
+      passive: false,
+    });
+    touchTarget.addEventListener?.("touchend", onTouchEnd, {
+      capture: true,
+      passive: false,
+    });
+    touchTarget.addEventListener?.("touchcancel", resetTouches, {
+      capture: true,
+      passive: true,
+    });
+    document.addEventListener?.(
+      "click",
+      (event) => {
+        if (
+          lastSwipeCommitAt &&
+          Date.now() - lastSwipeCommitAt < 400 &&
+          !event.target?.closest?.(
+            `.${IMAGE_VIEWER_CLASS}, .${ERROR_DIALOG_CLASS}, .${SETTINGS_DIALOG_CLASS}, .${TOAST_CLASS}`,
+          )
+        ) {
+          lastSwipeCommitAt = 0;
+          event.preventDefault?.();
+          event.stopPropagation?.();
+          event.stopImmediatePropagation?.();
+        }
+      },
+      true,
+    );
     if (typeof MutationObserver === "function") {
       const observer = new MutationObserver((records) => {
         if (
+          trackedImages.size &&
           records.some(
             (record) =>
               !record.target.closest?.(
@@ -2619,13 +3096,8 @@
     document.addEventListener?.(
       "load",
       (event) => {
-        if (event.target?.tagName === "IMG") {
-          if (
-            isTranslatableImage(event.target) ||
-            imageStates.has(event.target)
-          ) {
-            ensureImageOverlay(event.target);
-          }
+        if (event.target?.tagName === "IMG" && imageStates.has(event.target)) {
+          syncImageOverlay(event.target);
         }
       },
       true,
@@ -2637,7 +3109,6 @@
       capture: true,
       passive: true,
     });
-    scheduleImageScan();
   }
 
   // Notifications & Error Dialog
@@ -2790,10 +3261,12 @@
         user-select: none !important;
         -webkit-user-select: none !important;
       }
-      .${IMAGE_OVERLAY_CLASS}[hidden] {
+      .${IMAGE_OVERLAY_CLASS}[hidden],
+      .${IMAGE_BUTTON_CLASS}[hidden] {
         display: none !important;
       }
       .${IMAGE_BUTTON_CLASS} {
+        --touch-image-translate-progress: 0deg;
         -webkit-appearance: none !important;
         appearance: none !important;
         position: absolute !important;
@@ -2828,6 +3301,31 @@
         height: 15px !important;
         display: block !important;
         pointer-events: none !important;
+      }
+      .${IMAGE_BUTTON_CLASS}[data-state="gesture"] {
+        pointer-events: none !important;
+        opacity: 0.9 !important;
+      }
+      .${IMAGE_BUTTON_CLASS}[data-state="gesture"]::before {
+        content: "" !important;
+        position: absolute !important;
+        inset: 1px !important;
+        border-radius: 50% !important;
+        background: conic-gradient(
+          #ffffff 0 var(--touch-image-translate-progress),
+          rgba(255, 255, 255, 0.2) var(--touch-image-translate-progress) 1turn
+        ) !important;
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px)) !important;
+        mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px)) !important;
+      }
+      .${IMAGE_BUTTON_CLASS}[data-state="gesture"][data-ready="true"] {
+        background: rgba(88, 101, 242, 0.92) !important;
+        border-color: rgba(255, 255, 255, 0.65) !important;
+        transform: scale(1.08) !important;
+        opacity: 1 !important;
+      }
+      .${IMAGE_BUTTON_CLASS}[data-state="gesture"][data-action="cancel"][data-ready="true"] {
+        background: rgba(200, 69, 60, 0.92) !important;
       }
       .${IMAGE_BUTTON_CLASS}[data-state="loading"] > svg,
       .${IMAGE_BUTTON_CLASS}[data-state="error"] > svg {

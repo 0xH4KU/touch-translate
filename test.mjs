@@ -1127,6 +1127,43 @@ const imageApi = {};
 context.__TOUCH_IMAGE_TRANSLATE_TEST__ = imageApi;
 vm.runInContext(imageSource, context);
 
+// Settings interoperability between Touch Translate and Touch Image Translate
+const ttExportedPayload = {
+  version: 1,
+  exportedAt: "2026-10-18T00:00:00.000Z",
+  settings: {
+    apiFormat: "gemini-native",
+    baseURL: "https://gateway.ai.cloudflare.com/v1/acc/gw/google-ai-studio",
+    model: "google-ai-studio/gemini-3.1-flash-lite",
+    targetLanguage: "Traditional Chinese",
+    temperature: 0.35,
+    apiKey: "cf-token-123",
+  },
+};
+const importedFromTT = imageApi.parseImportedSettings(ttExportedPayload);
+assert.deepEqual(
+  { ...importedFromTT },
+  { ...api.cleanSettings(ttExportedPayload.settings) },
+);
+assert.equal(
+  imageApi.endpointFor(
+    importedFromTT.baseURL,
+    importedFromTT.model,
+    importedFromTT.apiFormat,
+  ),
+  api.endpointFor(
+    importedFromTT.baseURL,
+    importedFromTT.model,
+    importedFromTT.apiFormat,
+  ),
+);
+const importedFlat = imageApi.parseImportedSettings(ttExportedPayload.settings);
+assert.deepEqual({ ...importedFlat }, { ...importedFromTT });
+assert.throws(
+  () => imageApi.parseImportedSettings({ version: 2 }),
+  /Unsupported settings file format/,
+);
+
 // Image translation: region normalization and structured output parsing
 const normalizedRegion = imageApi.normalizeImageRegion({
   box_2d: [100, 200, 300, 800],
@@ -1214,6 +1251,9 @@ context.getComputedStyle = (element) => ({
   contentVisibility: element?.contentVisibility,
   direction: element?.direction,
   display: element?.display || "block",
+  backgroundColor: element?.backgroundColor || "rgba(0, 0, 0, 0)",
+  backgroundImage: element?.backgroundImage || "none",
+  opacity: element?.opacity ?? "1",
   objectFit: element?.objectFit || "fill",
   objectPosition: element?.objectPosition || "50% 50%",
   overflowX: element?.overflowX,
@@ -1405,6 +1445,64 @@ assert.deepEqual(jsonBody, schemaBody);
 requestOptions.onload({ status: 200, responseText: nativeImageResponse });
 assert.equal((await imageFallback.promise).regions[0].translation, "圖片翻譯");
 
+// Provider diagnostics must not expose URL credentials, query keys, or API keys.
+for (const native of [false, true]) {
+  const diagnosticSettings = {
+    ...cacheSettings,
+    apiFormat: native ? "gemini-native" : "chat-completions",
+    baseURL: "https://url-user:url-password@ai.example.com/google-ai-studio?key=query-secret#fragment-secret",
+    model: "redaction-model",
+    apiKey: "diagnostic-api-secret",
+  };
+  const request = imageApi.requestImageTranslation(sampleImageData, diagnosticSettings);
+  const sentURL = new URL(requestOptions.url);
+  requestOptions.onload({ status: 401, responseText: JSON.stringify({ error: {
+    message: `Unauthorized diagnostic-api-secret at ${requestOptions.url}`,
+  } }) });
+  await assert.rejects(request.promise, (error) => {
+    assert.match(error.message, /HTTP 401/);
+    assert.ok(error.message.includes(`${sentURL.origin}${sentURL.pathname}`));
+    assert.doesNotMatch(error.message, /url-user|url-password|query-secret|fragment-secret|diagnostic-api-secret/);
+    return true;
+  });
+}
+
+// Malformed responses and transport errors share the same redaction boundary.
+const diagnosticImageSettings = {
+  ...cacheSettings,
+  apiKey: "diagnostic-api-secret",
+  baseURL: "https://url-user:url-password@ai.example.com/v1?key=query-secret#fragment-secret",
+};
+const malformedProviderResult = imageApi.requestImageTranslation(sampleImageData, diagnosticImageSettings);
+for (let attempt = 0; attempt < 2; attempt += 1) {
+  requestOptions.onload({ status: 200, responseText: JSON.stringify({ choices: [{
+    message: { content: `invalid-json diagnostic-api-secret ${requestOptions.url}` },
+  }] }) });
+}
+await assert.rejects(malformedProviderResult.promise, (error) => {
+  assert.equal(error.code, "TRANSLATION_RESPONSE_ERROR");
+  assert.doesNotMatch(error.message, /url-user|url-password|query-secret|fragment-secret|diagnostic-api-secret/);
+  return true;
+});
+const imageTransportBeforeFailure = context.GM_xmlhttpRequest;
+context.GM_xmlhttpRequest = (options) => {
+  throw Object.assign(new Error(`Transport failed: ${options.url} diagnostic-api-secret`), {
+    name: "NetworkError",
+    code: "TEST_NETWORK_FAILURE",
+  });
+};
+try {
+  const failedTransport = imageApi.requestImageTranslation(sampleImageData, diagnosticImageSettings);
+  await assert.rejects(failedTransport.promise, (error) => {
+    assert.equal(error.name, "NetworkError");
+    assert.equal(error.code, "TEST_NETWORK_FAILURE");
+    assert.doesNotMatch(error.message, /url-user|url-password|query-secret|fragment-secret|diagnostic-api-secret/);
+    return true;
+  });
+} finally {
+  context.GM_xmlhttpRequest = imageTransportBeforeFailure;
+}
+
 // Full-screen Zoomable Image Viewer, Spotlight Mode, and lifecycle
 function createMockDomElement(tagName) {
   const attrs = new Map();
@@ -1519,6 +1617,9 @@ function createMockDomElement(tagName) {
         stopPropagation() {},
       });
     },
+    dispatch(type, event) {
+      listeners.get(type)?.(event);
+    },
     querySelector(selector) {
       return this.querySelectorAll(selector)[0] || null;
     },
@@ -1555,7 +1656,13 @@ function createMockDomElement(tagName) {
   };
 }
 
-document.createElement = (tag) => createMockDomElement(tag);
+document.createElement = (tag) => {
+  const element = createMockDomElement(tag);
+  if (tag === "img") {
+    Object.assign(element, { complete: true, naturalWidth: 640, naturalHeight: 480 });
+  }
+  return element;
+};
 document.createElementNS = (_ns, tag) => createMockDomElement(tag);
 document.createTextNode = (text) => ({ nodeValue: text, textContent: text });
 document.createDocumentFragment = () => createMockDomElement("fragment");
@@ -1597,22 +1704,158 @@ mockContainer.append(mockImg);
 const overlayState = imageApi.ensureImageOverlay(mockImg);
 assert.ok(overlayState);
 assert.equal(overlayState.button.dataset.state, "idle");
+// Idle images must hide both button and overlay so browsing has zero visual obstruction
+assert.equal(overlayState.button.hidden, true);
+assert.equal(overlayState.overlay.hidden, true);
 
-// Opening the full-screen viewer sets button state to done and highlights region 1 in Spotlight Mode
+// Right-swipe helpers and overlay-penetrating target resolution
+assert.equal(imageApi.swipeIntent(24, 4), "horizontal");
+assert.equal(imageApi.swipeIntent(-20, 2), "cancel");
+assert.equal(imageApi.swipeIntent(4, 30), "cancel");
+assert.equal(imageApi.swipeShouldCommit(60, 0, false), true);
+assert.equal(imageApi.swipeShouldCommit(30, 0.5, false), true);
+assert.equal(imageApi.swipeShouldCommit(20, 0, false), false);
+assert.equal(imageApi.resolveTargetImage(mockImg, { clientX: 50, clientY: 60 }), mockImg);
+
+const imageOverlayLink = createMockDomElement("a");
+imageOverlayLink.className = "stretched-link";
+imageOverlayLink.closest = () => null;
+mockContainer.append(imageOverlayLink);
+document.elementsFromPoint = (x, y) =>
+  x === 80 && y === 90 ? [imageOverlayLink, mockImg, mockContainer] : [];
+assert.equal(
+  imageApi.resolveTargetImage(imageOverlayLink, { clientX: 80, clientY: 90 }),
+  mockImg,
+);
+imageOverlayLink.backgroundColor = "rgb(255, 255, 255)";
+imageOverlayLink.backgroundImage = `url("${mockImg.currentSrc}")`;
+assert.equal(
+  imageApi.resolveTargetImage(imageOverlayLink, { clientX: 80, clientY: 90 }),
+  mockImg,
+);
+delete imageOverlayLink.backgroundImage;
+delete imageOverlayLink.backgroundColor;
+
+// A sibling image with pointer-events:none is absent from the hit-test stack.
+document.elementsFromPoint = () => [imageOverlayLink, mockContainer];
+assert.equal(
+  imageApi.resolveTargetImage(imageOverlayLink, { clientX: 80, clientY: 90 }),
+  mockImg,
+);
+const opaqueImageCover = createMockDomElement("div");
+opaqueImageCover.closest = () => null;
+opaqueImageCover.backgroundColor = "rgb(255, 255, 255)";
+mockContainer.append(opaqueImageCover);
+document.elementsFromPoint = () => [opaqueImageCover, imageOverlayLink, mockImg, mockContainer];
+assert.equal(
+  imageApi.resolveTargetImage(opaqueImageCover, { clientX: 80, clientY: 90 }),
+  null,
+);
+opaqueImageCover.backgroundColor = "rgba(0, 0, 0, 0)";
+opaqueImageCover.textContent = "Foreground notice";
+assert.equal(
+  imageApi.resolveTargetImage(opaqueImageCover, { clientX: 80, clientY: 90 }),
+  null,
+);
+// Even a direct picture ancestor must not bypass the foreground-cover check.
+opaqueImageCover.closest = (selector) => selector === "picture" ? mockContainer : null;
+assert.equal(
+  imageApi.resolveTargetImage(opaqueImageCover, { clientX: 80, clientY: 90 }),
+  null,
+);
+opaqueImageCover.remove();
+const imageShadowHost = createMockDomElement("div");
+imageShadowHost.backgroundColor = "rgb(255, 255, 255)";
+imageShadowHost.parentElement = document.body;
+mockContainer.getRootNode = () => ({ host: imageShadowHost });
+document.elementsFromPoint = () => [imageShadowHost];
+assert.equal(
+  imageApi.resolveTargetImage(imageOverlayLink, { clientX: 80, clientY: 90 }),
+  mockImg,
+);
+const shadowCover = createMockDomElement("div");
+shadowCover.closest = () => null;
+shadowCover.backgroundColor = "rgb(255, 255, 255)";
+mockContainer.append(shadowCover);
+assert.equal(
+  imageApi.resolveTargetImage(shadowCover, { clientX: 80, clientY: 90 }),
+  null,
+);
+shadowCover.remove();
+delete mockContainer.getRootNode;
+const unrelatedOverlayLink = createMockDomElement("a");
+unrelatedOverlayLink.closest = () => null;
+unrelatedOverlayLink.parentElement = document.body;
+document.elementsFromPoint = () => [unrelatedOverlayLink, mockImg, mockContainer];
+assert.equal(
+  imageApi.resolveTargetImage(unrelatedOverlayLink, { clientX: 80, clientY: 90 }),
+  null,
+);
+delete document.elementsFromPoint;
+
+const scrolledCarousel = {
+  clientWidth: 300,
+  direction: "ltr",
+  overflowX: "auto",
+  scrollLeft: 40,
+  scrollWidth: 900,
+};
+assert.equal(imageApi.canConsumeRightSwipe(scrolledCarousel), true);
+assert.equal(
+  imageApi.canConsumeRightSwipe({ ...scrolledCarousel, scrollLeft: 0 }),
+  false,
+);
+
+// Opening the full-screen viewer sets button state to done (visible) and highlights region 1 in Spotlight Mode
+let viewerResize;
+let resizeDisconnects = 0;
+context.ResizeObserver = class {
+  constructor(callback) { viewerResize = callback; }
+  observe() {}
+  disconnect() { resizeDisconnects += 1; }
+};
 const viewerDialog = imageApi.openImageViewer(mockImg, parsedImage);
 assert.ok(viewerDialog);
 assert.equal(viewerDialog.open, true);
 assert.equal(overlayState.button.dataset.state, "done");
+assert.equal(overlayState.button.hidden, false);
+assert.equal(overlayState.overlay.hidden, false);
 // In-page thumbnail overlay must NOT contain SVG region boxes (clutter-free thumbnail)
 assert.equal(
   overlayState.overlay.querySelectorAll(".touch-image-translate__region").length,
   0,
 );
 
+assert.equal(
+  viewerDialog.querySelector(".touch-image-translate__regions").getAttribute("viewBox"),
+  "0 0 320 240",
+);
+const viewerImage = viewerDialog.querySelector(".touch-image-translate__viewer-img");
+viewerImage.clientWidth = 240;
+viewerImage.clientHeight = 180;
+viewerImage.getBoundingClientRect = () => ({ left: 10, top: 20, width: 240, height: 180 });
+viewerResize();
 const regionGroups = viewerDialog.querySelectorAll(".touch-image-translate__region");
 const translationItems = viewerDialog.querySelectorAll(".touch-image-translate__item");
 assert.equal(regionGroups.length, 2);
 assert.equal(translationItems.length, 2);
+assert.equal(
+  viewerDialog.querySelector(".touch-image-translate__regions").getAttribute("viewBox"),
+  "0 0 240 180",
+);
+const pinRects = regionGroups[0].querySelectorAll("rect");
+assert.equal(Number(pinRects[1].getAttribute("height")), 28);
+assert.equal(Number(pinRects[2].getAttribute("width")), 44);
+assert.equal(Number(pinRects[2].getAttribute("height")), 44);
+const zoomStage = viewerDialog.querySelector(".touch-image-translate__viewer-stage");
+for (let tap = 0; tap < 2; tap += 1) {
+  zoomStage.dispatch("touchstart", { touches: [{ clientX: 100, clientY: 100 }] });
+  zoomStage.dispatch("touchend", { touches: [] });
+}
+const pinGroup = regionGroups[0].querySelector("[data-pin-x]");
+assert.ok(pinGroup.getAttribute("transform").includes(`scale(${1 / 2.4})`));
+viewerDialog.querySelector('[data-action="reset-zoom"]').dispatchClick();
+assert.match(pinGroup.getAttribute("transform"), /scale\(1\)/);
 
 // Region 1 is active by default in Spotlight Mode
 assert.equal(regionGroups[0].getAttribute("data-active"), "true");
@@ -1654,19 +1897,24 @@ assert.equal(viewerList.hidden, true);
 expandBtn.dispatchClick();
 assert.equal(viewerList.hidden, false);
 
-// Closing viewer keeps state="done" so tapping the image button re-opens the viewer immediately
+// Closing viewer keeps state="done" so swiping right (or tapping the done badge) re-opens the viewer immediately
 imageApi.closeImageViewer();
 assert.equal(viewerDialog.isConnected, false);
+assert.equal(resizeDisconnects, 1);
 assert.equal(overlayState.button.dataset.state, "done");
 
-// Source changes clear completed results and close any open viewer for that image
-const reopenedDialog = imageApi.openImageViewer(mockImg, parsedImage);
+// Source changes clear completed results, close any open viewer, and hide the idle button again
+const reopenedDialog = imageApi.handleImageSwipe(mockImg);
 assert.equal(reopenedDialog.open, true);
 mockImg.currentSrc = "https://example.com/replacement.png";
 imageApi.syncImageOverlay(mockImg);
 assert.equal(reopenedDialog.isConnected, false);
 assert.equal(overlayState.button.dataset.state, "idle");
+assert.equal(overlayState.button.hidden, true);
+assert.equal(overlayState.overlay.hidden, true);
 assert.equal(overlayState.result, null);
+assert.equal(resizeDisconnects, 2);
+delete context.ResizeObserver;
 
 // Ignore an old response even if it arrives before the source-change observer runs.
 context.GM_getValue = (key, fallback) =>
