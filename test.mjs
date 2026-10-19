@@ -1996,11 +1996,85 @@ assert.equal(viewerList.hidden, true);
 expandBtn.dispatchClick();
 assert.equal(viewerList.hidden, false);
 
-// Closing viewer keeps state="done" so swiping right (or tapping the done badge) re-opens the viewer immediately
+// Closing viewer keeps state="done" so a two-finger right-swipe (or tapping the done badge) re-opens the viewer immediately
 imageApi.closeImageViewer();
 assert.equal(viewerDialog.isConnected, false);
 assert.equal(resizeDisconnects, 1);
 assert.equal(overlayState.button.dataset.state, "done");
+
+// Single-finger right-swipe is ignored so social media image carousels never conflict
+let prevented = false;
+imageApi.onTouchStart({
+  target: mockImg,
+  touches: [{ identifier: 1, clientX: 40, clientY: 80, target: mockImg }],
+});
+imageApi.onTouchMove({
+  cancelable: true,
+  preventDefault() { prevented = true; },
+  touches: [{ identifier: 1, clientX: 120, clientY: 80, target: mockImg }],
+});
+imageApi.onTouchEnd({
+  cancelable: true,
+  changedTouches: [{ identifier: 1, clientX: 120, clientY: 80, target: mockImg }],
+  touches: [],
+});
+assert.equal(prevented, false);
+assert.equal(overlayState.button.dataset.state, "done");
+
+// Two-finger pinch-out (opposite horizontal movement) is cancelled
+imageApi.onTouchStart({
+  target: mockImg,
+  touches: [
+    { identifier: 1, clientX: 80, clientY: 80, target: mockImg },
+    { identifier: 2, clientX: 120, clientY: 80, target: mockImg },
+  ],
+});
+imageApi.onTouchMove({
+  cancelable: true,
+  preventDefault() { prevented = true; },
+  touches: [
+    { identifier: 1, clientX: 50, clientY: 80, target: mockImg },
+    { identifier: 2, clientX: 160, clientY: 80, target: mockImg },
+  ],
+});
+imageApi.resetTouches();
+assert.equal(prevented, false);
+
+// Staggered two-finger right-swipe (1->2 touchstart, 2->1->0 touchend) triggers image action
+imageApi.onTouchStart({
+  target: mockImg,
+  touches: [{ identifier: 1, clientX: 40, clientY: 70, target: mockImg }],
+});
+imageApi.onTouchStart({
+  target: mockImg,
+  touches: [
+    { identifier: 1, clientX: 42, clientY: 70, target: mockImg },
+    { identifier: 2, clientX: 45, clientY: 110, target: mockImg },
+  ],
+});
+imageApi.onTouchMove({
+  cancelable: true,
+  preventDefault() { prevented = true; },
+  touches: [
+    { identifier: 1, clientX: 110, clientY: 72, target: mockImg },
+    { identifier: 2, clientX: 115, clientY: 112, target: mockImg },
+  ],
+});
+assert.equal(prevented, true);
+assert.equal(overlayState.button.dataset.state, "gesture");
+imageApi.onTouchEnd({
+  cancelable: true,
+  changedTouches: [{ identifier: 1, clientX: 110, clientY: 72, target: mockImg }],
+  touches: [{ identifier: 2, clientX: 115, clientY: 112, target: mockImg }],
+});
+imageApi.onTouchEnd({
+  cancelable: true,
+  changedTouches: [{ identifier: 2, clientX: 115, clientY: 112, target: mockImg }],
+  touches: [],
+});
+
+imageApi.closeImageViewer();
+assert.equal(resizeDisconnects, 2);
 
 // Source changes clear completed results, close any open viewer, and hide the idle button again
 const reopenedDialog = imageApi.handleImageSwipe(mockImg);
@@ -2012,7 +2086,7 @@ assert.equal(overlayState.button.dataset.state, "idle");
 assert.equal(overlayState.button.hidden, true);
 assert.equal(overlayState.overlay.hidden, true);
 assert.equal(overlayState.result, null);
-assert.equal(resizeDisconnects, 2);
+assert.equal(resizeDisconnects, 3);
 delete context.ResizeObserver;
 
 // Ignore an old response even if it arrives before the source-change observer runs.

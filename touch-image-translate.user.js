@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Touch Image Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.4
-// @description  Swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
+// @version      0.1.5
+// @description  Two-finger swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
 // @author       HAKU
 // @match        *://*/*
 // @run-at       document-idle
@@ -29,7 +29,9 @@
   const SWIPE_FLICK_MIN_X = 24;
   const SWIPE_INTENT_PX = 16;
   const SWIPE_SCROLL_PX = 24;
+  const SWIPE_PINCH_MAX_PX = 48;
   const SWIPE_PROJECTION_MS = 90;
+  const TWO_FINGER_JOIN_MS = 300;
   const SAFARI_EDGE_X = 12;
 
   const IMAGE_MIN_WIDTH = 120;
@@ -73,6 +75,9 @@
   const trackedImages = new Set();
   const structuredOutputFallbackModels = new Set();
   let activeImageViewer = null;
+  let swipe = null;
+  let firstTouch = null;
+  let lastSwipeCommitAt = 0;
 
   function normalizeText(value) {
     return String(value || "")
@@ -824,6 +829,9 @@
       mergeDenseImageRegions,
       normalizeImageRegion,
       normalizeText,
+      onTouchEnd,
+      onTouchMove,
+      onTouchStart,
       openImageViewer,
       parseImageTranslation,
       parseImportedSettings,
@@ -832,6 +840,7 @@
       projectedSwipeX,
       removeImageTranslation,
       requestImageTranslation,
+      resetTouches,
       resolveTargetImage,
       retryDelayFor,
       setActiveImageRegion,
@@ -1785,7 +1794,7 @@
     const labels = {
       done: "View image translation",
       error: "Retry image translation",
-      gesture: "Swipe right to translate image",
+      gesture: "Two-finger swipe right to translate image",
       idle: "Translate image",
       loading: "Cancel image translation",
     };
@@ -2889,9 +2898,6 @@
     handleImageSwipe(img);
   }
 
-  let swipe = null;
-  let lastSwipeCommitAt = 0;
-
   function restoreImageGestureIndicator(gesture) {
     const img = gesture?.img;
     if (!img) return;
@@ -2915,17 +2921,85 @@
 
   function resetTouches() {
     clearSwipe();
+    firstTouch = null;
+  }
+
+  function updateSwipeTouches(gesture, touchList) {
+    let matched = 0;
+    for (const slot of gesture.touches) {
+      const touch = pointFor(touchList, slot.identifier);
+      if (touch) {
+        slot.x = touch.clientX;
+        slot.y = touch.clientY;
+        matched += 1;
+      }
+    }
+    return matched;
+  }
+
+  function swipeMetrics(gesture) {
+    const [a, b] = gesture.touches;
+    const dxA = a.x - a.startX;
+    const dxB = b.x - b.startX;
+    const dyA = a.y - a.startY;
+    const dyB = b.y - b.startY;
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    return {
+      dx: Math.min(dxA, dxB),
+      dy: Math.abs(dyA) >= Math.abs(dyB) ? dyA : dyB,
+      pinchDelta: Math.abs(dist - gesture.startDist),
+    };
   }
 
   function onTouchStart(event) {
-    if (event.touches?.length !== 1) {
+    const count = event.touches?.length || 0;
+    const now = Date.now();
+    if (count === 1) {
       clearSwipe();
+      const touch = event.touches[0];
+      firstTouch = touch
+        ? {
+            at: now,
+            identifier: touch.identifier,
+            x: touch.clientX,
+            y: touch.clientY,
+          }
+        : null;
       return;
     }
-    const touch = event.touches[0];
-    if (!touch || touch.clientX < SAFARI_EDGE_X) {
-      clearSwipe();
+    if (count !== 2) {
+      resetTouches();
       return;
+    }
+    const [touchA, touchB] = event.touches;
+    if (
+      !touchA ||
+      !touchB ||
+      touchA.clientX < SAFARI_EDGE_X ||
+      touchB.clientX < SAFARI_EDGE_X
+    ) {
+      resetTouches();
+      return;
+    }
+    if (firstTouch) {
+      const prior =
+        firstTouch.identifier === touchA.identifier
+          ? touchA
+          : firstTouch.identifier === touchB.identifier
+            ? touchB
+            : null;
+      const stale =
+        now - firstTouch.at > TWO_FINGER_JOIN_MS ||
+        (prior &&
+          Math.hypot(
+            prior.clientX - firstTouch.x,
+            prior.clientY - firstTouch.y,
+          ) > SWIPE_INTENT_PX);
+      firstTouch = null;
+      if (stale) {
+        clearSwipe();
+        return;
+      }
     }
     const rawTarget =
       event.composedPath?.().find((node) => node instanceof Element) ||
@@ -2939,15 +3013,23 @@
       clearSwipe();
       return;
     }
-    const img = resolveTargetImage(rawTarget, touch);
+    const targetA =
+      touchA.target && typeof touchA.target === "object"
+        ? touchA.target
+        : rawTarget;
+    const targetB =
+      touchB.target && typeof touchB.target === "object"
+        ? touchB.target
+        : rawTarget;
+    const imgA = resolveTargetImage(targetA, touchA);
+    const imgB = resolveTargetImage(targetB, touchB);
+    const img = imgA && imgA === imgB ? imgA : null;
     const control = rawTarget?.closest?.("input, textarea, select, button");
     if (
       !img ||
       (control &&
         !control.classList?.contains?.(IMAGE_BUTTON_CLASS) &&
-        !control.contains?.(img)) ||
-      canConsumeRightSwipe(rawTarget || img) ||
-      (rawTarget !== img && canConsumeRightSwipe(img))
+        !control.contains?.(img))
     ) {
       clearSwipe();
       return;
@@ -2958,7 +3040,6 @@
     }
     const state = ensureImageOverlay(img);
     const currentState = state?.button?.dataset?.state || "idle";
-    const now = Date.now();
     swipe = {
       action: state?.job
         ? "cancel"
@@ -2969,23 +3050,46 @@
             : "translate",
       at: now,
       buttonState: currentState,
-      identifier: touch.identifier,
       img,
       phase: "possible",
       ready: false,
-      samples: [{ at: now, x: touch.clientX }],
-      x: touch.clientX,
-      y: touch.clientY,
+      samples: [{ at: now, x: 0 }],
+      startDist: Math.hypot(
+        touchA.clientX - touchB.clientX,
+        touchA.clientY - touchB.clientY,
+      ),
+      touches: [
+        {
+          identifier: touchA.identifier,
+          startX: touchA.clientX,
+          startY: touchA.clientY,
+          x: touchA.clientX,
+          y: touchA.clientY,
+        },
+        {
+          identifier: touchB.identifier,
+          startX: touchB.clientX,
+          startY: touchB.clientY,
+          x: touchB.clientX,
+          y: touchB.clientY,
+        },
+      ],
     };
   }
 
   function onTouchMove(event) {
     if (!swipe) return;
-    const touch = pointFor(event.touches, swipe.identifier);
-    if (!touch) return;
-    const dx = touch.clientX - swipe.x;
-    const dy = touch.clientY - swipe.y;
+    const matched = updateSwipeTouches(swipe, event.touches);
+    if (!matched || (matched < 2 && swipe.phase !== "horizontal")) {
+      clearSwipe();
+      return;
+    }
+    const { dx, dy, pinchDelta } = swipeMetrics(swipe);
     if (swipe.phase === "possible") {
+      if (pinchDelta > SWIPE_PINCH_MAX_PX) {
+        clearSwipe();
+        return;
+      }
       const intent = swipeIntent(dx, dy);
       if (intent === "horizontal") {
         swipe.phase = "horizontal";
@@ -2995,10 +3099,10 @@
       }
     }
     if (swipe.phase !== "horizontal") return;
-    if (event.cancelable) event.preventDefault();
+    if (event.cancelable) event.preventDefault?.();
     event.stopPropagation?.();
     const now = Date.now();
-    const velocityX = recordSwipeSample(swipe, touch.clientX, now);
+    const velocityX = recordSwipeSample(swipe, dx, now);
     swipe.ready = swipeShouldCommit(dx, velocityX, swipe.ready);
     setImageButtonState(
       swipe.img,
@@ -3011,25 +3115,31 @@
   }
 
   function onTouchEnd(event) {
-    if (!swipe || event.touches?.length) return;
-    const gesture = swipe;
-    swipe = null;
-    const touch = pointFor(event.changedTouches, gesture.identifier);
-    if (!touch) {
-      restoreImageGestureIndicator(gesture);
+    if (!event.touches?.length) firstTouch = null;
+    if (!swipe) return;
+    updateSwipeTouches(swipe, event.touches);
+    updateSwipeTouches(swipe, event.changedTouches);
+    const { dx, dy, pinchDelta } = swipeMetrics(swipe);
+    const now = Date.now();
+    const velocityX = recordSwipeSample(swipe, dx, now);
+    if (swipe.phase === "possible" && pinchDelta <= SWIPE_PINCH_MAX_PX) {
+      swipe.phase = swipeIntent(dx, dy);
+    }
+    if (event.touches?.length) {
+      if (swipe.phase !== "horizontal") {
+        clearSwipe();
+      } else {
+        swipe.ready = swipeShouldCommit(dx, velocityX, swipe.ready);
+      }
       return;
     }
-    const dx = touch.clientX - gesture.x;
-    const now = Date.now();
-    const velocityX = recordSwipeSample(gesture, touch.clientX, now);
-    if (gesture.phase === "possible") {
-      gesture.phase = swipeIntent(dx, touch.clientY - gesture.y);
-    }
+    const gesture = swipe;
+    swipe = null;
     if (
       gesture.phase === "horizontal" &&
       swipeShouldCommit(dx, velocityX, gesture.ready)
     ) {
-      if (event.cancelable) event.preventDefault();
+      if (event.cancelable) event.preventDefault?.();
       event.stopPropagation?.();
       lastSwipeCommitAt = now;
       handleImageSwipe(gesture.img);

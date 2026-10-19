@@ -3,7 +3,7 @@
 A private, touch-first bilingual translation userscript suite for iOS Safari and Tampermonkey:
 
 - **[Touch Translate (`touch-translate.user.js`)](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-translate.user.js)** — Pure text translation via right-swipe on paragraphs and four-finger tap for full-page translation. Keeps the source DOM intact and inserts each translation as a clearly separated block below the original.
-- **[Touch Image Translate (`touch-image-translate.user.js`)](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-image-translate.user.js)** — Standalone Babel Lens image translation userscript triggered by swiping right on an image, featuring dense macro-block merging, Spotlight Mode, and a full-screen zoomable lightbox viewer.
+- **[Touch Image Translate (`touch-image-translate.user.js`)](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-image-translate.user.js)** — Standalone Babel Lens image translation userscript triggered by a two-finger right-swipe on an image, featuring dense macro-block merging, Spotlight Mode, and a full-screen zoomable lightbox viewer.
 
 ## Text Translation (`touch-translate.user.js`)
 
@@ -21,9 +21,9 @@ YouTube comment text is recognized on both desktop and mobile pages, including m
 
 ## Image Translation (`touch-image-translate.user.js`)
 
-- **Right-Swipe on an Image**: Swipe right on any content image (`>= 120×90px`) to translate visible text in the image. Idle images have **zero floating buttons**, keeping your view completely unobstructed while browsing. Transparent links within the same image card work even when the image itself cannot receive touches; opaque notices and text overlays are ignored.
+- **Two-Finger Right-Swipe on an Image**: Swipe right with two fingers on any content image (`>= 120×90px`) to translate visible text in the image without conflicting with single-finger social media image carousels. Idle images have **zero floating buttons**, keeping your view completely unobstructed while browsing. Transparent links within the same image card work even when the image itself cannot receive touches; opaque notices and text overlays are ignored.
 - **Macro-Block Merging**: Dense text (paragraphs, consecutive list items, speech bubbles, UI panels, or multi-line sections) is grouped into coarse logical regions with internal line breaks (`\n`) rather than boxing individual lines.
-- **Full-Screen Zoomable Viewer**: When translation completes, a dedicated full-screen viewer opens automatically. Pinch to zoom (`1x`–`5x`), drag to pan, or double-tap to zoom (`1x` ↔ `2.4x`). Closing the viewer returns immediately to your exact reading position on the page; swiping right on the image again (or tapping its `done` badge) re-opens the viewer from cache without re-requesting the API.
+- **Full-Screen Zoomable Viewer**: When translation completes, a dedicated full-screen viewer opens automatically. Pinch to zoom (`1x`–`5x`), drag to pan, or double-tap to zoom (`1x` ↔ `2.4x`). Closing the viewer returns immediately to your exact reading position on the page; swiping right with two fingers on the image again (or tapping its `done` badge) re-opens the viewer from cache without re-requesting the API.
 - **Spotlight Mode & Floating Sheet**: Unselected regions show only compact numbered badges (`1`, `2`, ...) with no bounding box clutter. Only the active region illuminates its full amber bounding box (`#f59e0b`) and displays its translation in the bottom floating card, with `Prev` / `Next` navigation, an `All (N)` expandable list of all regions, and a `Hide pins` toggle to inspect the raw image.
 
 Region pins keep a readable size and a 44px touch area while zooming, and follow the displayed image when the screen rotates.
