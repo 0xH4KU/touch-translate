@@ -2052,6 +2052,22 @@ imageApi.onTouchStart({
     { identifier: 2, clientX: 45, clientY: 110, target: mockImg },
   ],
 });
+let gesturePrevented = false;
+imageApi.onGesture({
+  cancelable: true,
+  preventDefault() { gesturePrevented = true; },
+});
+assert.equal(gesturePrevented, true);
+imageApi.onTouchMove({
+  cancelable: true,
+  preventDefault() { prevented = true; },
+  touches: [
+    { identifier: 1, clientX: 46, clientY: 70, target: mockImg },
+    { identifier: 2, clientX: 49, clientY: 110, target: mockImg },
+  ],
+});
+assert.equal(prevented, true);
+prevented = false;
 imageApi.onTouchMove({
   cancelable: true,
   preventDefault() { prevented = true; },

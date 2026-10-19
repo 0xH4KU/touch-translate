@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Image Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.5
+// @version      0.1.6
 // @description  Two-finger swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
 // @author       HAKU
 // @match        *://*/*
@@ -829,6 +829,7 @@
       mergeDenseImageRegions,
       normalizeImageRegion,
       normalizeText,
+      onGesture,
       onTouchEnd,
       onTouchMove,
       onTouchStart,
@@ -2947,8 +2948,13 @@
     return {
       dx: Math.min(dxA, dxB),
       dy: Math.abs(dyA) >= Math.abs(dyB) ? dyA : dyB,
+      opposite: (dxA < -6 && dxB > 6) || (dxA > 6 && dxB < -6),
       pinchDelta: Math.abs(dist - gesture.startDist),
     };
+  }
+
+  function onGesture(event) {
+    if (swipe && event.cancelable) event.preventDefault?.();
   }
 
   function onTouchStart(event) {
@@ -3084,9 +3090,9 @@
       clearSwipe();
       return;
     }
-    const { dx, dy, pinchDelta } = swipeMetrics(swipe);
+    const { dx, dy, opposite, pinchDelta } = swipeMetrics(swipe);
     if (swipe.phase === "possible") {
-      if (pinchDelta > SWIPE_PINCH_MAX_PX) {
+      if (opposite || pinchDelta > SWIPE_PINCH_MAX_PX) {
         clearSwipe();
         return;
       }
@@ -3098,8 +3104,8 @@
         return;
       }
     }
-    if (swipe.phase !== "horizontal") return;
     if (event.cancelable) event.preventDefault?.();
+    if (swipe.phase !== "horizontal") return;
     event.stopPropagation?.();
     const now = Date.now();
     const velocityX = recordSwipeSample(swipe, dx, now);
@@ -3180,6 +3186,14 @@
     touchTarget.addEventListener?.("touchcancel", resetTouches, {
       capture: true,
       passive: true,
+    });
+    touchTarget.addEventListener?.("gesturestart", onGesture, {
+      capture: true,
+      passive: false,
+    });
+    touchTarget.addEventListener?.("gesturechange", onGesture, {
+      capture: true,
+      passive: false,
     });
     document.addEventListener?.(
       "click",
