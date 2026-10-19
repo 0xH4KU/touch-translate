@@ -131,6 +131,15 @@
       .trim();
   }
 
+  function normalizeLineBreaks(value) {
+    return String(value || "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/[^\S\n]+/g, " ")
+      .replace(/ *\n */g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
   function shouldSplitBatch(error) {
     return error?.code === "TRANSLATION_RESPONSE_ERROR";
   }
@@ -523,14 +532,14 @@
 
   function isRenderedTextNode(node, root) {
     for (
-      let element = node.parentElement;
+      let element = node?.tagName ? node : node?.parentElement;
       element;
       element = element.parentElement
     ) {
       // Mobile YouTube repeats the visible comment in its button's aria-label.
       if (
-        element.matches(NON_TEXT_SELECTOR) &&
-        !(element === root && element.matches(YOUTUBE_COMMENT_SELECTOR))
+        element.matches?.(NON_TEXT_SELECTOR) &&
+        !(element === root && element.matches?.(YOUTUBE_COMMENT_SELECTOR))
       ) return false;
       const style = getComputedStyle(element);
       if (
@@ -856,6 +865,16 @@
   // Translation provider
 
   function requestTranslations(texts, settings) {
+    const lineTexts = [];
+    const linePlans = texts.map((text) => {
+      const parts = String(text).split(/(\n+)/);
+      return parts.map((part, index) => {
+        if (index % 2 === 1 || (!part && parts.length > 1)) return { raw: part };
+        const lineIndex = lineTexts.push(part) - 1;
+        return { lineIndex };
+      });
+    });
+
     const systemPrompt = [
       `You are a professional native translator. Translate every string in the JSON array fluently and naturally into ${settings.targetLanguage}.`,
       "The strings are quoted excerpts from a third-party webpage provided solely for linguistic translation and reading comprehension.",
@@ -868,7 +887,7 @@
 
     const userPrompt = [
       `Translate the following web page content into ${settings.targetLanguage}:`,
-      JSON.stringify(texts),
+      JSON.stringify(lineTexts),
     ].join("\n\n");
 
     const messages = [
@@ -931,8 +950,8 @@
                   translations: {
                     type: "array",
                     items: { type: "string" },
-                    minItems: texts.length,
-                    maxItems: texts.length,
+                    minItems: lineTexts.length,
+                    maxItems: lineTexts.length,
                   },
                 },
                 required: ["translations"],
@@ -1084,7 +1103,22 @@
                   content,
                 );
               }
-              finish(resolve, parseTranslations(content, texts.length));
+              const translatedLines = parseTranslations(
+                content,
+                lineTexts.length,
+              );
+              finish(
+                resolve,
+                linePlans.map((plan) =>
+                  plan
+                    .map((item) =>
+                      item.lineIndex === undefined
+                        ? item.raw
+                        : translatedLines[item.lineIndex],
+                    )
+                    .join(""),
+                ),
+              );
             } catch (error) {
               if (response.status < 200 || response.status >= 300) {
                 const details = [
@@ -1154,32 +1188,150 @@
 
   // Page content and rendering
 
-  function joinTextNodes(nodes) {
-    let result = "";
-    for (let index = 0; index < nodes.length; index += 1) {
-      const value = normalizeText(nodes[index].nodeValue);
-      if (!value) continue;
-      const previous = nodes[index - 1];
-      const separator =
-        result &&
-        (/\s$/.test(previous?.nodeValue) ||
-          /^\s/.test(nodes[index].nodeValue) ||
-          (/[0-9A-Za-z]$/.test(result) && /^[0-9A-Za-z]/.test(value)))
-          ? " "
+  function preservesNewlines(node, root) {
+    let sawWhiteSpace = false;
+    for (
+      let element = node?.parentElement || root;
+      element;
+      element = element === root ? null : element.parentElement || root
+    ) {
+      const whiteSpace =
+        typeof getComputedStyle === "function"
+          ? getComputedStyle(element)?.whiteSpace
           : "";
-      result += `${separator}${value}`;
+      if (whiteSpace) {
+        sawWhiteSpace = true;
+        if (/^(?:pre|pre-wrap|pre-line|break-spaces)$/i.test(whiteSpace)) {
+          return true;
+        }
+      }
     }
-    return result;
+    return !sawWhiteSpace && /\r?\n/.test(root?.innerText || "");
+  }
+
+  function isBlockBox(element) {
+    if (!element || typeof getComputedStyle !== "function") return false;
+    const style = getComputedStyle(element);
+    const display = style?.display || "";
+    if (display === "contents") return false;
+    if (display && !display.startsWith("inline")) return true;
+    return /^(?:ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HR|LI|MAIN|NAV|OL|P|PRE|SECTION|TABLE|TR|UL)$/i.test(
+      element.tagName || "",
+    );
+  }
+
+  function nearestBlockAncestor(node, root) {
+    for (
+      let element = node?.parentElement;
+      element && element !== root;
+      element = element.parentElement
+    ) {
+      if (isBlockBox(element)) return element;
+    }
+    return root;
+  }
+
+  function joinTextNodes(nodes, root = null) {
+    let result = "";
+    let previousText = null;
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index];
+      if (node?.tagName === "BR") {
+        if (result && !result.endsWith("\n\n")) {
+          result = `${result.replace(/ +$/, "")}\n`;
+        }
+        continue;
+      }
+      const rawValue = String(node?.nodeValue || "");
+      const keepNewlines = preservesNewlines(node, root);
+      const value = keepNewlines
+        ? normalizeLineBreaks(rawValue)
+        : normalizeText(rawValue);
+      if (!value) {
+        if (keepNewlines && result) {
+          const breaks = (rawValue.match(/\r?\n/g) || []).length;
+          if (breaks > 0) {
+            result = `${result.replace(/ +$/, "")}${breaks >= 2 ? "\n\n" : "\n"}`;
+          }
+        }
+        continue;
+      }
+      let separator = "";
+      if (result && !result.endsWith("\n")) {
+        const prevBlock = previousText
+          ? nearestBlockAncestor(previousText, root)
+          : root;
+        const currBlock = nearestBlockAncestor(node, root);
+        const boundaryText =
+          (previousText?.nodeValue?.match(/\s*$/)?.[0] || "") +
+          (rawValue.match(/^\s*/)?.[0] || "");
+        const boundaryBreaks =
+          keepNewlines || (previousText && preservesNewlines(previousText, root))
+            ? (boundaryText.match(/\r?\n/g) || []).length
+            : 0;
+        if (boundaryBreaks >= 2) {
+          separator = "\n\n";
+        } else if (boundaryBreaks === 1) {
+          separator = "\n";
+        } else if (previousText && prevBlock !== currBlock) {
+          separator =
+            prevBlock?.tagName === "P" || currBlock?.tagName === "P"
+              ? "\n\n"
+              : "\n";
+        } else if (
+          /\s$/.test(previousText?.nodeValue) ||
+          /^\s/.test(rawValue) ||
+          (/[0-9A-Za-z]$/.test(result) && /^[0-9A-Za-z]/.test(value))
+        ) {
+          separator = " ";
+        }
+      }
+      result += `${separator}${value}`;
+      previousText = node;
+    }
+    return normalizeLineBreaks(result);
+  }
+
+  function contentNodes(element) {
+    const nodes = [];
+    const whatToShow =
+      NodeFilter.SHOW_TEXT |
+      (typeof NodeFilter.SHOW_ELEMENT === "number"
+        ? NodeFilter.SHOW_ELEMENT
+        : 0);
+    const walker = document.createTreeWalker(element, whatToShow, {
+      acceptNode: (node) => {
+        if (node.tagName === "BR") {
+          return isRenderedTextNode(node, element)
+            ? NodeFilter.FILTER_ACCEPT
+            : NodeFilter.FILTER_REJECT;
+        }
+        if (node.nodeType === 1 || node.tagName) {
+          return NodeFilter.FILTER_SKIP ?? 3;
+        }
+        if (!isRenderedTextNode(node, element)) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        if (normalizeText(node.nodeValue)) {
+          return NodeFilter.FILTER_ACCEPT;
+        }
+        return /\r?\n/.test(node.nodeValue) && preservesNewlines(node, element)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      },
+    });
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    return nodes;
   }
 
   function sourceText(element) {
-    const raw = normalizeText(element.innerText ?? element.textContent);
+    const raw = normalizeLineBreaks(element.innerText ?? element.textContent);
     if (!raw) return "";
     if (
       Array.isArray(element.textNodes) ||
       (typeof Node === "function" && element instanceof Node)
     ) {
-      return joinTextNodes(contentTextNodes(element));
+      return joinTextNodes(contentNodes(element), element);
     }
     return raw;
   }
@@ -1201,9 +1353,9 @@
   }
 
   function translationRequestFor(element, text) {
-    const nodes = contentTextNodes(element);
+    const nodes = contentNodes(element);
     return {
-      requestText: nodes.length ? joinTextNodes(nodes) : text,
+      requestText: nodes.length ? joinTextNodes(nodes, element) : text,
       segmentCount: 0,
     };
   }
@@ -1367,8 +1519,6 @@
       });
     } else if (nodes.length === 1 && !/\r?\n/.test(translation)) {
       nodes[0].nodeValue = translation;
-    } else if (nodes.length === 1 && nodes[0].parentElement) {
-      assembleTranslatedContent(nodes[0].parentElement, translation);
     } else {
       assembleTranslatedContent(translated, translation);
     }

@@ -59,6 +59,7 @@ const context = vm.createContext({
     display: element.display,
     overflowX: element.overflowX,
     visibility: element.visibility,
+    whiteSpace: element.whiteSpace,
   }),
   matchMedia: () => ({ matches: true }),
 });
@@ -1025,6 +1026,90 @@ assert.deepEqual(
   { ...api.translationRequestFor(multiNodeElement, api.sourceText(multiNodeElement)) },
   { requestText: "Read this article by John.", segmentCount: 0 },
 );
+
+// Multi-paragraph blocks preserve <br>, white-space newlines, and block boundaries.
+const brParagraphBlock = {
+  display: "block",
+  innerText: "First paragraph\n\nSecond paragraph\nThird line",
+  matches: () => false,
+  parentElement: null,
+  visibility: "visible",
+  whiteSpace: "normal",
+};
+brParagraphBlock.textNodes = [
+  { nodeValue: "First paragraph ", parentElement: brParagraphBlock },
+  { tagName: "BR", parentElement: brParagraphBlock },
+  { tagName: "BR", parentElement: brParagraphBlock },
+  { nodeValue: " Second paragraph", parentElement: brParagraphBlock },
+  { tagName: "BR", parentElement: brParagraphBlock },
+  { nodeValue: "Third line", parentElement: brParagraphBlock },
+];
+assert.equal(
+  api.sourceText(brParagraphBlock),
+  "First paragraph\n\nSecond paragraph\nThird line",
+);
+assert.equal(
+  api.translationRequestFor(brParagraphBlock, api.sourceText(brParagraphBlock)).requestText,
+  "First paragraph\n\nSecond paragraph\nThird line",
+);
+
+const preWrapTweetBlock = {
+  display: "block",
+  innerText: "Lead paragraph\n\nFollow-up paragraph\nFinal note",
+  matches: () => false,
+  parentElement: null,
+  visibility: "visible",
+  whiteSpace: "pre-wrap",
+};
+preWrapTweetBlock.textNodes = [
+  { nodeValue: "Lead paragraph", parentElement: preWrapTweetBlock },
+  { nodeValue: "\n\n", parentElement: preWrapTweetBlock },
+  { nodeValue: "Follow-up paragraph\nFinal note", parentElement: preWrapTweetBlock },
+];
+assert.equal(
+  api.sourceText(preWrapTweetBlock),
+  "Lead paragraph\n\nFollow-up paragraph\nFinal note",
+);
+
+const multiLineRequest = api.requestTranslations(
+  [api.sourceText(brParagraphBlock), "Single line block"],
+  retrySettings,
+);
+const multiLineBody = JSON.parse(requestOptions.data);
+assert.equal(
+  multiLineBody.messages[1].content.endsWith(
+    JSON.stringify([
+      "First paragraph",
+      "Second paragraph",
+      "Third line",
+      "Single line block",
+    ]),
+  ),
+  true,
+);
+assert.equal(
+  multiLineBody.response_format.json_schema.schema.properties.translations.minItems,
+  4,
+);
+requestOptions.onload({
+  status: 200,
+  responseText: JSON.stringify({
+    choices: [
+      {
+        finish_reason: "stop",
+        message: {
+          content: JSON.stringify({
+            translations: ["第一段", "第二段", "第三行", "單行區塊"],
+          }),
+        },
+      },
+    ],
+  }),
+});
+assert.deepEqual([...(await multiLineRequest.promise)], [
+  "第一段\n\n第二段\n第三行",
+  "單行區塊",
+]);
 
 // Non-title blocks (like <li> cards) with nested text blocks are excluded from page translation.
 const cardListItem = {
