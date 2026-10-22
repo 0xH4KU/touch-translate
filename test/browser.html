@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Touch Translate browser checks</title>
+<style>body{font:16px/1.5 system-ui;padding:20px}main{max-width:700px}img{width:320px;height:240px;display:block}pre{white-space:pre-wrap}</style>
+<main><article></article></main>
+<pre id="results" data-touch-translate-ui>Running browser checks…</pre>
+<script type="module">
+  import { runBrowserChecks } from "./browser.js";
+  const sources = await Promise.all(["../touch-translate.user.js", "../touch-image-translate.user.js"].map(async path => {
+    const response = await fetch(path);
+    if (!response.ok) throw new Error(`Could not load ${path}`);
+    return response.text();
+  }));
+  try {
+    window.testResults = await runBrowserChecks(...sources);
+    document.querySelector("#results").textContent = window.testResults.join("\n");
+    document.documentElement.dataset.testState = "passed";
+  } catch (error) {
+    window.testFailure = error.stack;
+    document.querySelector("#results").textContent = error.stack;
+    document.documentElement.dataset.testState = "failed";
+    throw error;
+  }
+</script>
