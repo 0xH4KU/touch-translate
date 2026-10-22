@@ -152,21 +152,36 @@ assert.throws(
   /Expected 2 translations, received 1/,
 );
 const inline = api.parseInlineTranslation(
-  "[[TT0]]A translated lead[[/TT0]] [[TT1]]a colored quote[[/TT1]]",
-  2,
+  "閱讀 <1>John</1> 寫的<0>這篇<2>重要</2>文章</0>。",
+  3,
 );
-assert.equal(inline.translation, "A translated lead a colored quote");
-assert.deepEqual([...inline.segments], [
-  "A translated lead",
-  "a colored quote",
+assert.equal(inline.translation, "閱讀 John 寫的這篇重要文章。");
+assert.deepEqual(JSON.parse(JSON.stringify(inline.segments)), [
+  "閱讀 ",
+  { index: 1, children: ["John"] },
+  " 寫的",
+  {
+    index: 0,
+    children: ["這篇", { index: 2, children: ["重要"] }, "文章"],
+  },
+  "。",
 ]);
 assert.equal(
   api.parseInlineTranslation(
-    "[[TT0]]A translated lead[[/TT0]] [[TT1]]a broken quote",
+    "<0>A translated lead</0> <1>a broken quote",
     2,
   ).segments,
   null,
 );
+assert.equal(
+  api.parseInlineTranslation("<0><1>Crossed</0></1>", 2).segments,
+  null,
+);
+assert.equal(api.isSafeHref("https://example.com/docs"), true);
+assert.equal(api.isSafeHref("/relative/path?x=1#top"), true);
+assert.equal(api.isSafeHref("mailto:test@example.com"), true);
+assert.equal(api.isSafeHref("javascript:alert(1)"), false);
+assert.equal(api.isSafeHref("data:text/html,hi"), false);
 assert.throws(
   () => api.cleanSettings({ baseURL: "http://example.com", model: "m" }),
   /HTTPS/,
@@ -1025,6 +1040,117 @@ assert.equal(api.sourceText(multiNodeElement), "Read this article by John.");
 assert.deepEqual(
   { ...api.translationRequestFor(multiNodeElement, api.sourceText(multiNodeElement)) },
   { requestText: "Read this article by John.", segmentCount: 0 },
+);
+
+// Inline links and styled spans get minimal <0>...</0> tags and assemble in target word order.
+const richParagraph = {
+  display: "block",
+  innerText: "Read this important article by John.",
+  matches: () => false,
+  parentElement: null,
+  visibility: "visible",
+};
+const linkElement = {
+  display: "inline",
+  matches: () => false,
+  parentElement: richParagraph,
+  tagName: "A",
+  visibility: "visible",
+};
+const linkInnerSpan = {
+  display: "inline",
+  matches: () => false,
+  parentElement: linkElement,
+  tagName: "SPAN",
+  visibility: "visible",
+};
+const strongInLink = {
+  display: "inline",
+  matches: () => false,
+  parentElement: linkInnerSpan,
+  tagName: "STRONG",
+  visibility: "visible",
+};
+const coloredAuthor = {
+  display: "inline",
+  matches: () => false,
+  parentElement: richParagraph,
+  tagName: "SPAN",
+  visibility: "visible",
+};
+richParagraph.textNodes = [
+  { nodeValue: "Read ", parentElement: richParagraph },
+  { nodeValue: "this ", parentElement: linkInnerSpan },
+  { nodeValue: "important", parentElement: strongInLink },
+  { nodeValue: " article", parentElement: linkInnerSpan },
+  { nodeValue: " by ", parentElement: richParagraph },
+  { nodeValue: "John", parentElement: coloredAuthor },
+  { nodeValue: ".", parentElement: richParagraph },
+];
+assert.equal(
+  api.sourceText(richParagraph),
+  "Read this important article by John.",
+);
+assert.deepEqual(
+  { ...api.translationRequestFor(richParagraph, api.sourceText(richParagraph)) },
+  {
+    requestText: "Read <0>this <1>important</1> article</0> by <2>John</2>.",
+    segmentCount: 3,
+  },
+);
+
+// A full-block link wrapper needs no <0> marker in the prompt.
+const linkedHeading = {
+  display: "block",
+  innerText: "Full heading link",
+  matches: () => false,
+  parentElement: null,
+  visibility: "visible",
+};
+const headingAnchor = {
+  display: "inline",
+  matches: () => false,
+  parentElement: linkedHeading,
+  tagName: "A",
+  visibility: "visible",
+};
+linkedHeading.textNodes = [
+  { nodeValue: "Full heading link", parentElement: headingAnchor },
+];
+assert.deepEqual(
+  { ...api.translationRequestFor(linkedHeading, api.sourceText(linkedHeading)) },
+  { requestText: "Full heading link", segmentCount: 0 },
+);
+
+// Inline elements containing <br> close before \n and reopen after \n so lines stay balanced.
+const multilineInlineBlock = {
+  display: "block",
+  innerText: "Intro: line one\nline two",
+  matches: () => false,
+  parentElement: null,
+  visibility: "visible",
+};
+const multilineLink = {
+  display: "inline",
+  matches: () => false,
+  parentElement: multilineInlineBlock,
+  tagName: "A",
+  visibility: "visible",
+};
+multilineInlineBlock.textNodes = [
+  { nodeValue: "Intro: ", parentElement: multilineInlineBlock },
+  { nodeValue: "line one", parentElement: multilineLink },
+  { tagName: "BR", parentElement: multilineLink },
+  { nodeValue: "line two", parentElement: multilineLink },
+];
+assert.deepEqual(
+  {
+    ...api.translationRequestFor(
+      multilineInlineBlock,
+      api.sourceText(multilineInlineBlock),
+    ),
+  },
+  { requestText: "Intro: <0>line one</0>\n<1>line two</1>", segmentCount: 2 },
 );
 
 // Multi-paragraph blocks preserve <br>, white-space newlines, and block boundaries.
@@ -2260,5 +2386,132 @@ assert.equal(encodedImageType, "image/png");
 assert.equal(resizedImage.width, 1600);
 assert.equal(resizedImage.height, 400);
 document.createElement = createElementBeforeCanvas;
+
+// Frontend DOM assembly in insertTranslation preserves safe links, colors, and target word order
+function makeRichMockElement(tagName, attrMap = {}, display = "inline") {
+  const store = new Map(Object.entries(attrMap));
+  const classes = new Set(
+    String(attrMap.class || "")
+      .split(/\s+/)
+      .filter(Boolean),
+  );
+  return {
+    tagName: tagName.toUpperCase(),
+    display,
+    visibility: "visible",
+    isConnected: true,
+    parentElement: null,
+    nextElementSibling: null,
+    children: [],
+    textNodes: [],
+    style: { cssText: attrMap.style || "", setProperty() {}, removeProperty() {} },
+    classList: {
+      add: (c) => classes.add(c),
+      contains: (c) => classes.has(c),
+    },
+    get attributes() {
+      return [...store.keys()].map((name) => ({ name }));
+    },
+    getAttribute: (name) => (store.has(name) ? store.get(name) : null),
+    setAttribute: (name, val) => store.set(name, String(val)),
+    removeAttribute: (name) => store.delete(name),
+    matches: () => false,
+    querySelectorAll(sel) {
+      if (sel.includes("script")) return [];
+      const all = [];
+      const walk = (el) => {
+        for (const ch of el.children || []) {
+          if (ch && typeof ch === "object" && ch.tagName) {
+            all.push(ch);
+            walk(ch);
+          }
+        }
+      };
+      walk(this);
+      return all;
+    },
+    append(...items) {
+      for (const item of items) {
+        if (item && typeof item === "object") item.parentElement = this;
+        this.children.push(item);
+      }
+    },
+    replaceChildren(...items) {
+      this.children = [];
+      this.append(...items);
+    },
+    cloneNode(deep = false) {
+      const copyAttrs = Object.fromEntries(store.entries());
+      const copy = makeRichMockElement(this.tagName, copyAttrs, this.display);
+      if (deep) {
+        const clonedMap = new Map([[this, copy]]);
+        for (const ch of this.children) {
+          const chCopy = ch.cloneNode(true);
+          chCopy.parentElement = copy;
+          copy.children.push(chCopy);
+          clonedMap.set(ch, chCopy);
+        }
+        copy.textNodes = this.textNodes.map((tn) => ({
+          ...tn,
+          parentElement: clonedMap.get(tn.parentElement) || copy,
+        }));
+      }
+      return copy;
+    },
+    insertAdjacentElement(_pos, el) {
+      this.nextElementSibling = el;
+      el.isConnected = true;
+    },
+  };
+}
+
+const sourcePara = makeRichMockElement("p", {}, "block");
+const safeLink = makeRichMockElement("a", {
+  href: "https://example.com/guide",
+  target: "_blank",
+  onclick: "evil()",
+});
+const coloredSpan = makeRichMockElement("span", {
+  style: "color: rgb(225, 29, 72)",
+  class: "highlight-author",
+});
+const unsafeLink = makeRichMockElement("a", {
+  href: "javascript:alert(1)",
+});
+sourcePara.append(safeLink, coloredSpan, unsafeLink);
+sourcePara.textNodes = [
+  { nodeValue: "Read ", parentElement: sourcePara },
+  { nodeValue: "this guide", parentElement: safeLink },
+  { nodeValue: " by ", parentElement: sourcePara },
+  { nodeValue: "Alice", parentElement: coloredSpan },
+  { nodeValue: " or ", parentElement: sourcePara },
+  { nodeValue: "click", parentElement: unsafeLink },
+  { nodeValue: ".", parentElement: sourcePara },
+];
+const parsedRich = api.parseInlineTranslation(
+  "閱讀 <1>愛麗絲</1> 撰寫的<0>這份指南</0>或<2>點擊</2>。",
+  3,
+);
+api.insertTranslation(sourcePara, parsedRich);
+const insertedPara = sourcePara.nextElementSibling;
+assert.ok(insertedPara);
+assert.equal(insertedPara.children.length, 7);
+assert.equal(insertedPara.children[0], "閱讀 ");
+assert.equal(insertedPara.children[1].tagName, "SPAN");
+assert.equal(insertedPara.children[1].getAttribute("style"), "color: rgb(225, 29, 72)");
+assert.equal(insertedPara.children[1].getAttribute("class"), "highlight-author");
+assert.deepEqual(insertedPara.children[1].children, ["愛麗絲"]);
+assert.equal(insertedPara.children[2], " 撰寫的");
+assert.equal(insertedPara.children[3].tagName, "A");
+assert.equal(insertedPara.children[3].getAttribute("href"), "https://example.com/guide");
+assert.equal(insertedPara.children[3].getAttribute("target"), "_blank");
+assert.equal(insertedPara.children[3].getAttribute("rel"), "noopener noreferrer");
+assert.equal(insertedPara.children[3].getAttribute("onclick"), null);
+assert.deepEqual(insertedPara.children[3].children, ["這份指南"]);
+assert.equal(insertedPara.children[4], "或");
+assert.equal(insertedPara.children[5].tagName, "A");
+assert.equal(insertedPara.children[5].getAttribute("href"), null);
+assert.deepEqual(insertedPara.children[5].children, ["點擊"]);
+assert.equal(insertedPara.children[6], "。");
 
 console.log("Touch Translate self-check passed");
