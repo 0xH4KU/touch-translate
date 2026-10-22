@@ -1483,6 +1483,46 @@ const separateBlocksJson = JSON.stringify({
 });
 assert.equal(imageApi.parseImageTranslation(separateBlocksJson).regions.length, 6);
 
+// Noise filtering removes UI status bars, handles, URLs, and tiny watermark specks,
+// and macro-block merging also works when <= 5 regions remain.
+const noisyScreenshotJson = JSON.stringify({
+  has_text: true,
+  regions: [
+    { box_2d: [10, 20, 32, 95], translation: "9:41 AM" },
+    { box_2d: [10, 880, 32, 960], translation: "100%" },
+    { box_2d: [80, 100, 115, 280], translation: "@author_handle" },
+    { box_2d: [140, 100, 180, 800], translation: "貼文主體第一行內容" },
+    { box_2d: [186, 100, 226, 790], translation: "貼文主體緊鄰的第二行內容" },
+    { box_2d: [860, 100, 895, 240], translation: "12.5K" },
+    { box_2d: [910, 100, 940, 500], translation: "https://example.com/post" },
+    { box_2d: [980, 900, 985, 970], translation: "微小浮水印" },
+  ],
+});
+const cleanedScreenshot = imageApi.parseImageTranslation(noisyScreenshotJson);
+assert.equal(cleanedScreenshot.hasText, true);
+assert.equal(cleanedScreenshot.regions.length, 1);
+assert.deepEqual([...cleanedScreenshot.regions[0].box_2d], [140, 100, 226, 800]);
+assert.equal(
+  cleanedScreenshot.regions[0].translation,
+  "貼文主體第一行內容\n貼文主體緊鄰的第二行內容",
+);
+assert.equal(
+  cleanedScreenshot.translation,
+  "[1] 貼文主體第一行內容\n貼文主體緊鄰的第二行內容",
+);
+
+const onlyNoiseJson = JSON.stringify({
+  has_text: true,
+  regions: [
+    { box_2d: [10, 20, 30, 80], translation: "9:41" },
+    { box_2d: [50, 60, 80, 200], translation: "@username" },
+  ],
+});
+const emptyAfterFilter = imageApi.parseImageTranslation(onlyNoiseJson);
+assert.equal(emptyAfterFilter.hasText, false);
+assert.equal(emptyAfterFilter.regions.length, 0);
+assert.equal(emptyAfterFilter.translation, "");
+
 const noTextImage = imageApi.parseImageTranslation(
   '{"has_text":false,"regions":[]}',
 );
