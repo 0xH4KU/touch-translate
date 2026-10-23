@@ -123,9 +123,9 @@
 
   function generationConfigFor(settings) {
     const config = { responseMimeType: "application/json" };
-    // Gemini 3.5 Flash-Lite ignores sampling overrides; use thinking for quality.
+    // Gemini 3.5 Flash-Lite ignores sampling overrides; use minimal thinking to avoid safety over-analysis.
     if (/(?:^|\/)gemini-3\.5-flash-lite(?:-|$)/i.test(settings.model)) {
-      config.thinkingConfig = { thinkingLevel: "medium" };
+      config.thinkingConfig = { thinkingLevel: "minimal" };
     } else {
       config.temperature = temperatureFor(settings);
       if (/(?:^|\/)gemini-3\.1-flash-lite(?:-|$)/i.test(settings.model)) {

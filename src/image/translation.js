@@ -1,5 +1,5 @@
   function hashImageCacheKey(imageHash, settings) {
-    return translationCacheKey(imageHash, settings, "image-prompt-v9");
+    return translationCacheKey(imageHash, settings, "image-prompt-v10");
   }
 
   function normalizeImageRegion(value) {

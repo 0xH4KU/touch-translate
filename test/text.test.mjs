@@ -347,9 +347,10 @@ assert.match(
   requestBody.messages[0].content,
   /naturally into zh-TW/,
 );
-assert.doesNotMatch(requestBody.messages[0].content, /\[\[TT0\]\]/);
-assert.doesNotMatch(source, /prompt-v[123]\b/);
-assert.match(source, /prompt-v5/);
+assert.doesNotMatch(requestBody.messages[0].content, /\[\[TT0\]\]|<0>/);
+assert.doesNotMatch(requestBody.messages[0].content, /return it unchanged/i);
+assert.doesNotMatch(source, /prompt-v[12345]\b/);
+assert.match(source, /prompt-v6/);
 assert.equal(
   requestBody.response_format.json_schema.schema.properties.translations.minItems,
   1,
@@ -1047,15 +1048,23 @@ const linkedHeading = {
   parentElement: null,
   visibility: "visible",
 };
+const headingInnerDiv = {
+  display: "block",
+  matches: () => false,
+  parentElement: linkedHeading,
+  tagName: "DIV",
+  visibility: "visible",
+};
 const headingAnchor = {
   display: "inline",
   matches: () => false,
-  parentElement: linkedHeading,
+  parentElement: headingInnerDiv,
   tagName: "A",
   visibility: "visible",
 };
 linkedHeading.textNodes = [
   { nodeValue: "Full heading link", parentElement: headingAnchor },
+  { tagName: "BR", parentElement: headingInnerDiv },
 ];
 assert.deepEqual(
   { ...api.translationRequestFor(linkedHeading, api.sourceText(linkedHeading)) },

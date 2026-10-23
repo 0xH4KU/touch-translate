@@ -263,11 +263,13 @@
             rawTranslation,
             group.segmentCount,
           );
-          cacheEntries[group.key] = {
-            ...result,
-            formatKey: group.formatKey,
-            at: Date.now(),
-          };
+          if (result.translation !== group.text) {
+            cacheEntries[group.key] = {
+              ...result,
+              formatKey: group.formatKey,
+              at: Date.now(),
+            };
+          }
           for (const record of group.entries) {
             const { element, formatKey, job } = record;
             if (pendingJobs.get(element) !== job || job.cancelled) {

@@ -31,7 +31,7 @@ for (const { suite, start, answer } of requests) {
   const native = start(nativeSettings);
   const body = JSON.parse(transport.options.data);
   assert.equal(body.generationConfig.temperature, undefined);
-  assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, "medium");
+  assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, "minimal");
   transport.options.onload({ status: 200, responseText: JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [
     { thought: true, text: "This is not part of the JSON answer." },
     { text: JSON.stringify(answer) },
@@ -80,7 +80,11 @@ for (const { suite, start, answer } of requests) {
   context.GM_xmlhttpRequest = priorTransport;
 }
 
-assert.equal(api.parseInlineTranslation("Use <0> literally; compare x <1> y.", 0).translation, "Use <0> literally; compare x <1> y.");
+assert.equal(api.parseInlineTranslation("<0>Hallucinated wrapper</0> and stray <0> or <1/> tag.", 0).translation, "Hallucinated wrapper and stray  or  tag.");
+assert.deepEqual(
+  JSON.parse(JSON.stringify(api.parseInlineTranslation("閱讀 ＜0＞這篇＜/0＞ 文章", 1).segments)),
+  ["閱讀 ", { index: 0, children: ["這篇"] }, " 文章"],
+);
 const lostParagraphs = api.requestTranslations(["First paragraph.\n\nSecond paragraph."], settings);
 transport.options.onload({ status: 200, responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"translations":["Two paragraphs collapsed into one."]}' } }] }) });
 await assert.rejects(lostParagraphs.promise, /did not preserve paragraph and line breaks/);

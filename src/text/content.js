@@ -81,6 +81,16 @@
     return root;
   }
 
+  function isBareSpan(element) {
+    return (
+      element?.tagName === "SPAN" &&
+      typeof element.getAttribute === "function" &&
+      !element.getAttribute("style") &&
+      !element.getAttribute("class") &&
+      !element.className
+    );
+  }
+
   function inlineAncestors(node, root) {
     const stop = nearestBlockAncestor(node, root);
     const chain = [];
@@ -89,7 +99,7 @@
       element && element !== stop && element !== root;
       element = element.parentElement
     ) {
-      if (!isBlockBox(element)) chain.unshift(element);
+      if (!isBlockBox(element) && !isBareSpan(element)) chain.unshift(element);
     }
     return { chain, stop };
   }
@@ -130,12 +140,14 @@
       };
     }
 
+    const stopBlock = textEntries[0].stop;
+    const singleStop = entries.every((entry) => entry.stop === stopBlock);
     let commonPrefix = 0;
-    if (entries.every((entry) => entry.stop === element)) {
-      const firstChain = entries[0].chain;
+    if (singleStop) {
+      const firstChain = textEntries[0].chain;
       while (
         commonPrefix < firstChain.length &&
-        entries.every(
+        textEntries.every(
           (entry) => entry.chain[commonPrefix] === firstChain[commonPrefix],
         )
       ) {
@@ -143,7 +155,11 @@
       }
     }
     const container =
-      commonPrefix > 0 ? entries[0].chain[commonPrefix - 1] : element;
+      commonPrefix > 0
+        ? textEntries[0].chain[commonPrefix - 1]
+        : singleStop
+          ? stopBlock
+          : element;
 
     const counts = new Map();
     for (const entry of textEntries) {
@@ -286,11 +302,13 @@
     closeOpenUnits(0);
 
     const plainText = normalizeLineBreaks(plainResult);
+    const taggedText = normalizeLineBreaks(taggedResult);
     // shortcut: skip inline tagging past 16 segments or literal <N> text, upgrade if rich-text tables need higher limits
     if (
       !wrappers.length ||
       wrappers.length > 16 ||
-      /<\/?\d+>/.test(plainText)
+      /<\/?\d+>/.test(plainText) ||
+      (wrappers.length === 1 && taggedText === `<0>${plainText}</0>`)
     ) {
       return {
         container,
@@ -302,7 +320,7 @@
     return {
       container,
       plainText,
-      requestText: normalizeLineBreaks(taggedResult),
+      requestText: taggedText,
       wrappers,
     };
   }
@@ -560,6 +578,18 @@
       "for",
     ]);
     for (const element of [translated, ...translated.querySelectorAll("*")]) {
+      if (
+        element !== translated &&
+        element.tagName?.includes("-") &&
+        typeof element.replaceWith === "function"
+      ) {
+        const span = document.createElement("span");
+        span.className = element.className;
+        span.style.cssText = element.style.cssText;
+        span.append(...Array.from(element.childNodes || []));
+        element.replaceWith(span);
+        continue;
+      }
       const keepLink =
         element.tagName === "A" && isSafeHref(element.getAttribute("href"));
       for (const attribute of Array.from(element.attributes || [])) {

@@ -3,7 +3,7 @@
   }
 
   function hashCacheKey(text, settings) {
-    return translationCacheKey(text, settings, "prompt-v5");
+    return translationCacheKey(text, settings, "prompt-v6");
   }
 
   function makeBatches(records, prioritizeFirst = false) {
@@ -129,10 +129,15 @@
   }
 
   function parseInlineTranslation(value, expectedSegments = 0) {
-    const raw = String(value || "").trim();
+    const raw = String(value || "")
+      .trim()
+      .replace(
+        /[<＜]\s*(\/?)\s*(\d+)\s*(\/?)\s*[>＞]/g,
+        (_, closing, id, selfClosing) => (selfClosing ? "" : `<${closing}${id}>`),
+      );
     const tagPattern = /<(\/?)(\d+)>/g;
-    if (!expectedSegments) return { translation: raw, segments: null };
     const translation = raw.replace(tagPattern, "").trim();
+    if (!expectedSegments) return { translation, segments: null };
 
     const root = [];
     const stack = [{ index: -1, children: root }];
@@ -199,12 +204,17 @@
   }
 
   function requestTranslations(texts, settings) {
+    const hasInlineTags = texts.some((text) => /<\d+>/.test(text));
     const systemPrompt = [
       translationRulesFor(settings.targetLanguage),
-      "Each input string is a complete text block. Read the whole block before translating; use related blocks only as context for terminology and references.",
+      `Translate every input string completely into ${settings.targetLanguage}, including foreign-language parts in mixed-language blocks and converting script variants (such as Simplified Chinese to zh-TW).`,
+      "Each input string is a complete text block. Read the whole block before translating; use neighboring blocks only for terminology and pronoun consistency.",
       "Preserve paragraph breaks and line breaks within each block. Keep content in its original array slot; never merge, split, or move content between slots.",
-      "Preserve exact numbered tags like <0>...</0> around the corresponding translated phrases, keeping them balanced and moving them with natural target-language word order.",
-      "If a block is already in the target language, return it unchanged.",
+      ...(hasInlineTags
+        ? [
+            "When an input string contains numbered tags like <0>...</0>, preserve those exact tags balanced around the corresponding translated phrases in natural target-language word order; never add tags to strings that do not contain them.",
+          ]
+        : []),
       'Return a JSON object with a "translations" array in the same order and length as the input array.',
     ].join(" ");
     const userPrompt = [

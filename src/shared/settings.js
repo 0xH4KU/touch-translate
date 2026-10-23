@@ -226,7 +226,7 @@
     inputs.temperature.max = "2";
     inputs.temperature.placeholder = "0.2";
     const temperatureNotice = document.createElement("small");
-    temperatureNotice.textContent = "This model uses its default sampling. Medium thinking favors translation quality and may take longer.";
+    temperatureNotice.textContent = "This model uses its default sampling and minimal thinking.";
     const updateTemperature = () => {
       const useDefault = inputs.apiFormat.value === "gemini-native" &&
         !Object.hasOwn(generationConfigFor({ model: inputs.model.value }), "temperature");
