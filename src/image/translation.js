@@ -3,7 +3,7 @@
   }
 
   function normalizeImageRegion(value) {
-    const box = Array.isArray(value) ? value : value?.box_2d;
+    const box = value?.box_2d;
     if (!Array.isArray(box) || box.length !== 4) return null;
     const coords = box.map((item) => Math.round(Number(item)));
     if (coords.some((item) => !Number.isFinite(item))) return null;
@@ -12,68 +12,10 @@
     if (ymin >= ymax || xmin >= xmax) return null;
     const translation =
       typeof value?.translation === "string" ? value.translation.trim() : "";
+    if (!translation) return null;
     return {
       box_2d: [ymin, xmin, ymax, xmax],
-      ...(translation ? { translation } : {}),
-    };
-  }
-
-  function parseRegionTranslation(translation, regionCount) {
-    const raw = String(translation || "")
-      .replace(/\r\n?/gu, "\n")
-      .trim();
-    if (!raw) {
-      return {
-        displayText: "",
-        markersMatch: false,
-        sections: [],
-      };
-    }
-    const markerRegex = /\[\[BABEL_REGION_(\d+)\]\]/gu;
-    const matches = Array.from(raw.matchAll(markerRegex));
-    if (
-      regionCount > 0 &&
-      matches.length === regionCount &&
-      raw.slice(0, matches[0].index).trim() === ""
-    ) {
-      const sections = [];
-      let markersMatch = true;
-      for (let i = 0; i < matches.length; i += 1) {
-        const expectedNumber = i + 1;
-        const actualNumber = Number(matches[i][1]);
-        const sectionStart = matches[i].index + matches[i][0].length;
-        const sectionEnd =
-          i + 1 < matches.length ? matches[i + 1].index : raw.length;
-        const sectionText = raw
-          .slice(sectionStart, sectionEnd)
-          .replace(/^\s+/u, "")
-          .replace(/\s+$/u, "");
-        if (actualNumber !== expectedNumber || !sectionText) {
-          markersMatch = false;
-          break;
-        }
-        sections.push(sectionText);
-      }
-      if (markersMatch) {
-        return {
-          displayText: sections
-            .map((section, index) => `[${index + 1}] ${section}`)
-            .join("\n\n"),
-          markersMatch: true,
-          sections,
-        };
-      }
-    }
-    const displayText = raw
-      .replace(markerRegex, "")
-      .replace(/[ \t]+\n/gu, "\n")
-      .replace(/^[ \t]+/gmu, "")
-      .replace(/\n{3,}/gu, "\n\n")
-      .trim();
-    return {
-      displayText,
-      markersMatch: false,
-      sections: [],
+      translation,
     };
   }
 
@@ -204,72 +146,37 @@
     if (!parsed.has_text) {
       return { hasText: false, regions: [], translation: "" };
     }
-    const rawTranslation =
-      typeof parsed.translation === "string" ? parsed.translation.trim() : "";
     const rawRegions = parsed.regions;
-    const normalizedRegions = Array.isArray(rawRegions)
-      ? rawRegions.map(normalizeImageRegion)
-      : [];
-    const regionsValid =
-      Array.isArray(rawRegions) &&
-      rawRegions.length > 0 &&
-      rawRegions.length <= IMAGE_MAX_REGIONS &&
-      normalizedRegions.every(Boolean);
-    const validRegions = regionsValid ? normalizedRegions : [];
-    const hasRegionObjectText =
-      Array.isArray(rawRegions) &&
-      rawRegions.length > 0 &&
-      rawRegions.length <= IMAGE_MAX_REGIONS &&
-      rawRegions.every(
-        (region) =>
-          typeof region?.translation === "string" && region.translation.trim(),
-      );
-    if (!rawTranslation && !hasRegionObjectText) {
+    if (
+      !Array.isArray(rawRegions) ||
+      !rawRegions.length ||
+      rawRegions.length > IMAGE_MAX_REGIONS
+    ) {
       throw responseFormatError(
-        'The response is missing a non-empty "translation" string.',
+        'The response is missing a valid "regions" array.',
         text,
         EXPECTED_FORMAT,
       );
     }
-    const normalized = parseRegionTranslation(
-      rawTranslation,
-      validRegions.length,
-    );
-    if (regionsValid && (normalized.markersMatch || hasRegionObjectText)) {
-      const pairedRegions = validRegions
-        .map((region, index) => ({
-          box_2d: region.box_2d,
-          translation: normalized.markersMatch ? normalized.sections[index] : region.translation,
-        }))
-        .filter(isUsefulImageRegion);
-      if (!pairedRegions.length) {
-        return { hasText: false, regions: [], translation: "" };
-      }
-      const mergedRegions = mergeDenseImageRegions(pairedRegions);
-      return {
-        hasText: true,
-        regions: mergedRegions,
-        translation: mergedRegions
-          .map((region, index) => `[${index + 1}] ${region.translation}`)
-          .join("\n\n"),
-      };
-    }
-    const displayText = normalized.displayText || (hasRegionObjectText
-      ? rawRegions
-          .map((region, index) => `[${index + 1}] ${region.translation.trim()}`)
-          .join("\n\n")
-      : "");
-    if (!displayText) {
+    const normalizedRegions = rawRegions.map(normalizeImageRegion);
+    if (normalizedRegions.some((region) => !region)) {
       throw responseFormatError(
-        'The response "translation" string contained no text.',
+        "One or more image regions are invalid.",
         text,
         EXPECTED_FORMAT,
       );
     }
+    const pairedRegions = normalizedRegions.filter(isUsefulImageRegion);
+    if (!pairedRegions.length) {
+      return { hasText: false, regions: [], translation: "" };
+    }
+    const mergedRegions = mergeDenseImageRegions(pairedRegions);
     return {
       hasText: true,
-      regions: [],
-      translation: displayText,
+      regions: mergedRegions,
+      translation: mergedRegions
+        .map((region, index) => `[${index + 1}] ${region.translation}`)
+        .join("\n\n"),
     };
   }
 

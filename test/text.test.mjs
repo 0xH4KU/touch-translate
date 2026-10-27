@@ -148,16 +148,16 @@ assert.equal(
   "http://ollama.local:11434",
 );
 assert.equal(
-  api.cleanSettings({ baseURL: "https://api.openai.com/v1", model: "m" }).temperature,
-  0.2,
+  api.cleanSettings({ baseURL: "https://api.openai.com/v1", model: "m" }).thinkingLevel,
+  "low",
 );
 assert.equal(
-  api.cleanSettings({ baseURL: "https://api.openai.com/v1", model: "m", temperature: "0.65" }).temperature,
-  0.65,
+  api.cleanSettings({ baseURL: "https://api.openai.com/v1", model: "m", thinkingLevel: "HIGH" }).thinkingLevel,
+  "high",
 );
 assert.throws(
-  () => api.cleanSettings({ baseURL: "https://api.openai.com/v1", model: "m", temperature: "2.5" }),
-  /Temperature/,
+  () => api.cleanSettings({ baseURL: "https://api.openai.com/v1", model: "m", thinkingLevel: "ultra" }),
+  /Thinking level/,
 );
 assert.equal(api.cleanSettings({ model: "gemini-3.1-flash-lite" }).apiFormat, "chat-completions");
 assert.equal(api.cleanSettings({ apiFormat: "gemini-native" }).apiFormat, "gemini-native");
@@ -183,8 +183,8 @@ assert.equal(
   api.hashCacheKey("same", cacheSettings),
 );
 assert.notEqual(
-  api.hashCacheKey("same", { ...cacheSettings, temperature: 0.2 }),
-  api.hashCacheKey("same", { ...cacheSettings, temperature: 2 }),
+  api.hashCacheKey("same", { ...cacheSettings, thinkingLevel: "low" }),
+  api.hashCacheKey("same", { ...cacheSettings, thinkingLevel: "high" }),
 );
 
 const records = [
@@ -223,8 +223,6 @@ assert.deepEqual(
   [...api.viewportPriority({ top: 900, bottom: 980 }, 800)],
   [1, 100],
 );
-assert.equal(api.isNearViewport({ top: 1500, bottom: 1580 }, 800), true);
-assert.equal(api.isNearViewport({ top: 1700, bottom: 1780 }, 800), false);
 assert.ok(
   api.compareViewportPriority(
     { top: 20, bottom: 100 },
@@ -342,7 +340,8 @@ const successfulRequest = api.requestTranslations(["hello"], {
 });
 const requestBody = JSON.parse(transport.options.data);
 assert.equal(requestBody.response_format.type, "json_schema");
-assert.equal(requestBody.temperature, 0.2);
+assert.equal(requestBody.reasoning_effort, "low");
+assert.equal(requestBody.temperature, undefined);
 assert.match(
   requestBody.messages[0].content,
   /naturally into zh-TW/,
@@ -386,31 +385,31 @@ const safetyCategories = [
   "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
   "HARM_CATEGORY_CIVIC_INTEGRITY",
 ];
-for (const [baseURL, model, mode, temperature, effort] of [
-  [googleBaseURL, "gemini-3.1-flash-lite", "native", 0.4, "minimal"],
-  [googleBaseURL, "gemini-3.1-pro-preview", "native", 0.4, undefined],
-  [gatewayBaseURL, "gemini-3.1-flash-lite", "gateway", 0.4, "minimal"],
-  [customGatewayBaseURL, "gemini-3.1-flash-lite", "gateway", 0.4, "minimal"],
-  ["https://ai.example.com/compat", "google/gemini-3.1-flash-lite", "generic", 0.4, undefined],
-  [customGatewayBaseURL, "translation-alias", "gateway", 0.4, undefined],
-  [googleBaseURL, "translation-alias", "native", 0.4, undefined],
-  [cacheSettings.baseURL, "google/GEMINI-3.1-flash-lite", "generic", 0.4, undefined],
-  [cacheSettings.baseURL, "gemini-2.5-flash", "generic", 0.4, undefined],
-  [cacheSettings.baseURL, "fast-model", "generic", 0.4, undefined],
-  [googleChatBaseURL, "gemini-3.1-flash-lite", "generic", 0.4, undefined],
-  ["https://proxy.example.com/v1beta", "translation-alias", "native", 0.4, undefined],
+for (const [baseURL, model, mode, effort] of [
+  [googleBaseURL, "gemini-3.1-flash-lite", "native", "minimal"],
+  [googleBaseURL, "gemini-3.1-pro-preview", "native", "low"],
+  [gatewayBaseURL, "gemini-3.1-flash-lite", "gateway", "medium"],
+  [customGatewayBaseURL, "gemini-3.1-flash-lite", "gateway", "high"],
+  ["https://ai.example.com/compat", "google/gemini-3.1-flash-lite", "generic", "low"],
+  [customGatewayBaseURL, "translation-alias", "gateway", "low"],
+  [googleBaseURL, "translation-alias", "native", "low"],
+  [cacheSettings.baseURL, "google/GEMINI-3.1-flash-lite", "generic", "minimal"],
+  [cacheSettings.baseURL, "gemini-2.5-flash", "generic", "medium"],
+  [cacheSettings.baseURL, "fast-model", "generic", "high"],
+  [googleChatBaseURL, "gemini-3.1-flash-lite", "generic", "low"],
+  ["https://proxy.example.com/v1beta", "translation-alias", "native", "low"],
 ]) {
   const texts = ['a "quoted" comment', "another comment"];
   const native = mode === "native" || mode === "gateway";
   const request = api.requestTranslations(texts, {
-    ...cacheSettings, baseURL, model, apiKey: "test", temperature: 0.4,
+    ...cacheSettings, baseURL, model, apiKey: "test", thinkingLevel: effort,
     apiFormat: native ? "gemini-native" : "chat-completions",
   });
   const body = JSON.parse(transport.options.data);
   const safety = native ? body.safetySettings : body.safety_settings;
   if (mode === "generic") {
     assert.equal(safety, undefined);
-    assert.deepEqual(Object.keys(body).sort(), ["messages", "model", "response_format", "temperature"]);
+    assert.deepEqual(Object.keys(body).sort(), ["messages", "model", "reasoning_effort", "response_format"]);
   } else {
     assert.deepEqual(safety, safetyCategories.map(category => ({ category, threshold: "OFF" })));
   }
@@ -421,7 +420,7 @@ for (const [baseURL, model, mode, temperature, effort] of [
     assert.equal(transport.options.headers["cf-aig-authorization"], mode === "gateway" ? "Bearer test" : undefined);
     assert.equal(transport.options.headers.Authorization, undefined);
     assert.equal(body.safety_settings, undefined);
-    assert.equal(body.generationConfig.temperature, temperature);
+    assert.equal(body.generationConfig.temperature, undefined);
     assert.equal(body.generationConfig.thinkingConfig?.thinkingLevel, effort);
     assert.equal(body.generationConfig.responseMimeType, "application/json");
     assert.equal(body.generationConfig.responseJsonSchema.properties.translations.minItems, texts.length);
@@ -434,7 +433,7 @@ for (const [baseURL, model, mode, temperature, effort] of [
     assert.equal(transport.options.headers.Authorization, "Bearer test");
     assert.equal(transport.options.headers["x-goog-api-key"], undefined);
     assert.equal(transport.options.headers["cf-aig-authorization"], undefined);
-    assert.equal(body.temperature, temperature);
+    assert.equal(body.temperature, undefined);
     assert.equal(body.reasoning_effort, effort);
     assert.equal(body.response_format.type, "json_schema");
     assert.match(body.messages[1].content, /^Translate the following web page content into zh-TW:\n\n/);
@@ -524,12 +523,12 @@ for (const native of [true, false]) {
   assert.equal(transport.history.length, count);
 }
 assert.notEqual(
-  api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", temperature: 0.2 }),
-  api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", temperature: 1 }),
+  api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", thinkingLevel: "low" }),
+  api.hashCacheKey("same", { ...cacheSettings, model: "gemini-3.1-flash-lite", thinkingLevel: "high" }),
 );
 assert.notEqual(
-  api.hashCacheKey("same", { ...cacheSettings, apiFormat: "gemini-native", model: "gemini-3.1-flash-lite", temperature: 0.2 }),
-  api.hashCacheKey("same", { ...cacheSettings, apiFormat: "gemini-native", model: "gemini-3.1-flash-lite", temperature: 1 }),
+  api.hashCacheKey("same", { ...cacheSettings, apiFormat: "gemini-native", model: "gemini-3.1-flash-lite", thinkingLevel: "low" }),
+  api.hashCacheKey("same", { ...cacheSettings, apiFormat: "gemini-native", model: "gemini-3.1-flash-lite", thinkingLevel: "high" }),
 );
 assert.notEqual(
   api.hashCacheKey("same", cacheSettings),
@@ -555,7 +554,7 @@ for (const baseURL of [googleBaseURL, customGatewayBaseURL, cacheSettings.baseUR
     assert.equal(body.generationConfig.responseMimeType, "application/json");
     assert.equal(body.generationConfig.responseJsonSchema, undefined);
   } else {
-    assert.deepEqual(Object.keys(body).sort(), ["messages", "model", "temperature"]);
+    assert.deepEqual(Object.keys(body).sort(), ["messages", "model", "reasoning_effort"]);
   }
   transport.options.onload({ status: 200, responseText: JSON.stringify(native
     ? { candidates: [{ finishReason: "STOP", content: { parts: [{ text: '{"translations":["你好"]}' }] } }] }
@@ -949,7 +948,7 @@ const recoveredRequest = api.requestTranslations(["hello"], retrySettings);
 assert.equal(JSON.parse(transport.options.data).response_format.type, "json_schema");
 transport.options.onload({ status: 200, responseText: '{"choices":[]}' });
 assert.equal(JSON.parse(transport.options.data).response_format, undefined);
-assert.deepEqual(Object.keys(JSON.parse(transport.options.data)).sort(), ["messages", "model", "temperature"]);
+assert.deepEqual(Object.keys(JSON.parse(transport.options.data)).sort(), ["messages", "model", "reasoning_effort"]);
 transport.options.onload({
   status: 200,
   responseText: JSON.stringify({ choices: [{ message: { content: '{"translations":["你好"]}' } }] }),
@@ -1222,6 +1221,10 @@ async function checkBatchRecovery(mode) {
     parseInlineTranslation: api.parseInlineTranslation,
     recordMatchesElement: (record) => record.element.isConnected,
     shouldSplitBatch: api.shouldSplitBatch,
+    restoreAriaBusy(job) {
+      if (job.ariaBusy === null) job.element.removeAttribute("aria-busy");
+      else job.element.setAttribute("aria-busy", job.ariaBusy);
+    },
     showIndicator() {}, removeIndicator() {}, toast() {},
     insertTranslation(element) { translated.push(element); },
     requestTranslations(texts) {

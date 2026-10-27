@@ -134,12 +134,6 @@
 
   // DOM helpers
 
-  function isVisible(element) {
-    if (!element?.getClientRects?.().length) return false;
-    const style = getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden";
-  }
-
   function imageAnchor(img) {
     if (!img) return null;
     const picture = img.closest?.("picture") || img;
@@ -309,16 +303,6 @@
     ];
     svg.append?.(...paths.map((attrs) => createSvgElement("path", attrs)));
     return svg;
-  }
-
-  function assembleTranslatedContent(container, text) {
-    const lines = String(text || "").split("\n");
-    const nodes = [];
-    lines.forEach((line, index) => {
-      if (index > 0) nodes.push(document.createElement("br"));
-      nodes.push(document.createTextNode(line));
-    });
-    container.replaceChildren(...nodes);
   }
 
   function setImageButtonState(

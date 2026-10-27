@@ -6,12 +6,6 @@
     return null;
   }
 
-  function restoreAriaBusy(job) {
-    if (!job?.element) return;
-    if (job.ariaBusy === null) job.element.removeAttribute?.("aria-busy");
-    else job.element.setAttribute?.("aria-busy", job.ariaBusy);
-  }
-
   function cancelImageJob(img) {
     const state = imageStates.get(img);
     const job = state?.job;

@@ -45,8 +45,10 @@
     return url.href;
   }
 
-  function temperatureFor(settings) {
-    return typeof settings?.temperature === "number" ? settings.temperature : 0.2;
+  function thinkingLevelFor(settings) {
+    return THINKING_LEVELS.includes(settings?.thinkingLevel)
+      ? settings.thinkingLevel
+      : "low";
   }
 
   function retryDelayFor(response, attempt = 0) {
@@ -122,17 +124,10 @@
   }
 
   function generationConfigFor(settings) {
-    const config = { responseMimeType: "application/json" };
-    // Gemini 3.5 Flash-Lite ignores sampling overrides; use minimal thinking to avoid safety over-analysis.
-    if (/(?:^|\/)gemini-3\.5-flash-lite(?:-|$)/i.test(settings.model)) {
-      config.thinkingConfig = { thinkingLevel: "minimal" };
-    } else {
-      config.temperature = temperatureFor(settings);
-      if (/(?:^|\/)gemini-3\.1-flash-lite(?:-|$)/i.test(settings.model)) {
-        config.thinkingConfig = { thinkingLevel: "minimal" };
-      }
-    }
-    return config;
+    return {
+      responseMimeType: "application/json",
+      thinkingConfig: { thinkingLevel: thinkingLevelFor(settings) },
+    };
   }
 
   function providerContent(body, nativeGemini, expectedFormat) {
@@ -202,7 +197,7 @@
       const payload = {
         model: settings.model,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userContent }],
-        temperature: temperatureFor(settings),
+        reasoning_effort: thinkingLevelFor(settings),
       };
       if (useSchema) {
         payload.response_format = {

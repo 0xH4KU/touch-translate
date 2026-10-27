@@ -1,13 +1,14 @@
   let settingsPrompt;
 
   const SETTINGS_KEY = "settings-v1";
+  const THINKING_LEVELS = ["minimal", "low", "medium", "high"];
   const DEFAULT_SETTINGS = {
     apiFormat: "chat-completions",
     baseURL: "https://api.openai.com/v1",
     model: "",
     apiKey: "",
     targetLanguage: globalThis.navigator?.language || "English",
-    temperature: 0.2,
+    thinkingLevel: "low",
   };
 
 
@@ -47,17 +48,21 @@
   }
 
   function cleanSettings(input = {}, fallback = DEFAULT_SETTINGS) {
-    let temperature = fallback.temperature ?? 0.2;
+    let thinkingLevel = THINKING_LEVELS.includes(fallback.thinkingLevel)
+      ? fallback.thinkingLevel
+      : DEFAULT_SETTINGS.thinkingLevel;
     if (
-      input.temperature !== undefined &&
-      input.temperature !== null &&
-      input.temperature !== ""
+      input.thinkingLevel !== undefined &&
+      input.thinkingLevel !== null &&
+      input.thinkingLevel !== ""
     ) {
-      const parsed = Number(input.temperature);
-      if (Number.isNaN(parsed) || parsed < 0 || parsed > 2) {
-        throw new Error("Temperature must be a number between 0 and 2.");
+      const normalized = String(input.thinkingLevel).trim().toLowerCase();
+      if (!THINKING_LEVELS.includes(normalized)) {
+        throw new Error(
+          "Thinking level must be minimal, low, medium, or high.",
+        );
       }
-      temperature = Math.round(parsed * 100) / 100;
+      thinkingLevel = normalized;
     }
 
     const value = {
@@ -77,7 +82,7 @@
         typeof input.targetLanguage === "string"
           ? input.targetLanguage.trim()
           : fallback.targetLanguage,
-      temperature,
+      thinkingLevel,
     };
 
     if (!["chat-completions", "gemini-native"].includes(value.apiFormat)) {
@@ -214,28 +219,20 @@
       "text",
       current.targetLanguage,
     );
-    const temperature = field(
-      "Temperature (0.0 - 2.0)",
-      "temperature",
-      "number",
-      current.temperature ?? 0.2,
-      false,
-    );
-    inputs.temperature.step = "0.05";
-    inputs.temperature.min = "0";
-    inputs.temperature.max = "2";
-    inputs.temperature.placeholder = "0.2";
-    const temperatureNotice = document.createElement("small");
-    temperatureNotice.textContent = "This model uses its default sampling and minimal thinking.";
-    const updateTemperature = () => {
-      const useDefault = inputs.apiFormat.value === "gemini-native" &&
-        !Object.hasOwn(generationConfigFor({ model: inputs.model.value }), "temperature");
-      inputs.temperature.disabled = useDefault;
-      temperatureNotice.hidden = !useDefault;
-    };
-    inputs.apiFormat.addEventListener("change", updateTemperature);
-    inputs.model.addEventListener("input", updateTemperature);
-    updateTemperature();
+    const thinkingLevel = field("Thinking level", "thinkingLevel", "select", "");
+    for (const [value, text] of [
+      ["minimal", "Minimal"],
+      ["low", "Low"],
+      ["medium", "Medium"],
+      ["high", "High"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      inputs.thinkingLevel.append(option);
+    }
+    inputs.thinkingLevel.value = current.thinkingLevel;
+
     const apiKey = field(
       "API Key",
       "apiKey",
@@ -266,8 +263,7 @@
       baseURL,
       model,
       targetLanguage,
-      temperature,
-      temperatureNotice,
+      thinkingLevel,
       apiKey,
       error,
       actions,
@@ -301,7 +297,7 @@
                 baseURL: data.get("baseURL"),
                 model: data.get("model"),
                 targetLanguage: data.get("targetLanguage"),
-                temperature: data.get("temperature"),
+                thinkingLevel: data.get("thinkingLevel"),
                 apiKey: data.get("apiKey") || current.apiKey,
               },
               current,
@@ -343,7 +339,7 @@
       baseURL: settings.baseURL,
       model: settings.model,
       targetLanguage: settings.targetLanguage,
-      temperature: settings.temperature ?? 0.2,
+      thinkingLevel: settings.thinkingLevel || "low",
     };
     if (includeKey) exportedSettings.apiKey = settings.apiKey;
     const json = JSON.stringify(

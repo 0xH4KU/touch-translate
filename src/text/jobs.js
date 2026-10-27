@@ -2,11 +2,6 @@
   const swipeBatch = new Map();
   let swipeBatchTimer;
 
-  function restoreAriaBusy(job) {
-    if (job.ariaBusy === null) job.element.removeAttribute("aria-busy");
-    else job.element.setAttribute("aria-busy", job.ariaBusy);
-  }
-
   function trackJob(job, task) {
     job.task = task;
     task.jobs.add(job);
@@ -369,7 +364,6 @@
   }
 
   function observePageBlocks(task) {
-    if (!task.intersectionObserver) return 0;
     const roots = pageContentRoots();
     const elements = document.querySelectorAll(BLOCK_SELECTOR);
     let count = 0;
@@ -397,7 +391,6 @@
     clearTimeout(task.scheduleTimer);
     task.observer?.disconnect();
     task.intersectionObserver?.disconnect();
-    globalThis.removeEventListener("scroll", task.refresh, true);
     [...task.jobs].forEach((job) => cancelJob(job.element));
     if (removeTranslations) undoPageTranslations(task);
     if (message) toast(message);
@@ -409,30 +402,25 @@
       task.rerun = true;
       return;
     }
-    let blocks;
-    if (task.intersectionObserver) {
-      const roots = pageContentRoots();
-      const viewportHeight =
-        innerHeight || document.documentElement.clientHeight;
-      blocks = [...task.pendingBlocks]
-        .filter((element) => {
-          const eligible = isTranslatablePageBlock(element, roots);
-          if (!eligible) task.observedBlocks.delete(element);
-          return eligible;
-        })
-        .map((element) => ({
-          element,
-          rect: element.getBoundingClientRect(),
-        }))
-        .sort((a, b) =>
-          compareViewportPriority(a.rect, b.rect, viewportHeight),
-        )
-        .map(({ element }) => element);
-      task.pendingBlocks.clear();
-      if (!blocks.length) return;
-    } else {
-      blocks = collectPageBlocks(true);
-    }
+    const roots = pageContentRoots();
+    const viewportHeight =
+      innerHeight || document.documentElement.clientHeight;
+    const blocks = [...task.pendingBlocks]
+      .filter((element) => {
+        const eligible = isTranslatablePageBlock(element, roots);
+        if (!eligible) task.observedBlocks.delete(element);
+        return eligible;
+      })
+      .map((element) => ({
+        element,
+        rect: element.getBoundingClientRect(),
+      }))
+      .sort((a, b) =>
+        compareViewportPriority(a.rect, b.rect, viewportHeight),
+      )
+      .map(({ element }) => element);
+    task.pendingBlocks.clear();
+    if (!blocks.length) return;
     task.running = translateElements(blocks, {
       showProgress,
       task,
@@ -482,12 +470,7 @@
     task.refresh = () => {
       clearTimeout(task.refreshTimer);
       task.refreshTimer = setTimeout(() => {
-        if (task.cancelled) return;
-        if (task.intersectionObserver) {
-          observePageBlocks(task);
-        } else {
-          runPageTranslation(task);
-        }
+        if (!task.cancelled) observePageBlocks(task);
       }, PAGE_REFRESH_MS);
     };
     task.observer = new MutationObserver(task.refresh);
@@ -507,31 +490,22 @@
       childList: true,
       subtree: true,
     });
-    if (typeof IntersectionObserver === "function") {
-      task.intersectionObserver = new IntersectionObserver(
-        (entries) => {
-          let hasNew = false;
-          for (const entry of entries) {
-            if (entry.isIntersecting) {
-              task.pendingBlocks.add(entry.target);
-              task.intersectionObserver.unobserve(entry.target);
-              hasNew = true;
-            }
+    task.intersectionObserver = new IntersectionObserver(
+      (entries) => {
+        let hasNew = false;
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            task.pendingBlocks.add(entry.target);
+            task.intersectionObserver.unobserve(entry.target);
+            hasNew = true;
           }
-          if (hasNew && !task.cancelled) {
-            task.schedule();
-          }
-        },
-        { rootMargin: "100% 0px 100% 0px" },
-      );
-      const observed = observePageBlocks(task);
-      if (!observed) toast("No new translatable blocks found");
-    } else {
-      globalThis.addEventListener("scroll", task.refresh, {
-        capture: true,
-        passive: true,
-      });
-      runPageTranslation(task, true);
-    }
+        }
+        if (hasNew && !task.cancelled) {
+          task.schedule();
+        }
+      },
+      { rootMargin: "100% 0px 100% 0px" },
+    );
+    if (!observePageBlocks(task)) toast("No new translatable blocks found");
     pageTask = task;
   }

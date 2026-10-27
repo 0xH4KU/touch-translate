@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Image Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.2.1
+// @version      0.2.2
 // @description  Two-finger swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
 // @author       HAKU
 // @match        *://*/*
@@ -92,6 +92,39 @@
     return Boolean(target?.closest?.("[data-touch-translate-ui]"));
   }
 
+  function isVisible(element) {
+    if (!element?.getClientRects?.().length) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden";
+  }
+
+  function restoreAriaBusy(job) {
+    if (!job?.element) return;
+    if (job.ariaBusy === null) job.element.removeAttribute?.("aria-busy");
+    else job.element.setAttribute?.("aria-busy", job.ariaBusy);
+  }
+
+  function appendTextWithBreaks(parts, text) {
+    const lines = String(text || "").split(/\r?\n/);
+    lines.forEach((line, index) => {
+      if (index > 0 && typeof document.createElement === "function") {
+        parts.push(document.createElement("br"));
+      }
+      if (line) parts.push(line);
+    });
+  }
+
+  function assembleTranslatedContent(container, text) {
+    const lines = String(text || "").split(/\r?\n/);
+    if (lines.length <= 1 || typeof document.createElement !== "function") {
+      container.replaceChildren(text);
+      return;
+    }
+    const parts = [];
+    appendTextWithBreaks(parts, text);
+    container.replaceChildren(...parts);
+  }
+
   function translationRulesFor(language) {
     return [
       `You are a professional native translator. Translate fluently and naturally into ${language}.`,
@@ -110,13 +143,14 @@
   let settingsPrompt;
 
   const SETTINGS_KEY = "settings-v1";
+  const THINKING_LEVELS = ["minimal", "low", "medium", "high"];
   const DEFAULT_SETTINGS = {
     apiFormat: "chat-completions",
     baseURL: "https://api.openai.com/v1",
     model: "",
     apiKey: "",
     targetLanguage: globalThis.navigator?.language || "English",
-    temperature: 0.2,
+    thinkingLevel: "low",
   };
 
 
@@ -156,17 +190,21 @@
   }
 
   function cleanSettings(input = {}, fallback = DEFAULT_SETTINGS) {
-    let temperature = fallback.temperature ?? 0.2;
+    let thinkingLevel = THINKING_LEVELS.includes(fallback.thinkingLevel)
+      ? fallback.thinkingLevel
+      : DEFAULT_SETTINGS.thinkingLevel;
     if (
-      input.temperature !== undefined &&
-      input.temperature !== null &&
-      input.temperature !== ""
+      input.thinkingLevel !== undefined &&
+      input.thinkingLevel !== null &&
+      input.thinkingLevel !== ""
     ) {
-      const parsed = Number(input.temperature);
-      if (Number.isNaN(parsed) || parsed < 0 || parsed > 2) {
-        throw new Error("Temperature must be a number between 0 and 2.");
+      const normalized = String(input.thinkingLevel).trim().toLowerCase();
+      if (!THINKING_LEVELS.includes(normalized)) {
+        throw new Error(
+          "Thinking level must be minimal, low, medium, or high.",
+        );
       }
-      temperature = Math.round(parsed * 100) / 100;
+      thinkingLevel = normalized;
     }
 
     const value = {
@@ -186,7 +224,7 @@
         typeof input.targetLanguage === "string"
           ? input.targetLanguage.trim()
           : fallback.targetLanguage,
-      temperature,
+      thinkingLevel,
     };
 
     if (!["chat-completions", "gemini-native"].includes(value.apiFormat)) {
@@ -323,28 +361,20 @@
       "text",
       current.targetLanguage,
     );
-    const temperature = field(
-      "Temperature (0.0 - 2.0)",
-      "temperature",
-      "number",
-      current.temperature ?? 0.2,
-      false,
-    );
-    inputs.temperature.step = "0.05";
-    inputs.temperature.min = "0";
-    inputs.temperature.max = "2";
-    inputs.temperature.placeholder = "0.2";
-    const temperatureNotice = document.createElement("small");
-    temperatureNotice.textContent = "This model uses its default sampling and minimal thinking.";
-    const updateTemperature = () => {
-      const useDefault = inputs.apiFormat.value === "gemini-native" &&
-        !Object.hasOwn(generationConfigFor({ model: inputs.model.value }), "temperature");
-      inputs.temperature.disabled = useDefault;
-      temperatureNotice.hidden = !useDefault;
-    };
-    inputs.apiFormat.addEventListener("change", updateTemperature);
-    inputs.model.addEventListener("input", updateTemperature);
-    updateTemperature();
+    const thinkingLevel = field("Thinking level", "thinkingLevel", "select", "");
+    for (const [value, text] of [
+      ["minimal", "Minimal"],
+      ["low", "Low"],
+      ["medium", "Medium"],
+      ["high", "High"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      inputs.thinkingLevel.append(option);
+    }
+    inputs.thinkingLevel.value = current.thinkingLevel;
+
     const apiKey = field(
       "API Key",
       "apiKey",
@@ -375,8 +405,7 @@
       baseURL,
       model,
       targetLanguage,
-      temperature,
-      temperatureNotice,
+      thinkingLevel,
       apiKey,
       error,
       actions,
@@ -410,7 +439,7 @@
                 baseURL: data.get("baseURL"),
                 model: data.get("model"),
                 targetLanguage: data.get("targetLanguage"),
-                temperature: data.get("temperature"),
+                thinkingLevel: data.get("thinkingLevel"),
                 apiKey: data.get("apiKey") || current.apiKey,
               },
               current,
@@ -452,7 +481,7 @@
       baseURL: settings.baseURL,
       model: settings.model,
       targetLanguage: settings.targetLanguage,
-      temperature: settings.temperature ?? 0.2,
+      thinkingLevel: settings.thinkingLevel || "low",
     };
     if (includeKey) exportedSettings.apiKey = settings.apiKey;
     const json = JSON.stringify(
@@ -594,8 +623,10 @@
     return url.href;
   }
 
-  function temperatureFor(settings) {
-    return typeof settings?.temperature === "number" ? settings.temperature : 0.2;
+  function thinkingLevelFor(settings) {
+    return THINKING_LEVELS.includes(settings?.thinkingLevel)
+      ? settings.thinkingLevel
+      : "low";
   }
 
   function retryDelayFor(response, attempt = 0) {
@@ -671,17 +702,10 @@
   }
 
   function generationConfigFor(settings) {
-    const config = { responseMimeType: "application/json" };
-    // Gemini 3.5 Flash-Lite ignores sampling overrides; use minimal thinking to avoid safety over-analysis.
-    if (/(?:^|\/)gemini-3\.5-flash-lite(?:-|$)/i.test(settings.model)) {
-      config.thinkingConfig = { thinkingLevel: "minimal" };
-    } else {
-      config.temperature = temperatureFor(settings);
-      if (/(?:^|\/)gemini-3\.1-flash-lite(?:-|$)/i.test(settings.model)) {
-        config.thinkingConfig = { thinkingLevel: "minimal" };
-      }
-    }
-    return config;
+    return {
+      responseMimeType: "application/json",
+      thinkingConfig: { thinkingLevel: thinkingLevelFor(settings) },
+    };
   }
 
   function providerContent(body, nativeGemini, expectedFormat) {
@@ -751,7 +775,7 @@
       const payload = {
         model: settings.model,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userContent }],
-        temperature: temperatureFor(settings),
+        reasoning_effort: thinkingLevelFor(settings),
       };
       if (useSchema) {
         payload.response_format = {
@@ -899,16 +923,13 @@
   }
 
   function translationCacheKey(source, settings, promptVersion) {
-    const generation = settings.apiFormat === "gemini-native"
-      ? generationConfigFor(settings)
-      : { temperature: temperatureFor(settings) };
     return hashString64([
       promptVersion,
       settings.apiFormat || "chat-completions",
       settings.baseURL,
       settings.model,
       settings.targetLanguage,
-      JSON.stringify(generation),
+      thinkingLevelFor(settings),
       source,
     ].join("\u0000"));
   }
@@ -1359,7 +1380,7 @@
   }
 
   function normalizeImageRegion(value) {
-    const box = Array.isArray(value) ? value : value?.box_2d;
+    const box = value?.box_2d;
     if (!Array.isArray(box) || box.length !== 4) return null;
     const coords = box.map((item) => Math.round(Number(item)));
     if (coords.some((item) => !Number.isFinite(item))) return null;
@@ -1368,68 +1389,10 @@
     if (ymin >= ymax || xmin >= xmax) return null;
     const translation =
       typeof value?.translation === "string" ? value.translation.trim() : "";
+    if (!translation) return null;
     return {
       box_2d: [ymin, xmin, ymax, xmax],
-      ...(translation ? { translation } : {}),
-    };
-  }
-
-  function parseRegionTranslation(translation, regionCount) {
-    const raw = String(translation || "")
-      .replace(/\r\n?/gu, "\n")
-      .trim();
-    if (!raw) {
-      return {
-        displayText: "",
-        markersMatch: false,
-        sections: [],
-      };
-    }
-    const markerRegex = /\[\[BABEL_REGION_(\d+)\]\]/gu;
-    const matches = Array.from(raw.matchAll(markerRegex));
-    if (
-      regionCount > 0 &&
-      matches.length === regionCount &&
-      raw.slice(0, matches[0].index).trim() === ""
-    ) {
-      const sections = [];
-      let markersMatch = true;
-      for (let i = 0; i < matches.length; i += 1) {
-        const expectedNumber = i + 1;
-        const actualNumber = Number(matches[i][1]);
-        const sectionStart = matches[i].index + matches[i][0].length;
-        const sectionEnd =
-          i + 1 < matches.length ? matches[i + 1].index : raw.length;
-        const sectionText = raw
-          .slice(sectionStart, sectionEnd)
-          .replace(/^\s+/u, "")
-          .replace(/\s+$/u, "");
-        if (actualNumber !== expectedNumber || !sectionText) {
-          markersMatch = false;
-          break;
-        }
-        sections.push(sectionText);
-      }
-      if (markersMatch) {
-        return {
-          displayText: sections
-            .map((section, index) => `[${index + 1}] ${section}`)
-            .join("\n\n"),
-          markersMatch: true,
-          sections,
-        };
-      }
-    }
-    const displayText = raw
-      .replace(markerRegex, "")
-      .replace(/[ \t]+\n/gu, "\n")
-      .replace(/^[ \t]+/gmu, "")
-      .replace(/\n{3,}/gu, "\n\n")
-      .trim();
-    return {
-      displayText,
-      markersMatch: false,
-      sections: [],
+      translation,
     };
   }
 
@@ -1560,72 +1523,37 @@
     if (!parsed.has_text) {
       return { hasText: false, regions: [], translation: "" };
     }
-    const rawTranslation =
-      typeof parsed.translation === "string" ? parsed.translation.trim() : "";
     const rawRegions = parsed.regions;
-    const normalizedRegions = Array.isArray(rawRegions)
-      ? rawRegions.map(normalizeImageRegion)
-      : [];
-    const regionsValid =
-      Array.isArray(rawRegions) &&
-      rawRegions.length > 0 &&
-      rawRegions.length <= IMAGE_MAX_REGIONS &&
-      normalizedRegions.every(Boolean);
-    const validRegions = regionsValid ? normalizedRegions : [];
-    const hasRegionObjectText =
-      Array.isArray(rawRegions) &&
-      rawRegions.length > 0 &&
-      rawRegions.length <= IMAGE_MAX_REGIONS &&
-      rawRegions.every(
-        (region) =>
-          typeof region?.translation === "string" && region.translation.trim(),
-      );
-    if (!rawTranslation && !hasRegionObjectText) {
+    if (
+      !Array.isArray(rawRegions) ||
+      !rawRegions.length ||
+      rawRegions.length > IMAGE_MAX_REGIONS
+    ) {
       throw responseFormatError(
-        'The response is missing a non-empty "translation" string.',
+        'The response is missing a valid "regions" array.',
         text,
         EXPECTED_FORMAT,
       );
     }
-    const normalized = parseRegionTranslation(
-      rawTranslation,
-      validRegions.length,
-    );
-    if (regionsValid && (normalized.markersMatch || hasRegionObjectText)) {
-      const pairedRegions = validRegions
-        .map((region, index) => ({
-          box_2d: region.box_2d,
-          translation: normalized.markersMatch ? normalized.sections[index] : region.translation,
-        }))
-        .filter(isUsefulImageRegion);
-      if (!pairedRegions.length) {
-        return { hasText: false, regions: [], translation: "" };
-      }
-      const mergedRegions = mergeDenseImageRegions(pairedRegions);
-      return {
-        hasText: true,
-        regions: mergedRegions,
-        translation: mergedRegions
-          .map((region, index) => `[${index + 1}] ${region.translation}`)
-          .join("\n\n"),
-      };
-    }
-    const displayText = normalized.displayText || (hasRegionObjectText
-      ? rawRegions
-          .map((region, index) => `[${index + 1}] ${region.translation.trim()}`)
-          .join("\n\n")
-      : "");
-    if (!displayText) {
+    const normalizedRegions = rawRegions.map(normalizeImageRegion);
+    if (normalizedRegions.some((region) => !region)) {
       throw responseFormatError(
-        'The response "translation" string contained no text.',
+        "One or more image regions are invalid.",
         text,
         EXPECTED_FORMAT,
       );
     }
+    const pairedRegions = normalizedRegions.filter(isUsefulImageRegion);
+    if (!pairedRegions.length) {
+      return { hasText: false, regions: [], translation: "" };
+    }
+    const mergedRegions = mergeDenseImageRegions(pairedRegions);
     return {
       hasText: true,
-      regions: [],
-      translation: displayText,
+      regions: mergedRegions,
+      translation: mergedRegions
+        .map((region, index) => `[${index + 1}] ${region.translation}`)
+        .join("\n\n"),
     };
   }
 
@@ -1841,12 +1769,6 @@
 
   // DOM helpers
 
-  function isVisible(element) {
-    if (!element?.getClientRects?.().length) return false;
-    const style = getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden";
-  }
-
   function imageAnchor(img) {
     if (!img) return null;
     const picture = img.closest?.("picture") || img;
@@ -2016,16 +1938,6 @@
     ];
     svg.append?.(...paths.map((attrs) => createSvgElement("path", attrs)));
     return svg;
-  }
-
-  function assembleTranslatedContent(container, text) {
-    const lines = String(text || "").split("\n");
-    const nodes = [];
-    lines.forEach((line, index) => {
-      if (index > 0) nodes.push(document.createElement("br"));
-      nodes.push(document.createTextNode(line));
-    });
-    container.replaceChildren(...nodes);
   }
 
   function setImageButtonState(
@@ -2611,10 +2523,10 @@
 
   function storeImageResult(img, result) {
     if (!img?.isConnected) return null;
+    const regions = Array.isArray(result?.regions) ? result.regions : [];
     const translation =
       typeof result === "string" ? result : result?.translation;
-    if (!normalizeText(translation)) return null;
-    const regions = Array.isArray(result?.regions) ? result.regions : [];
+    if (!regions.length || !normalizeText(translation)) return null;
     const normalizedResult = {
       hasText: true,
       regions,
@@ -2625,7 +2537,7 @@
     if (state) {
       state.regions = regions;
       state.result = normalizedResult;
-      state.activeRegion = regions.length ? "1" : "";
+      state.activeRegion = "1";
       setImageButtonState(img, "done");
     }
 
@@ -2635,7 +2547,7 @@
   function openImageViewer(img, result) {
     const normalized = storeImageResult(img, result);
     if (!normalized) return null;
-    const { translation, regions } = normalized;
+    const { regions } = normalized;
     const state = imageStates.get(img);
     imageViewerIntent += 1;
     closeImageViewer(false);
@@ -2651,9 +2563,7 @@
 
     const counter = document.createElement("span");
     counter.dataset.viewerCounter = "";
-    counter.textContent = regions.length
-      ? `Region 1 / ${regions.length}`
-      : "Image translation";
+    counter.textContent = `Region 1 / ${regions.length}`;
 
     const barActions = document.createElement("div");
 
@@ -2661,7 +2571,6 @@
     togglePinsBtn.type = "button";
     togglePinsBtn.dataset.action = "toggle-pins";
     togglePinsBtn.textContent = "Hide pins";
-    if (!regions.length) togglePinsBtn.hidden = true;
 
     const resetZoomBtn = document.createElement("button");
     resetZoomBtn.type = "button";
@@ -2736,12 +2645,7 @@
     activeBadge.className = IMAGE_BADGE_CLASS;
     const activeText = document.createElement("div");
     activeText.className = IMAGE_TEXT_CLASS;
-    if (regions.length) {
-      activeCard.append(activeBadge, activeText);
-    } else {
-      assembleTranslatedContent(activeText, translation);
-      activeCard.append(activeText);
-    }
+    activeCard.append(activeBadge, activeText);
 
     const listContainer = document.createElement("div");
     listContainer.className = IMAGE_VIEWER_LIST_CLASS;
@@ -2854,7 +2758,6 @@
           item.removeAttribute?.("data-active");
         }
       }
-      if (!regions.length) return;
       const activeIndex = label
         ? clampNumber(Number(label) - 1, 0, regions.length - 1)
         : 0;
@@ -2872,7 +2775,6 @@
     };
 
     const stepRegion = (delta) => {
-      if (!regions.length) return;
       const currentNum = Number(state?.activeRegion) || 1;
       const nextNum =
         ((currentNum - 1 + delta + regions.length) % regions.length) + 1;
@@ -3039,7 +2941,7 @@
       syncActiveRegion,
     };
 
-    syncActiveRegion(state?.activeRegion || (regions.length ? "1" : ""));
+    syncActiveRegion(state?.activeRegion || "1");
 
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
@@ -3055,12 +2957,6 @@
     if (intent === imageViewerIntent) return openImageViewer(img, result);
     storeImageResult(img, result);
     return null;
-  }
-
-  function restoreAriaBusy(job) {
-    if (!job?.element) return;
-    if (job.ariaBusy === null) job.element.removeAttribute?.("aria-busy");
-    else job.element.setAttribute?.("aria-busy", job.ariaBusy);
   }
 
   function cancelImageJob(img) {
@@ -3924,7 +3820,6 @@
       openImageViewer,
       parseImageTranslation,
       parseImportedSettings,
-      parseRegionTranslation,
       pointFor,
       projectedSwipeX,
       removeImageTranslation,

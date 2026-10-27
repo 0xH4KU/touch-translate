@@ -31,7 +31,6 @@
       canConsumeRightSwipe,
       indicatorFor,
       insertTranslation,
-      isNearViewport,
       isPrivateOrLocalHost,
       isRenderedTextNode,
       isSafeHref,

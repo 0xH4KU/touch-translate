@@ -77,10 +77,6 @@
     return aZone - bZone || aDistance - bDistance;
   }
 
-  function isNearViewport(rect, viewportHeight) {
-    return viewportPriority(rect, viewportHeight)[1] <= viewportHeight;
-  }
-
   function parseTranslations(content, expectedLength) {
     const text = String(content || "")
       .trim()

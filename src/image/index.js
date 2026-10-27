@@ -40,7 +40,6 @@
       openImageViewer,
       parseImageTranslation,
       parseImportedSettings,
-      parseRegionTranslation,
       pointFor,
       projectedSwipeX,
       removeImageTranslation,

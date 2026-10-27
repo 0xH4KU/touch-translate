@@ -22,6 +22,39 @@
     return Boolean(target?.closest?.("[data-touch-translate-ui]"));
   }
 
+  function isVisible(element) {
+    if (!element?.getClientRects?.().length) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden";
+  }
+
+  function restoreAriaBusy(job) {
+    if (!job?.element) return;
+    if (job.ariaBusy === null) job.element.removeAttribute?.("aria-busy");
+    else job.element.setAttribute?.("aria-busy", job.ariaBusy);
+  }
+
+  function appendTextWithBreaks(parts, text) {
+    const lines = String(text || "").split(/\r?\n/);
+    lines.forEach((line, index) => {
+      if (index > 0 && typeof document.createElement === "function") {
+        parts.push(document.createElement("br"));
+      }
+      if (line) parts.push(line);
+    });
+  }
+
+  function assembleTranslatedContent(container, text) {
+    const lines = String(text || "").split(/\r?\n/);
+    if (lines.length <= 1 || typeof document.createElement !== "function") {
+      container.replaceChildren(text);
+      return;
+    }
+    const parts = [];
+    appendTextWithBreaks(parts, text);
+    container.replaceChildren(...parts);
+  }
+
   function translationRulesFor(language) {
     return [
       `You are a professional native translator. Translate fluently and naturally into ${language}.`,

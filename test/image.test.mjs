@@ -21,7 +21,7 @@ const ttExportedPayload = {
     baseURL: "https://gateway.ai.cloudflare.com/v1/acc/gw/google-ai-studio",
     model: "google-ai-studio/gemini-3.1-flash-lite",
     targetLanguage: "Traditional Chinese",
-    temperature: 0.35,
+    thinkingLevel: "medium",
     apiKey: "cf-token-123",
   },
 };
@@ -56,8 +56,7 @@ const normalizedRegion = imageApi.normalizeImageRegion({
 });
 assert.deepEqual([...normalizedRegion.box_2d], [100, 200, 300, 800]);
 assert.equal(normalizedRegion.translation, "第一句");
-const normalizedTupleRegion = imageApi.normalizeImageRegion([50, 120, 250, 640]);
-assert.deepEqual([...normalizedTupleRegion.box_2d], [50, 120, 250, 640]);
+assert.equal(imageApi.normalizeImageRegion([50, 120, 250, 640]), null);
 assert.equal(
   imageApi.normalizeImageRegion({ box_2d: [300, 200, 100, 800], translation: "bad y" }),
   null,
@@ -76,7 +75,7 @@ assert.equal(
 );
 
 const parsedImage = imageApi.parseImageTranslation(
-  '```json\n{"has_text":true,"translation":"[[BABEL_REGION_1]] 歡迎光臨\\n[[BABEL_REGION_2]] 今日特餐","regions":[[100,150,240,850],[400,150,550,850]]}\n```',
+  '```json\n{"has_text":true,"regions":[{"box_2d":[100,150,240,850],"translation":"歡迎光臨"},{"box_2d":[400,150,550,850],"translation":"今日特餐"}]}\n```',
 );
 assert.equal(parsedImage.hasText, true);
 assert.equal(parsedImage.regions.length, 2);
@@ -87,21 +86,13 @@ assert.equal(parsedImage.translation, "[1] 歡迎光臨\n\n[2] 今日特餐");
 // Macro-block merging for dense text (> 5 vertically close, aligned regions)
 const denseJson = JSON.stringify({
   has_text: true,
-  translation: [
-    "[[BABEL_REGION_1]] 第一段第一行",
-    "[[BABEL_REGION_2]] 第一段第二行",
-    "[[BABEL_REGION_3]] 第一段第三行",
-    "[[BABEL_REGION_4]] 第二段第一行",
-    "[[BABEL_REGION_5]] 第二段第二行",
-    "[[BABEL_REGION_6]] 底部獨立標題",
-  ].join("\n"),
   regions: [
-    [100, 100, 140, 800],
-    [148, 100, 188, 800],
-    [195, 100, 235, 780],
-    [400, 100, 440, 800],
-    [448, 100, 488, 790],
-    [800, 200, 860, 700],
+    { box_2d: [100, 100, 140, 800], translation: "第一段第一行" },
+    { box_2d: [148, 100, 188, 800], translation: "第一段第二行" },
+    { box_2d: [195, 100, 235, 780], translation: "第一段第三行" },
+    { box_2d: [400, 100, 440, 800], translation: "第二段第一行" },
+    { box_2d: [448, 100, 488, 790], translation: "第二段第二行" },
+    { box_2d: [800, 200, 860, 700], translation: "底部獨立標題" },
   ],
 });
 const mergedDense = imageApi.parseImageTranslation(denseJson);
@@ -130,13 +121,19 @@ const invalidBoxImage = {
   ],
 };
 for (const box of [[300, 100, 300, 400], [-1, 100, 200, 400], [300, 100, 400]]) {
-  const textOnlyImage = imageApi.parseImageTranslation(JSON.stringify({
-    ...invalidBoxImage,
-    regions: [invalidBoxImage.regions[0], { ...invalidBoxImage.regions[1], box_2d: box }],
-  }));
-  assert.equal(textOnlyImage.hasText, true);
-  assert.equal(textOnlyImage.regions.length, 0);
-  assert.equal(textOnlyImage.translation, "[1] 第一區譯文\n\n[2] 第二區譯文");
+  assert.throws(
+    () =>
+      imageApi.parseImageTranslation(
+        JSON.stringify({
+          ...invalidBoxImage,
+          regions: [
+            invalidBoxImage.regions[0],
+            { ...invalidBoxImage.regions[1], box_2d: box },
+          ],
+        }),
+      ),
+    /Response format mismatch/,
+  );
 }
 assert.throws(
   () => imageApi.parseImageTranslation('{"has_text":true,"regions":[{"box_2d":[100,100,100,400],"translation":""}]}'),
@@ -362,22 +359,6 @@ for (const native of [false, true]) {
   assert.equal(res.regions.length, 1);
   assert.equal(res.regions[0].translation, "圖片翻譯測試");
   assert.deepEqual([...res.regions[0].box_2d], shortLineBox);
-
-  const textOnlyRequest = imageApi.requestImageTranslation(sampleImageData, imageSettings);
-  const textOnlyRequestCount = transport.history.length;
-  const textOnlyJson = JSON.stringify(invalidBoxImage);
-  transport.options.onload({
-    status: 200,
-    responseText: JSON.stringify(
-      native
-        ? { candidates: [{ finishReason: "STOP", content: { parts: [{ text: textOnlyJson }] } }] }
-        : { choices: [{ finish_reason: "stop", message: { content: textOnlyJson } }] },
-    ),
-  });
-  assert.equal(transport.history.length, textOnlyRequestCount);
-  const textOnlyResult = await textOnlyRequest.promise;
-  assert.equal(textOnlyResult.regions.length, 0);
-  assert.equal(textOnlyResult.translation, "[1] 第一區譯文\n\n[2] 第二區譯文");
 }
 
 // Gemini can reject an image schema with only a generic INVALID_ARGUMENT error.
@@ -397,8 +378,7 @@ const nativeImageResponse = JSON.stringify({
           {
             text: JSON.stringify({
               has_text: true,
-              translation: "[[BABEL_REGION_1]] 圖片翻譯",
-              regions: [[100, 100, 300, 900]],
+              regions: [{ box_2d: [100, 100, 300, 900], translation: "圖片翻譯" }],
             }),
           },
         ],
@@ -1002,8 +982,7 @@ for (const observeBeforeReply of [false, true]) {
             message: {
               content: JSON.stringify({
                 has_text: true,
-                translation: "[[BABEL_REGION_1]] 舊圖片的譯文",
-                regions: [[100, 100, 300, 900]],
+                regions: [{ box_2d: [100, 100, 300, 900], translation: "舊圖片的譯文" }],
               }),
             },
           },

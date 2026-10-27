@@ -8,16 +8,13 @@
   }
 
   function translationCacheKey(source, settings, promptVersion) {
-    const generation = settings.apiFormat === "gemini-native"
-      ? generationConfigFor(settings)
-      : { temperature: temperatureFor(settings) };
     return hashString64([
       promptVersion,
       settings.apiFormat || "chat-completions",
       settings.baseURL,
       settings.model,
       settings.targetLanguage,
-      JSON.stringify(generation),
+      thinkingLevelFor(settings),
       source,
     ].join("\u0000"));
   }

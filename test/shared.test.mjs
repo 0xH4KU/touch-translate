@@ -6,8 +6,8 @@ const { api, imageApi, source, imageSource, context, transport, storage } = crea
 assert.equal(await buildUserscript("text"), source);
 assert.equal(await buildUserscript("image"), imageSource);
 
-const settings = { ...cacheSettings, apiKey: "synthetic-api-secret", apiFormat: "chat-completions", temperature: 0.3 };
-const nativeSettings = { ...settings, apiFormat: "gemini-native", baseURL: googleBaseURL, model: "gemini-3.5-flash-lite" };
+const settings = { ...cacheSettings, apiKey: "synthetic-api-secret", apiFormat: "chat-completions", thinkingLevel: "medium" };
+const nativeSettings = { ...settings, apiFormat: "gemini-native", baseURL: googleBaseURL, model: "gemini-3.5-flash-lite", thinkingLevel: "minimal" };
 const imageData = { base64: "dGVzdA==", mimeType: "image/png" };
 const imageResult = { has_text: true, regions: [{ box_2d: [100, 100, 300, 700], translation: "圖片譯文" }] };
 const requests = [
@@ -93,6 +93,8 @@ transport.options.onload({ status: 200, responseText: JSON.stringify({ choices: 
 assert.equal((await crlfParagraphs.promise)[0], "第一段。\n\n第二段。");
 assert.equal(api.hashCacheKey("same", nativeSettings), api.hashCacheKey("same", { ...nativeSettings, temperature: 1.8 }));
 assert.equal(imageApi.hashImageCacheKey("same", nativeSettings), imageApi.hashImageCacheKey("same", { ...nativeSettings, temperature: 1.8 }));
+assert.notEqual(api.hashCacheKey("same", settings), api.hashCacheKey("same", { ...settings, thinkingLevel: "high" }));
+assert.notEqual(imageApi.hashImageCacheKey("same", nativeSettings), imageApi.hashImageCacheKey("same", { ...nativeSettings, thinkingLevel: "high" }));
 
 for (const [suite, key, limit] of [[api, "cache-v1", 500], [imageApi, "image-cache-v1", 150]]) {
   delete storage[key];

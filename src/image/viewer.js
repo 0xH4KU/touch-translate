@@ -1,9 +1,9 @@
   function storeImageResult(img, result) {
     if (!img?.isConnected) return null;
+    const regions = Array.isArray(result?.regions) ? result.regions : [];
     const translation =
       typeof result === "string" ? result : result?.translation;
-    if (!normalizeText(translation)) return null;
-    const regions = Array.isArray(result?.regions) ? result.regions : [];
+    if (!regions.length || !normalizeText(translation)) return null;
     const normalizedResult = {
       hasText: true,
       regions,
@@ -14,7 +14,7 @@
     if (state) {
       state.regions = regions;
       state.result = normalizedResult;
-      state.activeRegion = regions.length ? "1" : "";
+      state.activeRegion = "1";
       setImageButtonState(img, "done");
     }
 
@@ -24,7 +24,7 @@
   function openImageViewer(img, result) {
     const normalized = storeImageResult(img, result);
     if (!normalized) return null;
-    const { translation, regions } = normalized;
+    const { regions } = normalized;
     const state = imageStates.get(img);
     imageViewerIntent += 1;
     closeImageViewer(false);
@@ -40,9 +40,7 @@
 
     const counter = document.createElement("span");
     counter.dataset.viewerCounter = "";
-    counter.textContent = regions.length
-      ? `Region 1 / ${regions.length}`
-      : "Image translation";
+    counter.textContent = `Region 1 / ${regions.length}`;
 
     const barActions = document.createElement("div");
 
@@ -50,7 +48,6 @@
     togglePinsBtn.type = "button";
     togglePinsBtn.dataset.action = "toggle-pins";
     togglePinsBtn.textContent = "Hide pins";
-    if (!regions.length) togglePinsBtn.hidden = true;
 
     const resetZoomBtn = document.createElement("button");
     resetZoomBtn.type = "button";
@@ -125,12 +122,7 @@
     activeBadge.className = IMAGE_BADGE_CLASS;
     const activeText = document.createElement("div");
     activeText.className = IMAGE_TEXT_CLASS;
-    if (regions.length) {
-      activeCard.append(activeBadge, activeText);
-    } else {
-      assembleTranslatedContent(activeText, translation);
-      activeCard.append(activeText);
-    }
+    activeCard.append(activeBadge, activeText);
 
     const listContainer = document.createElement("div");
     listContainer.className = IMAGE_VIEWER_LIST_CLASS;
@@ -243,7 +235,6 @@
           item.removeAttribute?.("data-active");
         }
       }
-      if (!regions.length) return;
       const activeIndex = label
         ? clampNumber(Number(label) - 1, 0, regions.length - 1)
         : 0;
@@ -261,7 +252,6 @@
     };
 
     const stepRegion = (delta) => {
-      if (!regions.length) return;
       const currentNum = Number(state?.activeRegion) || 1;
       const nextNum =
         ((currentNum - 1 + delta + regions.length) % regions.length) + 1;
@@ -428,7 +418,7 @@
       syncActiveRegion,
     };
 
-    syncActiveRegion(state?.activeRegion || (regions.length ? "1" : ""));
+    syncActiveRegion(state?.activeRegion || "1");
 
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");

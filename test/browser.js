@@ -4,7 +4,7 @@ export async function runBrowserChecks(textSource, imageSource) {
   const check = async (name, run) => { await run(); results.push(`PASS ${name}`); };
   const tick = async () => { for (let i = 0; i < 10; i += 1) await Promise.resolve(); };
   const article = document.querySelector("article");
-  const settings = { apiFormat: "chat-completions", baseURL: "https://api.example.invalid/v1", model: "browser-model", apiKey: "synthetic-key", targetLanguage: "zh-TW", temperature: 0.2 };
+  const settings = { apiFormat: "chat-completions", baseURL: "https://api.example.invalid/v1", model: "browser-model", apiKey: "synthetic-key", targetLanguage: "zh-TW", thinkingLevel: "low" };
   const stores = { text: { "settings-v1": { ...settings } }, image: { "settings-v1": { ...settings } } };
   const requests = [], menus = [];
   const capture = (source, kind, functions) => source.replace("  // Test interface", `  globalThis.browser${kind} = { ${functions} };\n  // Test interface`);
@@ -141,16 +141,17 @@ export async function runBrowserChecks(textSource, imageSource) {
     }
   });
 
-  await check("Gemini 3.5 native settings explain sampling and preserve saved temperature", async () => {
+  await check("Settings dialog saves selected thinking level independently", async () => {
     const saved = stores.text["settings-v1"];
-    stores.text["settings-v1"] = { ...settings, apiFormat: "gemini-native", model: "gemini-3.5-flash-lite", temperature: 0.65 };
+    stores.text["settings-v1"] = { ...settings, apiFormat: "gemini-native", model: "gemini-3.5-flash-lite", thinkingLevel: "medium" };
     const pending = t.configureSettings();
     const dialog = document.querySelector(".touch-translate__settings-dialog");
-    assert(dialog.querySelector('[name="temperature"]').disabled, "An ignored temperature control must be disabled");
-    assert(!dialog.querySelector("small").hidden, "The model-specific explanation must be visible");
+    const select = dialog.querySelector('[name="thinkingLevel"]');
+    assert(select.value === "medium", "The thinking level control must reflect stored settings");
+    select.value = "high";
     dialog.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await pending;
-    assert(stores.text["settings-v1"].temperature === 0.65, "Saving the disabled field must preserve the stored value for other models");
+    assert(stores.text["settings-v1"].thinkingLevel === "high", "Saving settings must update thinking level");
     assert(stores.image["settings-v1"].model === "browser-model", "Saving text settings must not change image settings");
     stores.text["settings-v1"] = saved;
   });

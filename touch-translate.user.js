@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.6.1
+// @version      0.6.2
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -139,6 +139,39 @@
     return Boolean(target?.closest?.("[data-touch-translate-ui]"));
   }
 
+  function isVisible(element) {
+    if (!element?.getClientRects?.().length) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden";
+  }
+
+  function restoreAriaBusy(job) {
+    if (!job?.element) return;
+    if (job.ariaBusy === null) job.element.removeAttribute?.("aria-busy");
+    else job.element.setAttribute?.("aria-busy", job.ariaBusy);
+  }
+
+  function appendTextWithBreaks(parts, text) {
+    const lines = String(text || "").split(/\r?\n/);
+    lines.forEach((line, index) => {
+      if (index > 0 && typeof document.createElement === "function") {
+        parts.push(document.createElement("br"));
+      }
+      if (line) parts.push(line);
+    });
+  }
+
+  function assembleTranslatedContent(container, text) {
+    const lines = String(text || "").split(/\r?\n/);
+    if (lines.length <= 1 || typeof document.createElement !== "function") {
+      container.replaceChildren(text);
+      return;
+    }
+    const parts = [];
+    appendTextWithBreaks(parts, text);
+    container.replaceChildren(...parts);
+  }
+
   function translationRulesFor(language) {
     return [
       `You are a professional native translator. Translate fluently and naturally into ${language}.`,
@@ -157,13 +190,14 @@
   let settingsPrompt;
 
   const SETTINGS_KEY = "settings-v1";
+  const THINKING_LEVELS = ["minimal", "low", "medium", "high"];
   const DEFAULT_SETTINGS = {
     apiFormat: "chat-completions",
     baseURL: "https://api.openai.com/v1",
     model: "",
     apiKey: "",
     targetLanguage: globalThis.navigator?.language || "English",
-    temperature: 0.2,
+    thinkingLevel: "low",
   };
 
 
@@ -203,17 +237,21 @@
   }
 
   function cleanSettings(input = {}, fallback = DEFAULT_SETTINGS) {
-    let temperature = fallback.temperature ?? 0.2;
+    let thinkingLevel = THINKING_LEVELS.includes(fallback.thinkingLevel)
+      ? fallback.thinkingLevel
+      : DEFAULT_SETTINGS.thinkingLevel;
     if (
-      input.temperature !== undefined &&
-      input.temperature !== null &&
-      input.temperature !== ""
+      input.thinkingLevel !== undefined &&
+      input.thinkingLevel !== null &&
+      input.thinkingLevel !== ""
     ) {
-      const parsed = Number(input.temperature);
-      if (Number.isNaN(parsed) || parsed < 0 || parsed > 2) {
-        throw new Error("Temperature must be a number between 0 and 2.");
+      const normalized = String(input.thinkingLevel).trim().toLowerCase();
+      if (!THINKING_LEVELS.includes(normalized)) {
+        throw new Error(
+          "Thinking level must be minimal, low, medium, or high.",
+        );
       }
-      temperature = Math.round(parsed * 100) / 100;
+      thinkingLevel = normalized;
     }
 
     const value = {
@@ -233,7 +271,7 @@
         typeof input.targetLanguage === "string"
           ? input.targetLanguage.trim()
           : fallback.targetLanguage,
-      temperature,
+      thinkingLevel,
     };
 
     if (!["chat-completions", "gemini-native"].includes(value.apiFormat)) {
@@ -370,28 +408,20 @@
       "text",
       current.targetLanguage,
     );
-    const temperature = field(
-      "Temperature (0.0 - 2.0)",
-      "temperature",
-      "number",
-      current.temperature ?? 0.2,
-      false,
-    );
-    inputs.temperature.step = "0.05";
-    inputs.temperature.min = "0";
-    inputs.temperature.max = "2";
-    inputs.temperature.placeholder = "0.2";
-    const temperatureNotice = document.createElement("small");
-    temperatureNotice.textContent = "This model uses its default sampling and minimal thinking.";
-    const updateTemperature = () => {
-      const useDefault = inputs.apiFormat.value === "gemini-native" &&
-        !Object.hasOwn(generationConfigFor({ model: inputs.model.value }), "temperature");
-      inputs.temperature.disabled = useDefault;
-      temperatureNotice.hidden = !useDefault;
-    };
-    inputs.apiFormat.addEventListener("change", updateTemperature);
-    inputs.model.addEventListener("input", updateTemperature);
-    updateTemperature();
+    const thinkingLevel = field("Thinking level", "thinkingLevel", "select", "");
+    for (const [value, text] of [
+      ["minimal", "Minimal"],
+      ["low", "Low"],
+      ["medium", "Medium"],
+      ["high", "High"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      inputs.thinkingLevel.append(option);
+    }
+    inputs.thinkingLevel.value = current.thinkingLevel;
+
     const apiKey = field(
       "API Key",
       "apiKey",
@@ -422,8 +452,7 @@
       baseURL,
       model,
       targetLanguage,
-      temperature,
-      temperatureNotice,
+      thinkingLevel,
       apiKey,
       error,
       actions,
@@ -457,7 +486,7 @@
                 baseURL: data.get("baseURL"),
                 model: data.get("model"),
                 targetLanguage: data.get("targetLanguage"),
-                temperature: data.get("temperature"),
+                thinkingLevel: data.get("thinkingLevel"),
                 apiKey: data.get("apiKey") || current.apiKey,
               },
               current,
@@ -499,7 +528,7 @@
       baseURL: settings.baseURL,
       model: settings.model,
       targetLanguage: settings.targetLanguage,
-      temperature: settings.temperature ?? 0.2,
+      thinkingLevel: settings.thinkingLevel || "low",
     };
     if (includeKey) exportedSettings.apiKey = settings.apiKey;
     const json = JSON.stringify(
@@ -641,8 +670,10 @@
     return url.href;
   }
 
-  function temperatureFor(settings) {
-    return typeof settings?.temperature === "number" ? settings.temperature : 0.2;
+  function thinkingLevelFor(settings) {
+    return THINKING_LEVELS.includes(settings?.thinkingLevel)
+      ? settings.thinkingLevel
+      : "low";
   }
 
   function retryDelayFor(response, attempt = 0) {
@@ -718,17 +749,10 @@
   }
 
   function generationConfigFor(settings) {
-    const config = { responseMimeType: "application/json" };
-    // Gemini 3.5 Flash-Lite ignores sampling overrides; use minimal thinking to avoid safety over-analysis.
-    if (/(?:^|\/)gemini-3\.5-flash-lite(?:-|$)/i.test(settings.model)) {
-      config.thinkingConfig = { thinkingLevel: "minimal" };
-    } else {
-      config.temperature = temperatureFor(settings);
-      if (/(?:^|\/)gemini-3\.1-flash-lite(?:-|$)/i.test(settings.model)) {
-        config.thinkingConfig = { thinkingLevel: "minimal" };
-      }
-    }
-    return config;
+    return {
+      responseMimeType: "application/json",
+      thinkingConfig: { thinkingLevel: thinkingLevelFor(settings) },
+    };
   }
 
   function providerContent(body, nativeGemini, expectedFormat) {
@@ -798,7 +822,7 @@
       const payload = {
         model: settings.model,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userContent }],
-        temperature: temperatureFor(settings),
+        reasoning_effort: thinkingLevelFor(settings),
       };
       if (useSchema) {
         payload.response_format = {
@@ -946,16 +970,13 @@
   }
 
   function translationCacheKey(source, settings, promptVersion) {
-    const generation = settings.apiFormat === "gemini-native"
-      ? generationConfigFor(settings)
-      : { temperature: temperatureFor(settings) };
     return hashString64([
       promptVersion,
       settings.apiFormat || "chat-completions",
       settings.baseURL,
       settings.model,
       settings.targetLanguage,
-      JSON.stringify(generation),
+      thinkingLevelFor(settings),
       source,
     ].join("\u0000"));
   }
@@ -1478,10 +1499,6 @@
     const [aZone, aDistance] = viewportPriority(a, viewportHeight);
     const [bZone, bDistance] = viewportPriority(b, viewportHeight);
     return aZone - bZone || aDistance - bDistance;
-  }
-
-  function isNearViewport(rect, viewportHeight) {
-    return viewportPriority(rect, viewportHeight)[1] <= viewportHeight;
   }
 
   function parseTranslations(content, expectedLength) {
@@ -2027,22 +2044,6 @@
     return raw;
   }
 
-  function contentTextNodes(element) {
-    const nodes = [];
-    const walker = document.createTreeWalker(
-      element,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode: (node) =>
-          normalizeText(node.nodeValue) && isRenderedTextNode(node, element)
-            ? NodeFilter.FILTER_ACCEPT
-            : NodeFilter.FILTER_REJECT,
-      },
-    );
-    while (walker.nextNode()) nodes.push(walker.currentNode);
-    return nodes;
-  }
-
   function translationRequestFor(element, text) {
     const { requestText, wrappers } = extractInlineStructure(element);
     return {
@@ -2121,27 +2122,6 @@
       indicators.delete(element);
       indicator.remove();
     }
-  }
-
-  function appendTextWithBreaks(parts, text) {
-    const lines = String(text || "").split(/\r?\n/);
-    lines.forEach((line, index) => {
-      if (index > 0 && typeof document.createElement === "function") {
-        parts.push(document.createElement("br"));
-      }
-      if (line) parts.push(line);
-    });
-  }
-
-  function assembleTranslatedContent(container, text) {
-    const lines = String(text || "").split(/\r?\n/);
-    if (lines.length <= 1 || typeof document.createElement !== "function") {
-      container.replaceChildren(text);
-      return;
-    }
-    const parts = [];
-    appendTextWithBreaks(parts, text);
-    container.replaceChildren(...parts);
   }
 
   function hasValidInlineSegments(segments, wrapperCount) {
@@ -2297,12 +2277,9 @@
     anchor.insertAdjacentElement("afterend", translated);
     translations?.add(translated);
     const { container, wrappers } = extractInlineStructure(translated);
-    const nodes = contentTextNodes(translated);
     const segments = Array.isArray(result?.segments) ? result.segments : null;
     if (hasValidInlineSegments(segments, wrappers.length)) {
       renderInlineSegments(container, segments, wrappers);
-    } else if (nodes.length === 1 && !/\r?\n/.test(translation)) {
-      nodes[0].nodeValue = translation;
     } else {
       assembleTranslatedContent(container, translation);
     }
@@ -2331,12 +2308,6 @@
     );
     element.style.setProperty("opacity", "0", "important");
     setTimeout(() => element.remove(), 140);
-  }
-
-  function isVisible(element) {
-    if (!element.getClientRects().length) return false;
-    const style = getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden";
   }
 
   function pageContentRoots() {
@@ -2392,38 +2363,11 @@
     return isUsefulPageBlock(element, text ?? sourceText(element));
   }
 
-  function collectPageBlocks(nearbyOnly = false) {
-    const roots = pageContentRoots();
-    const viewportHeight = innerHeight || document.documentElement.clientHeight;
-    return [...document.querySelectorAll(BLOCK_SELECTOR)]
-      .filter((element) => roots.some((root) => root.contains(element)))
-      .map((element) => ({
-        element,
-        rect: element.getBoundingClientRect(),
-      }))
-      .filter(
-        ({ rect }) => !nearbyOnly || isNearViewport(rect, viewportHeight),
-      )
-      .map((record) => ({ ...record, text: sourceText(record.element) }))
-      .filter(({ element, text }) =>
-        isTranslatablePageBlock(element, roots, text),
-      )
-      .sort((a, b) =>
-        compareViewportPriority(a.rect, b.rect, viewportHeight),
-      )
-      .map(({ element }) => element);
-  }
-
   // Source: src/text/jobs.js
 
   const pendingJobs = new WeakMap();
   const swipeBatch = new Map();
   let swipeBatchTimer;
-
-  function restoreAriaBusy(job) {
-    if (job.ariaBusy === null) job.element.removeAttribute("aria-busy");
-    else job.element.setAttribute("aria-busy", job.ariaBusy);
-  }
 
   function trackJob(job, task) {
     job.task = task;
@@ -2787,7 +2731,6 @@
   }
 
   function observePageBlocks(task) {
-    if (!task.intersectionObserver) return 0;
     const roots = pageContentRoots();
     const elements = document.querySelectorAll(BLOCK_SELECTOR);
     let count = 0;
@@ -2815,7 +2758,6 @@
     clearTimeout(task.scheduleTimer);
     task.observer?.disconnect();
     task.intersectionObserver?.disconnect();
-    globalThis.removeEventListener("scroll", task.refresh, true);
     [...task.jobs].forEach((job) => cancelJob(job.element));
     if (removeTranslations) undoPageTranslations(task);
     if (message) toast(message);
@@ -2827,30 +2769,25 @@
       task.rerun = true;
       return;
     }
-    let blocks;
-    if (task.intersectionObserver) {
-      const roots = pageContentRoots();
-      const viewportHeight =
-        innerHeight || document.documentElement.clientHeight;
-      blocks = [...task.pendingBlocks]
-        .filter((element) => {
-          const eligible = isTranslatablePageBlock(element, roots);
-          if (!eligible) task.observedBlocks.delete(element);
-          return eligible;
-        })
-        .map((element) => ({
-          element,
-          rect: element.getBoundingClientRect(),
-        }))
-        .sort((a, b) =>
-          compareViewportPriority(a.rect, b.rect, viewportHeight),
-        )
-        .map(({ element }) => element);
-      task.pendingBlocks.clear();
-      if (!blocks.length) return;
-    } else {
-      blocks = collectPageBlocks(true);
-    }
+    const roots = pageContentRoots();
+    const viewportHeight =
+      innerHeight || document.documentElement.clientHeight;
+    const blocks = [...task.pendingBlocks]
+      .filter((element) => {
+        const eligible = isTranslatablePageBlock(element, roots);
+        if (!eligible) task.observedBlocks.delete(element);
+        return eligible;
+      })
+      .map((element) => ({
+        element,
+        rect: element.getBoundingClientRect(),
+      }))
+      .sort((a, b) =>
+        compareViewportPriority(a.rect, b.rect, viewportHeight),
+      )
+      .map(({ element }) => element);
+    task.pendingBlocks.clear();
+    if (!blocks.length) return;
     task.running = translateElements(blocks, {
       showProgress,
       task,
@@ -2900,12 +2837,7 @@
     task.refresh = () => {
       clearTimeout(task.refreshTimer);
       task.refreshTimer = setTimeout(() => {
-        if (task.cancelled) return;
-        if (task.intersectionObserver) {
-          observePageBlocks(task);
-        } else {
-          runPageTranslation(task);
-        }
+        if (!task.cancelled) observePageBlocks(task);
       }, PAGE_REFRESH_MS);
     };
     task.observer = new MutationObserver(task.refresh);
@@ -2925,32 +2857,23 @@
       childList: true,
       subtree: true,
     });
-    if (typeof IntersectionObserver === "function") {
-      task.intersectionObserver = new IntersectionObserver(
-        (entries) => {
-          let hasNew = false;
-          for (const entry of entries) {
-            if (entry.isIntersecting) {
-              task.pendingBlocks.add(entry.target);
-              task.intersectionObserver.unobserve(entry.target);
-              hasNew = true;
-            }
+    task.intersectionObserver = new IntersectionObserver(
+      (entries) => {
+        let hasNew = false;
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            task.pendingBlocks.add(entry.target);
+            task.intersectionObserver.unobserve(entry.target);
+            hasNew = true;
           }
-          if (hasNew && !task.cancelled) {
-            task.schedule();
-          }
-        },
-        { rootMargin: "100% 0px 100% 0px" },
-      );
-      const observed = observePageBlocks(task);
-      if (!observed) toast("No new translatable blocks found");
-    } else {
-      globalThis.addEventListener("scroll", task.refresh, {
-        capture: true,
-        passive: true,
-      });
-      runPageTranslation(task, true);
-    }
+        }
+        if (hasNew && !task.cancelled) {
+          task.schedule();
+        }
+      },
+      { rootMargin: "100% 0px 100% 0px" },
+    );
+    if (!observePageBlocks(task)) toast("No new translatable blocks found");
     pageTask = task;
   }
 
@@ -3511,7 +3434,6 @@
       canConsumeRightSwipe,
       indicatorFor,
       insertTranslation,
-      isNearViewport,
       isPrivateOrLocalHost,
       isRenderedTextNode,
       isSafeHref,

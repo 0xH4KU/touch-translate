@@ -369,22 +369,6 @@
     return raw;
   }
 
-  function contentTextNodes(element) {
-    const nodes = [];
-    const walker = document.createTreeWalker(
-      element,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode: (node) =>
-          normalizeText(node.nodeValue) && isRenderedTextNode(node, element)
-            ? NodeFilter.FILTER_ACCEPT
-            : NodeFilter.FILTER_REJECT,
-      },
-    );
-    while (walker.nextNode()) nodes.push(walker.currentNode);
-    return nodes;
-  }
-
   function translationRequestFor(element, text) {
     const { requestText, wrappers } = extractInlineStructure(element);
     return {
@@ -463,27 +447,6 @@
       indicators.delete(element);
       indicator.remove();
     }
-  }
-
-  function appendTextWithBreaks(parts, text) {
-    const lines = String(text || "").split(/\r?\n/);
-    lines.forEach((line, index) => {
-      if (index > 0 && typeof document.createElement === "function") {
-        parts.push(document.createElement("br"));
-      }
-      if (line) parts.push(line);
-    });
-  }
-
-  function assembleTranslatedContent(container, text) {
-    const lines = String(text || "").split(/\r?\n/);
-    if (lines.length <= 1 || typeof document.createElement !== "function") {
-      container.replaceChildren(text);
-      return;
-    }
-    const parts = [];
-    appendTextWithBreaks(parts, text);
-    container.replaceChildren(...parts);
   }
 
   function hasValidInlineSegments(segments, wrapperCount) {
@@ -639,12 +602,9 @@
     anchor.insertAdjacentElement("afterend", translated);
     translations?.add(translated);
     const { container, wrappers } = extractInlineStructure(translated);
-    const nodes = contentTextNodes(translated);
     const segments = Array.isArray(result?.segments) ? result.segments : null;
     if (hasValidInlineSegments(segments, wrappers.length)) {
       renderInlineSegments(container, segments, wrappers);
-    } else if (nodes.length === 1 && !/\r?\n/.test(translation)) {
-      nodes[0].nodeValue = translation;
     } else {
       assembleTranslatedContent(container, translation);
     }
@@ -673,12 +633,6 @@
     );
     element.style.setProperty("opacity", "0", "important");
     setTimeout(() => element.remove(), 140);
-  }
-
-  function isVisible(element) {
-    if (!element.getClientRects().length) return false;
-    const style = getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden";
   }
 
   function pageContentRoots() {
@@ -732,26 +686,4 @@
       return false;
     }
     return isUsefulPageBlock(element, text ?? sourceText(element));
-  }
-
-  function collectPageBlocks(nearbyOnly = false) {
-    const roots = pageContentRoots();
-    const viewportHeight = innerHeight || document.documentElement.clientHeight;
-    return [...document.querySelectorAll(BLOCK_SELECTOR)]
-      .filter((element) => roots.some((root) => root.contains(element)))
-      .map((element) => ({
-        element,
-        rect: element.getBoundingClientRect(),
-      }))
-      .filter(
-        ({ rect }) => !nearbyOnly || isNearViewport(rect, viewportHeight),
-      )
-      .map((record) => ({ ...record, text: sourceText(record.element) }))
-      .filter(({ element, text }) =>
-        isTranslatablePageBlock(element, roots, text),
-      )
-      .sort((a, b) =>
-        compareViewportPriority(a.rect, b.rect, viewportHeight),
-      )
-      .map(({ element }) => element);
   }
