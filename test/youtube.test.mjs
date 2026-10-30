@@ -85,8 +85,28 @@ assert.equal(transport.options.anonymous, true);
 assert.doesNotMatch(payload.messages[1].content, /youtube\.com|abcdefghijk|synthetic-subtitle-secret/);
 assert.doesNotMatch(payload.messages[1].content, /"start"|"end"/);
 assert.equal(payload.response_format.json_schema.name, "youtube_subtitles");
+assert.equal(payload.response_format.json_schema.schema.properties.groups.maxItems, undefined, "Large maxItems on object arrays breaks Gemini responseJsonSchema state limits");
 reply(transport.options, groups);
 assert.equal((await request.promise)[0].translation, groups[0].translation);
+
+const geminiNativeSettings = api.cleanSettings({
+  ...settings,
+  apiFormat: "gemini-native",
+  baseURL: "https://generativelanguage.googleapis.com/v1beta",
+  model: "gemini-3.5-flash-lite",
+});
+const geminiRequest = api.requestSubtitleTranslation(chunk, geminiNativeSettings, true);
+assert.ok(JSON.parse(transport.options.data).generationConfig.responseJsonSchema);
+transport.options.onload({
+  status: 400,
+  responseText: JSON.stringify({ error: { code: 400, message: "Request contains an invalid argument.", status: "INVALID_ARGUMENT" } }),
+});
+assert.equal(JSON.parse(transport.options.data).generationConfig.responseJsonSchema, undefined, "Generic Gemini 400 INVALID_ARGUMENT must retry without responseJsonSchema");
+transport.options.onload({
+  status: 200,
+  responseText: JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: JSON.stringify({ groups }) }] } }] }),
+});
+assert.equal((await geminiRequest.promise)[0].translation, groups[0].translation);
 
 const makeSession = (chunks) => ({
   video: { currentTime: 1.5, playbackRate: 1 }, player: { classList: { contains: () => false } },

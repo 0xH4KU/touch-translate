@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch YouTube Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.5
+// @version      0.1.4
 // @description  Private bilingual YouTube captions with smart segmentation and your own translation API.
 // @author       HAKU
 // @match        https://www.youtube.com/*
@@ -1793,11 +1793,12 @@
     });
     return sendProviderRequest(settings, {
       schemaName: "youtube_subtitles", systemPrompt, userContent,
+      allowGenericSchemaFallback: true,
       geminiParts: [{ text: userContent }],
       parseResponse: (content) => parseSubtitleGroups(content, chunk, smart),
       schema: {
         type: "object", properties: {
-          groups: { type: "array", minItems: 1, maxItems: chunk.fragments.length, items: {
+          groups: { type: "array", items: {
             type: "object", properties: {
               from: { type: "integer" }, to: { type: "integer" }, translation: { type: "string" },
             }, required: ["from", "to", "translation"], additionalProperties: false,
