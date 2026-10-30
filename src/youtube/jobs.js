@@ -144,6 +144,7 @@
       void captionBridgeRequest("restore", { videoId: session.videoId }).catch(() => {});
     }
     if (subtitleView) {
+      subtitleView.trigger.dataset.active = "false";
       subtitleView.toggle.textContent = "Translate CC";
       subtitleView.toggle.setAttribute("aria-pressed", "false");
       subtitleView.captions.hidden = true;
@@ -152,11 +153,12 @@
     }
   }
 
-  async function startYoutubeSubtitles() {
+  async function startYoutubeSubtitles(auto = false) {
     const view = subtitleView;
     if (!view || !youtubeVideoId()) return;
     stopYoutubeSubtitles();
     const intent = subtitleIntent;
+    view.trigger.dataset.active = "true";
     view.toggle.textContent = "Cancel";
     view.toggle.setAttribute("aria-pressed", "true");
     try {
@@ -167,7 +169,13 @@
         const snapshot = await captionBridgeRequest("snapshot").catch(() => null);
         const source = selectYoutubeTrack(snapshot, settings.targetLanguage);
         hasNativeTarget = Boolean(selectTargetYoutubeTrack(snapshot, source, settings.targetLanguage));
-        if (!hasNativeTarget) settings = await readySettings();
+        if (!hasNativeTarget) {
+          if (auto === true) {
+            stopYoutubeSubtitles();
+            return;
+          }
+          settings = await readySettings();
+        }
       }
       if (intent !== subtitleIntent || view !== subtitleView) return;
       if (!settings) { stopYoutubeSubtitles(); return; }
@@ -181,6 +189,7 @@
       session.chunks = await loadYoutubeCaptions(session);
       if (session !== subtitleSession || session.controller.signal.aborted) return;
       if (!session.nativeBilingual && hasNativeTarget) {
+        if (auto === true) { stopYoutubeSubtitles(); return; }
         const ready = await readySettings();
         if (session !== subtitleSession || session.controller.signal.aborted) return;
         if (!ready) { stopYoutubeSubtitles(); return; }
@@ -224,8 +233,13 @@
   }
 
   function toggleYoutubeSubtitles() {
-    if (subtitleView?.toggle.getAttribute("aria-pressed") === "true") stopYoutubeSubtitles();
-    else void startYoutubeSubtitles();
+    const active = subtitleView?.toggle.getAttribute("aria-pressed") === "true";
+    if (subtitleView) {
+      subtitleView.preferences.enabled = !active;
+      GM_setValue(PREFERENCES_KEY, subtitleView.preferences);
+    }
+    if (active) stopYoutubeSubtitles();
+    else void startYoutubeSubtitles(false);
   }
 
   function restartYoutubeSubtitles() {

@@ -78,13 +78,25 @@ export async function runYoutubeBrowserChecks(source) {
     }
   };
 
-  await check("Complete userscript stays idle until explicitly enabled", async () => {
+  await check("Complete userscript docks next to CC and auto-starts by default", async () => {
     assert(menus.length === 6, "All six menu commands must initialize");
-    assert(!!api.getView(), "The controls must mount on the player");
-    assert(requests.length === 0 && captionLoads === 0, "Initialization must not fetch or translate captions");
+    const view = api.getView();
+    assert(!!view, "The controls must mount on the player");
+    assert(view.trigger.previousElementSibling === cc, "The single trigger button must dock right next to YouTube's CC button");
+    assert(view.trigger.getBoundingClientRect().height >= 44, "Trigger button must retain a 44px touch target");
+    assert(view.controls.hidden, "Detailed preferences must start closed behind the single trigger button");
+    view.trigger.click();
+    assert(!view.controls.hidden && view.toggle.getBoundingClientRect().height >= 44, "Clicking the trigger button must open detailed preferences");
+    view.trigger.click();
+    assert(view.controls.hidden, "Clicking the trigger button again must close detailed preferences");
     assert(!window.GM_xmlhttpRequest && !JSON.stringify(window.__touchYoutubeCaptionBridge).includes(settings.apiKey), "The page bridge must not receive privileged APIs or the translation key");
-    const toggle = api.getView().toggle;
-    assert(toggle.getBoundingClientRect().height >= 44, "Controls must retain a 44px touch target");
+    await until(() => requests.length > 0);
+    assert(view.trigger.dataset.active === "true", "Default auto-start must mark the trigger active");
+    api.stopYoutubeSubtitles();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    requests.length = 0;
+    captionLoads = 0;
+    firstCaptionFailure = true;
   });
 
   await check("Page bridge restricts caption requests and restores only its own CC change", async () => {
@@ -154,9 +166,10 @@ export async function runYoutubeBrowserChecks(source) {
     smartBox.checked = true;
     smartBox.dispatchEvent(new Event("change"));
     await finishPrefetch();
-    view.menu.open = true;
+    view.trigger.click();
+    assert(!view.controls.hidden, "Trigger button must open the preferences panel");
     view.expand.click();
-    assert(!view.menu.open, "Expanding must close the open preferences menu");
+    assert(view.controls.hidden, "Expanding must close the open preferences menu");
     assert(player.classList.contains("touch-youtube-translate__expanded"), "Expand must keep the overlay and video in one player");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     assert(!player.classList.contains("touch-youtube-translate__expanded"), "Escape must exit expansion");

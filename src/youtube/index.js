@@ -31,13 +31,16 @@
       toggleSubtitleExpanded(false);
       subtitleView.autohideTimer?.();
       if (subtitleView.player.style.position === "relative") subtitleView.player.style.position = subtitleView.position;
+      subtitleView.trigger?.remove();
       subtitleView.host.remove();
       subtitleView = null;
     }
     if (player && video && !subtitleView) {
       mountSubtitleView(player, video);
       subtitleView.videoId = videoId;
+      if (subtitleView.preferences.enabled) void startYoutubeSubtitles(true);
     }
+    if (subtitleView) syncSubtitleTriggerDock(subtitleView);
     const session = subtitleSession;
     if (session) {
       if (JSON.stringify(session.settings) !== JSON.stringify(loadSettings())) {

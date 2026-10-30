@@ -145,6 +145,7 @@ bounded.video.playbackRate = 2;
 assert.ok(api.subtitleQueueChunk(bounded));
 assert.equal(api.subtitleAtTime(session.chunks, 1000).translation, groups[0].translation);
 assert.equal(api.subtitleAtTime(session.chunks, 4800), null);
+assert.equal(api.loadSubtitlePreferences().enabled, true, "Bilingual subtitles must be enabled by default");
 assert.equal(api.subtitleTrackText({ text: "Source", translation: "譯文" }, { translationOnly: true }), "譯文");
 assert.equal(api.subtitleTrackText({ text: "Source" }, { translationOnly: true }), "Source");
 

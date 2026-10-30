@@ -31,6 +31,7 @@
     const saved = GM_getValue(PREFERENCES_KEY, {});
     const defaultSize = globalThis.matchMedia?.("(max-width: 600px)")?.matches ? 18 : 22;
     return {
+      enabled: saved?.enabled !== false,
       smart: saved?.smart !== false,
       translationOnly: saved?.translationOnly === true,
       fontSize: Math.max(14, Math.min(36, Number(saved?.fontSize) || defaultSize)),

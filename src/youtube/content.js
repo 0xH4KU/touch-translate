@@ -170,7 +170,49 @@
     subtitleView.status.textContent = text;
     subtitleView.status.dataset.error = String(error);
     subtitleView.retry.hidden = !error;
-    subtitleView.host.dataset.idle = String(!subtitleView.menu?.open && !text);
+    subtitleView.host.dataset.idle = String(Boolean(subtitleView.controls?.hidden) && !text);
+  }
+
+  function findNativeCcButton(player) {
+    return player?.querySelector?.(
+      ".ytp-right-controls .ytp-subtitles-button, .ytp-chrome-bottom .ytp-subtitles-button, .player-controls-top .ytm-closed-caption-button, ytm-custom-control .ytm-closed-caption-button, .ytm-closed-caption-button",
+    ) || null;
+  }
+
+  function syncSubtitleTriggerDock(view = subtitleView) {
+    if (!view) return;
+    const cc = findNativeCcButton(view.player);
+    if (cc && cc.parentElement) {
+      if (view.trigger.previousElementSibling !== cc) cc.after(view.trigger);
+      view.trigger.dataset.docked = "control";
+    } else {
+      if (view.trigger.parentElement !== view.toolbar) view.toolbar.append(view.trigger);
+      view.trigger.dataset.docked = "overlay";
+    }
+  }
+
+  function setPreferencesOpen(view = subtitleView, open = Boolean(view?.controls.hidden)) {
+    if (!view) return;
+    syncSubtitleTriggerDock(view);
+    view.controls.hidden = !open;
+    view.trigger.setAttribute("aria-expanded", String(open));
+    if (open) {
+      const playerRect = view.player.getBoundingClientRect?.();
+      const triggerRect = view.trigger.getBoundingClientRect?.();
+      const mobile = globalThis.location?.hostname === "m.youtube.com" || globalThis.matchMedia?.("(max-width: 600px)")?.matches;
+      if (playerRect?.width > 0 && triggerRect?.width > 0) {
+        const right = Math.max(8, Math.min(Math.max(8, playerRect.width - 252), Math.round(playerRect.right - triggerRect.right)));
+        const isBottom = triggerRect.top + triggerRect.height / 2 >= playerRect.top + playerRect.height / 2;
+        view.controls.style.setProperty("--pref-right", `${right}px`);
+        view.controls.dataset.placement = isBottom ? "bottom" : "top";
+        view.controls.style.setProperty("--pref-offset", `${isBottom
+          ? Math.max(52, Math.round(playerRect.bottom - triggerRect.top + 8))
+          : Math.max(48, Math.round(triggerRect.bottom - playerRect.top + 6))}px`);
+      } else {
+        view.controls.dataset.placement = mobile ? "top" : "bottom";
+      }
+    }
+    view.host.dataset.idle = String(!open && !view.status.textContent);
   }
 
   function renderSubtitles(session = subtitleSession) {
@@ -195,10 +237,7 @@
     view.player.classList.toggle(`${SCRIPT_PREFIX}__expanded`, expanded);
     view.expand.setAttribute("aria-pressed", String(expanded));
     view.expand.textContent = expanded ? "Exit expand" : "Expand";
-    if (view.menu) {
-      view.menu.open = false;
-      view.host.dataset.idle = String(!view.status.textContent);
-    }
+    setPreferencesOpen(view, false);
     window.dispatchEvent(new Event("resize"));
   }
 
@@ -209,22 +248,32 @@
     host.dataset.idle = "true";
     const toolbar = document.createElement("div");
     toolbar.className = `${SCRIPT_PREFIX}__toolbar`;
-    const button = (text, action) => {
+    const button = (text, action, parent = toolbar) => {
       const element = document.createElement("button");
       element.type = "button";
       element.textContent = text;
       element.addEventListener("click", (event) => { event.stopPropagation(); action(); });
-      toolbar.append(element);
+      parent.append(element);
       return element;
     };
-    const toggle = button("Translate CC", toggleYoutubeSubtitles);
-    toggle.setAttribute("aria-pressed", "false");
     const preferences = loadSubtitlePreferences();
-    const menu = document.createElement("details");
-    const summary = document.createElement("summary");
-    summary.textContent = "Captions";
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = `ytp-button ${SCRIPT_PREFIX}__trigger`;
+    trigger.dataset.touchTranslateUi = "";
+    trigger.dataset.active = "false";
+    trigger.setAttribute("aria-label", "Touch YouTube Translate preferences");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.title = SCRIPT_NAME;
+    const badge = document.createElement("span");
+    badge.className = `${SCRIPT_PREFIX}__badge`;
+    badge.textContent = "譯";
+    trigger.append(badge);
     const controls = document.createElement("div");
     controls.className = `${SCRIPT_PREFIX}__preferences`;
+    controls.hidden = true;
+    const toggle = button("Translate CC", toggleYoutubeSubtitles, controls);
+    toggle.setAttribute("aria-pressed", "false");
     const preference = (text, key, type, min, max) => {
       const label = document.createElement("label");
       const input = document.createElement("input");
@@ -252,25 +301,24 @@
     preference("Translation only", "translationOnly", "checkbox");
     preference("Text size", "fontSize", "range", 14, 36);
     preference("Bottom position", "bottom", "range", 8, 35);
-    menu.append(summary, controls);
-    menu.addEventListener("toggle", () => {
-      host.dataset.idle = String(!menu.open && !status.textContent);
-    });
-    toolbar.append(menu);
-    const expand = button("Expand", () => toggleSubtitleExpanded());
+    const actions = document.createElement("div");
+    actions.className = `${SCRIPT_PREFIX}__actions`;
+    const expand = button("Expand", () => toggleSubtitleExpanded(), actions);
     expand.setAttribute("aria-pressed", "false");
-    controls.append(expand, button("API", () => {
-      menu.open = false;
-      host.dataset.idle = String(!status.textContent);
-      configureSettings().catch(reportError);
-    }));
-    const retry = button("Retry", retryYoutubeSubtitles);
+    button("API", () => {
+      setPreferencesOpen(subtitleView, false);
+      configureSettings().then((saved) => {
+        if (saved && subtitleView?.preferences.enabled) restartYoutubeSubtitles();
+      }).catch(reportError);
+    }, actions);
+    controls.append(actions);
+    const retry = button("Retry", retryYoutubeSubtitles, toolbar);
     retry.hidden = true;
     const status = document.createElement("span");
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
     status.className = `${SCRIPT_PREFIX}__status`;
-    toolbar.append(status);
+    toolbar.append(status, trigger);
     const captions = document.createElement("div");
     captions.className = `${SCRIPT_PREFIX}__captions`;
     captions.hidden = true;
@@ -278,15 +326,21 @@
     source.dir = translation.dir = "auto";
     translation.className = `${SCRIPT_PREFIX}__translation`;
     captions.append(source, translation);
-    host.append(toolbar, captions);
-    for (const type of ["click", "dblclick", "pointerdown", "keydown", "touchstart", "touchend"]) {
-      toolbar.addEventListener(type, (event) => event.stopPropagation());
+    host.append(toolbar, controls, captions);
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setPreferencesOpen(subtitleView, controls.hidden);
+    });
+    for (const element of [toolbar, controls, trigger]) {
+      for (const type of ["click", "dblclick", "pointerdown", "pointerup", "keydown", "touchstart", "touchend"]) {
+        element.addEventListener(type, (event) => event.stopPropagation());
+      }
     }
     let autohideTimer;
     const noteActivity = (event) => {
-      if (menu.open && event?.target && !menu.contains(event.target)) {
-        menu.open = false;
-        host.dataset.idle = String(!status.textContent);
+      syncSubtitleTriggerDock(subtitleView);
+      if (!controls.hidden && event?.target && !controls.contains(event.target) && !trigger.contains(event.target)) {
+        setPreferencesOpen(subtitleView, false);
       }
       host.dataset.autohide = "false";
       clearTimeout(autohideTimer);
@@ -303,7 +357,8 @@
     player.append(host);
     const position = player.style.position;
     if (getComputedStyle(player).position === "static") player.style.position = "relative";
-    subtitleView = { host, player, video, toggle, menu, expand, retry, status, captions, source, translation, preferences, position, autohideTimer: () => clearTimeout(autohideTimer) };
+    subtitleView = { host, toolbar, player, video, trigger, toggle, controls, expand, retry, status, captions, source, translation, preferences, position, autohideTimer: () => clearTimeout(autohideTimer) };
+    syncSubtitleTriggerDock(subtitleView);
     applySubtitlePreferences();
   }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch YouTube Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.0
+// @version      0.1.1
 // @description  Private bilingual YouTube captions with smart segmentation and your own translation API.
 // @author       HAKU
 // @match        https://www.youtube.com/*
@@ -58,6 +58,7 @@
     const saved = GM_getValue(PREFERENCES_KEY, {});
     const defaultSize = globalThis.matchMedia?.("(max-width: 600px)")?.matches ? 18 : 22;
     return {
+      enabled: saved?.enabled !== false,
       smart: saved?.smart !== false,
       translationOnly: saved?.translationOnly === true,
       fontSize: Math.max(14, Math.min(36, Number(saved?.fontSize) || defaultSize)),
@@ -1925,7 +1926,49 @@
     subtitleView.status.textContent = text;
     subtitleView.status.dataset.error = String(error);
     subtitleView.retry.hidden = !error;
-    subtitleView.host.dataset.idle = String(!subtitleView.menu?.open && !text);
+    subtitleView.host.dataset.idle = String(Boolean(subtitleView.controls?.hidden) && !text);
+  }
+
+  function findNativeCcButton(player) {
+    return player?.querySelector?.(
+      ".ytp-right-controls .ytp-subtitles-button, .ytp-chrome-bottom .ytp-subtitles-button, .player-controls-top .ytm-closed-caption-button, ytm-custom-control .ytm-closed-caption-button, .ytm-closed-caption-button",
+    ) || null;
+  }
+
+  function syncSubtitleTriggerDock(view = subtitleView) {
+    if (!view) return;
+    const cc = findNativeCcButton(view.player);
+    if (cc && cc.parentElement) {
+      if (view.trigger.previousElementSibling !== cc) cc.after(view.trigger);
+      view.trigger.dataset.docked = "control";
+    } else {
+      if (view.trigger.parentElement !== view.toolbar) view.toolbar.append(view.trigger);
+      view.trigger.dataset.docked = "overlay";
+    }
+  }
+
+  function setPreferencesOpen(view = subtitleView, open = Boolean(view?.controls.hidden)) {
+    if (!view) return;
+    syncSubtitleTriggerDock(view);
+    view.controls.hidden = !open;
+    view.trigger.setAttribute("aria-expanded", String(open));
+    if (open) {
+      const playerRect = view.player.getBoundingClientRect?.();
+      const triggerRect = view.trigger.getBoundingClientRect?.();
+      const mobile = globalThis.location?.hostname === "m.youtube.com" || globalThis.matchMedia?.("(max-width: 600px)")?.matches;
+      if (playerRect?.width > 0 && triggerRect?.width > 0) {
+        const right = Math.max(8, Math.min(Math.max(8, playerRect.width - 252), Math.round(playerRect.right - triggerRect.right)));
+        const isBottom = triggerRect.top + triggerRect.height / 2 >= playerRect.top + playerRect.height / 2;
+        view.controls.style.setProperty("--pref-right", `${right}px`);
+        view.controls.dataset.placement = isBottom ? "bottom" : "top";
+        view.controls.style.setProperty("--pref-offset", `${isBottom
+          ? Math.max(52, Math.round(playerRect.bottom - triggerRect.top + 8))
+          : Math.max(48, Math.round(triggerRect.bottom - playerRect.top + 6))}px`);
+      } else {
+        view.controls.dataset.placement = mobile ? "top" : "bottom";
+      }
+    }
+    view.host.dataset.idle = String(!open && !view.status.textContent);
   }
 
   function renderSubtitles(session = subtitleSession) {
@@ -1950,10 +1993,7 @@
     view.player.classList.toggle(`${SCRIPT_PREFIX}__expanded`, expanded);
     view.expand.setAttribute("aria-pressed", String(expanded));
     view.expand.textContent = expanded ? "Exit expand" : "Expand";
-    if (view.menu) {
-      view.menu.open = false;
-      view.host.dataset.idle = String(!view.status.textContent);
-    }
+    setPreferencesOpen(view, false);
     window.dispatchEvent(new Event("resize"));
   }
 
@@ -1964,22 +2004,32 @@
     host.dataset.idle = "true";
     const toolbar = document.createElement("div");
     toolbar.className = `${SCRIPT_PREFIX}__toolbar`;
-    const button = (text, action) => {
+    const button = (text, action, parent = toolbar) => {
       const element = document.createElement("button");
       element.type = "button";
       element.textContent = text;
       element.addEventListener("click", (event) => { event.stopPropagation(); action(); });
-      toolbar.append(element);
+      parent.append(element);
       return element;
     };
-    const toggle = button("Translate CC", toggleYoutubeSubtitles);
-    toggle.setAttribute("aria-pressed", "false");
     const preferences = loadSubtitlePreferences();
-    const menu = document.createElement("details");
-    const summary = document.createElement("summary");
-    summary.textContent = "Captions";
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = `ytp-button ${SCRIPT_PREFIX}__trigger`;
+    trigger.dataset.touchTranslateUi = "";
+    trigger.dataset.active = "false";
+    trigger.setAttribute("aria-label", "Touch YouTube Translate preferences");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.title = SCRIPT_NAME;
+    const badge = document.createElement("span");
+    badge.className = `${SCRIPT_PREFIX}__badge`;
+    badge.textContent = "譯";
+    trigger.append(badge);
     const controls = document.createElement("div");
     controls.className = `${SCRIPT_PREFIX}__preferences`;
+    controls.hidden = true;
+    const toggle = button("Translate CC", toggleYoutubeSubtitles, controls);
+    toggle.setAttribute("aria-pressed", "false");
     const preference = (text, key, type, min, max) => {
       const label = document.createElement("label");
       const input = document.createElement("input");
@@ -2007,25 +2057,24 @@
     preference("Translation only", "translationOnly", "checkbox");
     preference("Text size", "fontSize", "range", 14, 36);
     preference("Bottom position", "bottom", "range", 8, 35);
-    menu.append(summary, controls);
-    menu.addEventListener("toggle", () => {
-      host.dataset.idle = String(!menu.open && !status.textContent);
-    });
-    toolbar.append(menu);
-    const expand = button("Expand", () => toggleSubtitleExpanded());
+    const actions = document.createElement("div");
+    actions.className = `${SCRIPT_PREFIX}__actions`;
+    const expand = button("Expand", () => toggleSubtitleExpanded(), actions);
     expand.setAttribute("aria-pressed", "false");
-    controls.append(expand, button("API", () => {
-      menu.open = false;
-      host.dataset.idle = String(!status.textContent);
-      configureSettings().catch(reportError);
-    }));
-    const retry = button("Retry", retryYoutubeSubtitles);
+    button("API", () => {
+      setPreferencesOpen(subtitleView, false);
+      configureSettings().then((saved) => {
+        if (saved && subtitleView?.preferences.enabled) restartYoutubeSubtitles();
+      }).catch(reportError);
+    }, actions);
+    controls.append(actions);
+    const retry = button("Retry", retryYoutubeSubtitles, toolbar);
     retry.hidden = true;
     const status = document.createElement("span");
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
     status.className = `${SCRIPT_PREFIX}__status`;
-    toolbar.append(status);
+    toolbar.append(status, trigger);
     const captions = document.createElement("div");
     captions.className = `${SCRIPT_PREFIX}__captions`;
     captions.hidden = true;
@@ -2033,15 +2082,21 @@
     source.dir = translation.dir = "auto";
     translation.className = `${SCRIPT_PREFIX}__translation`;
     captions.append(source, translation);
-    host.append(toolbar, captions);
-    for (const type of ["click", "dblclick", "pointerdown", "keydown", "touchstart", "touchend"]) {
-      toolbar.addEventListener(type, (event) => event.stopPropagation());
+    host.append(toolbar, controls, captions);
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setPreferencesOpen(subtitleView, controls.hidden);
+    });
+    for (const element of [toolbar, controls, trigger]) {
+      for (const type of ["click", "dblclick", "pointerdown", "pointerup", "keydown", "touchstart", "touchend"]) {
+        element.addEventListener(type, (event) => event.stopPropagation());
+      }
     }
     let autohideTimer;
     const noteActivity = (event) => {
-      if (menu.open && event?.target && !menu.contains(event.target)) {
-        menu.open = false;
-        host.dataset.idle = String(!status.textContent);
+      syncSubtitleTriggerDock(subtitleView);
+      if (!controls.hidden && event?.target && !controls.contains(event.target) && !trigger.contains(event.target)) {
+        setPreferencesOpen(subtitleView, false);
       }
       host.dataset.autohide = "false";
       clearTimeout(autohideTimer);
@@ -2058,7 +2113,8 @@
     player.append(host);
     const position = player.style.position;
     if (getComputedStyle(player).position === "static") player.style.position = "relative";
-    subtitleView = { host, player, video, toggle, menu, expand, retry, status, captions, source, translation, preferences, position, autohideTimer: () => clearTimeout(autohideTimer) };
+    subtitleView = { host, toolbar, player, video, trigger, toggle, controls, expand, retry, status, captions, source, translation, preferences, position, autohideTimer: () => clearTimeout(autohideTimer) };
+    syncSubtitleTriggerDock(subtitleView);
     applySubtitlePreferences();
   }
 
@@ -2222,6 +2278,7 @@
       void captionBridgeRequest("restore", { videoId: session.videoId }).catch(() => {});
     }
     if (subtitleView) {
+      subtitleView.trigger.dataset.active = "false";
       subtitleView.toggle.textContent = "Translate CC";
       subtitleView.toggle.setAttribute("aria-pressed", "false");
       subtitleView.captions.hidden = true;
@@ -2230,11 +2287,12 @@
     }
   }
 
-  async function startYoutubeSubtitles() {
+  async function startYoutubeSubtitles(auto = false) {
     const view = subtitleView;
     if (!view || !youtubeVideoId()) return;
     stopYoutubeSubtitles();
     const intent = subtitleIntent;
+    view.trigger.dataset.active = "true";
     view.toggle.textContent = "Cancel";
     view.toggle.setAttribute("aria-pressed", "true");
     try {
@@ -2245,7 +2303,13 @@
         const snapshot = await captionBridgeRequest("snapshot").catch(() => null);
         const source = selectYoutubeTrack(snapshot, settings.targetLanguage);
         hasNativeTarget = Boolean(selectTargetYoutubeTrack(snapshot, source, settings.targetLanguage));
-        if (!hasNativeTarget) settings = await readySettings();
+        if (!hasNativeTarget) {
+          if (auto === true) {
+            stopYoutubeSubtitles();
+            return;
+          }
+          settings = await readySettings();
+        }
       }
       if (intent !== subtitleIntent || view !== subtitleView) return;
       if (!settings) { stopYoutubeSubtitles(); return; }
@@ -2259,6 +2323,7 @@
       session.chunks = await loadYoutubeCaptions(session);
       if (session !== subtitleSession || session.controller.signal.aborted) return;
       if (!session.nativeBilingual && hasNativeTarget) {
+        if (auto === true) { stopYoutubeSubtitles(); return; }
         const ready = await readySettings();
         if (session !== subtitleSession || session.controller.signal.aborted) return;
         if (!ready) { stopYoutubeSubtitles(); return; }
@@ -2302,8 +2367,13 @@
   }
 
   function toggleYoutubeSubtitles() {
-    if (subtitleView?.toggle.getAttribute("aria-pressed") === "true") stopYoutubeSubtitles();
-    else void startYoutubeSubtitles();
+    const active = subtitleView?.toggle.getAttribute("aria-pressed") === "true";
+    if (subtitleView) {
+      subtitleView.preferences.enabled = !active;
+      GM_setValue(PREFERENCES_KEY, subtitleView.preferences);
+    }
+    if (active) stopYoutubeSubtitles();
+    else void startYoutubeSubtitles(false);
   }
 
   function restartYoutubeSubtitles() {
@@ -2355,15 +2425,22 @@
     style.textContent = `${COMMON_STYLES}
       .${SCRIPT_PREFIX}__host { position:absolute !important; inset:0 !important; z-index:65 !important; pointer-events:none !important; font:14px/1.4 -apple-system,BlinkMacSystemFont,sans-serif !important; color:#fff !important; text-align:start !important; }
       .${SCRIPT_PREFIX}__host [hidden] { display:none !important; }
-      .${SCRIPT_PREFIX}__toolbar { position:absolute !important; top:8px !important; left:8px !important; right:8px !important; display:flex !important; align-items:start !important; flex-wrap:wrap !important; gap:4px !important; pointer-events:none !important; transition:opacity 180ms ease-out !important; }
+      .${SCRIPT_PREFIX}__toolbar { position:absolute !important; bottom:12px !important; right:12px !important; left:12px !important; display:flex !important; align-items:center !important; justify-content:flex-end !important; flex-wrap:wrap !important; gap:6px !important; pointer-events:none !important; transition:opacity 180ms ease-out !important; }
+      @media (max-width: 600px) { .${SCRIPT_PREFIX}__toolbar { top:8px !important; right:48px !important; bottom:auto !important; } }
       .ytp-autohide .${SCRIPT_PREFIX}__host[data-idle=true] .${SCRIPT_PREFIX}__toolbar, .${SCRIPT_PREFIX}__host[data-autohide=true][data-idle=true] .${SCRIPT_PREFIX}__toolbar { opacity:0 !important; }
       .ytp-autohide .${SCRIPT_PREFIX}__host[data-idle=true] .${SCRIPT_PREFIX}__toolbar *, .${SCRIPT_PREFIX}__host[data-autohide=true][data-idle=true] .${SCRIPT_PREFIX}__toolbar * { pointer-events:none !important; }
-      .${SCRIPT_PREFIX}__toolbar button, .${SCRIPT_PREFIX}__toolbar summary { appearance:none !important; box-sizing:border-box !important; min-width:44px !important; min-height:44px !important; margin:0 !important; padding:10px !important; border:1px solid #ffffff40 !important; border-radius:6px !important; background:#161618df !important; color:#fff !important; font:inherit !important; line-height:22px !important; cursor:pointer !important; pointer-events:auto !important; touch-action:manipulation !important; list-style:none !important; }
-      .${SCRIPT_PREFIX}__toolbar button:focus-visible, .${SCRIPT_PREFIX}__toolbar summary:focus-visible, .${SCRIPT_PREFIX}__preferences input:focus-visible { outline:2px solid #a8c7ff !important; outline-offset:2px !important; }
-      .${SCRIPT_PREFIX}__toolbar button[aria-pressed=true] { background:#315b9bdd !important; }
-      .${SCRIPT_PREFIX}__toolbar details { position:relative !important; pointer-events:auto !important; }
-      .${SCRIPT_PREFIX}__toolbar summary::-webkit-details-marker { display:none !important; }
-      .${SCRIPT_PREFIX}__preferences { position:absolute !important; top:48px !important; left:0 !important; width:230px !important; padding:12px !important; background:#161618f5 !important; border:1px solid #ffffff40 !important; border-radius:8px !important; }
+      .${SCRIPT_PREFIX}__toolbar button, .${SCRIPT_PREFIX}__preferences button, .${SCRIPT_PREFIX}__trigger { appearance:none !important; box-sizing:border-box !important; min-width:44px !important; min-height:44px !important; margin:0 !important; padding:10px !important; border:1px solid #ffffff40 !important; border-radius:6px !important; background:#161618df !important; color:#fff !important; font:inherit !important; line-height:22px !important; cursor:pointer !important; pointer-events:auto !important; touch-action:manipulation !important; }
+      .${SCRIPT_PREFIX}__trigger { display:inline-flex !important; align-items:center !important; justify-content:center !important; vertical-align:top !important; }
+      .${SCRIPT_PREFIX}__trigger[data-docked=control] { width:48px !important; height:100% !important; padding:0 !important; border:0 !important; border-radius:0 !important; background:transparent !important; }
+      .${SCRIPT_PREFIX}__badge { display:inline-flex !important; align-items:center !important; justify-content:center !important; min-width:24px !important; height:20px !important; padding:0 5px !important; border:1.5px solid #fff !important; border-radius:3px !important; box-sizing:border-box !important; background:#161618cc !important; color:#fff !important; font:700 12px/1 -apple-system,BlinkMacSystemFont,sans-serif !important; }
+      .${SCRIPT_PREFIX}__trigger[data-active=true] .${SCRIPT_PREFIX}__badge { background:#fff !important; color:#0f0f0f !important; box-shadow:0 3px 0 #ff0033 !important; }
+      .${SCRIPT_PREFIX}__toolbar button:focus-visible, .${SCRIPT_PREFIX}__preferences button:focus-visible, .${SCRIPT_PREFIX}__trigger:focus-visible, .${SCRIPT_PREFIX}__preferences input:focus-visible { outline:2px solid #a8c7ff !important; outline-offset:2px !important; }
+      .${SCRIPT_PREFIX}__toolbar button[aria-pressed=true], .${SCRIPT_PREFIX}__preferences button[aria-pressed=true] { background:#315b9bdd !important; }
+      .${SCRIPT_PREFIX}__preferences { position:absolute !important; bottom:var(--pref-offset,58px) !important; right:var(--pref-right,12px) !important; width:236px !important; padding:12px !important; background:#161618f5 !important; border:1px solid #ffffff40 !important; border-radius:8px !important; pointer-events:auto !important; z-index:70 !important; }
+      .${SCRIPT_PREFIX}__preferences[data-placement=top] { top:var(--pref-offset,52px) !important; bottom:auto !important; }
+      .${SCRIPT_PREFIX}__preferences > button { width:100% !important; margin-bottom:4px !important; }
+      .${SCRIPT_PREFIX}__actions { display:flex !important; gap:6px !important; margin-top:6px !important; }
+      .${SCRIPT_PREFIX}__actions > button { flex:1 !important; }
       .${SCRIPT_PREFIX}__preferences label { display:flex !important; align-items:center !important; justify-content:space-between !important; min-height:44px !important; gap:12px !important; color:#fff !important; font:inherit !important; }
       .${SCRIPT_PREFIX}__preferences input { width:90px !important; min-height:28px !important; accent-color:#a8c7ff !important; }
       .${SCRIPT_PREFIX}__preferences input[type=checkbox] { width:24px !important; }
@@ -2416,13 +2493,16 @@
       toggleSubtitleExpanded(false);
       subtitleView.autohideTimer?.();
       if (subtitleView.player.style.position === "relative") subtitleView.player.style.position = subtitleView.position;
+      subtitleView.trigger?.remove();
       subtitleView.host.remove();
       subtitleView = null;
     }
     if (player && video && !subtitleView) {
       mountSubtitleView(player, video);
       subtitleView.videoId = videoId;
+      if (subtitleView.preferences.enabled) void startYoutubeSubtitles(true);
     }
+    if (subtitleView) syncSubtitleTriggerDock(subtitleView);
     const session = subtitleSession;
     if (session) {
       if (JSON.stringify(session.settings) !== JSON.stringify(loadSettings())) {
