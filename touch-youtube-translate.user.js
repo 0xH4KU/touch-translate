@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch YouTube Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.1
+// @version      0.1.3
 // @description  Private bilingual YouTube captions with smart segmentation and your own translation API.
 // @author       HAKU
 // @match        https://www.youtube.com/*
