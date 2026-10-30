@@ -5,7 +5,6 @@
 // @description  Private bilingual YouTube captions with smart segmentation and your own translation API.
 // @author       HAKU
 // @match        https://www.youtube.com/*
-// @match        https://m.youtube.com/*
 // @run-at       document-start
 // @noframes
 // @grant        GM_getValue

@@ -2,7 +2,7 @@
     try {
       const parsed = new URL(url);
       const id = parsed.searchParams.get("v");
-      return parsed.pathname === "/watch" && /^[\w-]{11}$/.test(id || "") ? id : null;
+      return parsed.hostname !== "m.youtube.com" && parsed.pathname === "/watch" && /^[\w-]{11}$/.test(id || "") ? id : null;
     } catch { return null; }
   }
 
@@ -60,7 +60,7 @@
 
   function youtubeCaptionUrl(track, snapshot) {
     const url = new URL(track.baseUrl);
-    if (url.protocol !== "https:" || !/^(www|m)\.youtube\.com$/.test(url.hostname) ||
+    if (url.protocol !== "https:" || url.hostname !== "www.youtube.com" ||
       url.pathname !== "/api/timedtext" || url.username || url.password ||
       url.searchParams.get("v") !== snapshot.videoId || url.searchParams.has("tlang")) throw new Error("Invalid YouTube caption URL.");
     for (const [key, value] of Object.entries({ ...snapshot.clientParams, xorb: "2", xobt: "3", xovt: "3", c: "WEB", cplayer: "UNIPLAYER" })) {
@@ -70,7 +70,7 @@
     for (const value of candidates) {
       let candidate;
       try { candidate = new URL(value); } catch { continue; }
-      if (candidate.protocol !== "https:" || !/^(www|m)\.youtube\.com$/.test(candidate.hostname) || candidate.pathname !== "/api/timedtext") continue;
+      if (candidate.protocol !== "https:" || candidate.hostname !== "www.youtube.com" || candidate.pathname !== "/api/timedtext") continue;
       if (candidate.searchParams.get("v") !== snapshot.videoId) continue;
       if (candidate.searchParams.get("lang") !== track.languageCode ||
         (candidate.searchParams.get("kind") || "") !== (track.kind || "") ||
@@ -86,11 +86,6 @@
     return url.href;
   }
 
-  function subtitleTrackText(group, preferences) {
-    return preferences.translationOnly && group.translation ? group.translation :
-      [group.text, group.translation].filter(Boolean).join("\n");
-  }
-
   function subtitleAtTime(chunks, time) {
     let lo = 0, hi = chunks.length - 1;
     while (lo <= hi) {
@@ -103,67 +98,6 @@
     return null;
   }
 
-  function updateNativeSubtitles(session, chunk) {
-    const native = session.native;
-    if (!native) return;
-    const chunks = chunk ? [chunk] : session.chunks;
-    try {
-      for (const entry of chunks) {
-        removeNativeSubtitleCues(native, native.cues.get(entry) || []);
-        const cues = [];
-        native.cues.set(entry, cues);
-        for (const group of entry.groups) {
-          const text = subtitleTrackText(group, session.preferences).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-          const cue = new VTTCue(group.start / 1000, group.end / 1000, text);
-          native.track.addCue(cue);
-          cues.push(cue);
-        }
-      }
-    } catch {
-      leaveNativeSubtitles(session);
-      setSubtitleStatus("Use Expand for translated captions on this device.", true);
-    }
-  }
-
-  function removeNativeSubtitleCues(native, cues) {
-    for (const cue of cues) {
-      try { native.track.removeCue(cue); } catch { /* YouTube may already have removed cues while reloading its player. */ }
-    }
-  }
-
-  function enterNativeSubtitles(session) {
-    if (session !== subtitleSession || typeof VTTCue !== "function") return;
-    try {
-      let track = nativeSubtitleTracks.get(session.video);
-      if (!track) {
-        track = session.video.addTextTrack("subtitles", "Touch Translate", "");
-        nativeSubtitleTracks.set(session.video, track);
-      }
-      if (session.native) return;
-      session.native = { track, cues: new Map(), previous: [] };
-      for (const source of Array.from(session.video.textTracks)) {
-        if (source !== track && source.mode === "showing") {
-          session.native.previous.push(source);
-          source.mode = "hidden";
-        }
-      }
-      track.mode = "showing";
-      updateNativeSubtitles(session);
-    } catch (error) {
-      leaveNativeSubtitles(session);
-      setSubtitleStatus("Use Expand for translated captions on this device.", true);
-    }
-  }
-
-  function leaveNativeSubtitles(session) {
-    const native = session?.native;
-    if (!native) return;
-    for (const cues of native.cues.values()) removeNativeSubtitleCues(native, cues);
-    native.track.mode = "disabled";
-    for (const track of native.previous) if (track.mode === "hidden") track.mode = "showing";
-    session.native = null;
-  }
-
   function setSubtitleStatus(text, error = false) {
     if (!subtitleView) return;
     subtitleView.status.textContent = text;
@@ -173,9 +107,7 @@
   }
 
   function findNativeCcButton(player) {
-    return player?.querySelector?.(
-      ".ytp-right-controls .ytp-subtitles-button, .ytp-chrome-bottom .ytp-subtitles-button, .player-controls-top .ytm-closed-caption-button, ytm-custom-control .ytm-closed-caption-button, .ytm-closed-caption-button",
-    ) || null;
+    return player?.querySelector?.(".ytp-right-controls .ytp-subtitles-button, .ytp-chrome-bottom .ytp-subtitles-button") || null;
   }
 
   function syncSubtitleTriggerDock(view = subtitleView) {
@@ -220,17 +152,10 @@
     if (open) {
       const playerRect = view.player.getBoundingClientRect?.();
       const triggerRect = view.trigger.getBoundingClientRect?.();
-      const mobile = globalThis.location?.hostname === "m.youtube.com" || globalThis.matchMedia?.("(max-width: 600px)")?.matches;
       if (playerRect?.width > 0 && triggerRect?.width > 0) {
         const right = Math.max(8, Math.min(Math.max(8, playerRect.width - 252), Math.round(playerRect.right - triggerRect.right)));
-        const isBottom = triggerRect.top + triggerRect.height / 2 >= playerRect.top + playerRect.height / 2;
         view.controls.style.setProperty("--pref-right", `${right}px`);
-        view.controls.dataset.placement = isBottom ? "bottom" : "top";
-        view.controls.style.setProperty("--pref-offset", `${isBottom
-          ? Math.max(52, Math.round(playerRect.bottom - triggerRect.top + 8))
-          : Math.max(48, Math.round(triggerRect.bottom - playerRect.top + 6))}px`);
-      } else {
-        view.controls.dataset.placement = mobile ? "top" : "bottom";
+        view.controls.style.setProperty("--pref-offset", `${Math.max(52, Math.round(playerRect.bottom - triggerRect.top + 8))}px`);
       }
     }
     view.host.dataset.idle = String(!open && !view.status.textContent);
@@ -244,22 +169,10 @@
     if (subtitleView.source.textContent !== (group?.text || "")) subtitleView.source.textContent = group?.text || "";
     if (subtitleView.translation.textContent !== (group?.translation || "")) subtitleView.translation.textContent = group?.translation || "";
     subtitleView.source.hidden = session.preferences.translationOnly && !!group?.translation;
-    subtitleView.captions.hidden = !group || !!session.native;
-    if (session.native) session.native.track.mode = ad ? "hidden" : "showing";
+    subtitleView.captions.hidden = !group;
     if (!ad && session.video.paused === false && !session.video.ended) {
       session.renderTimer = setTimeout(() => renderSubtitles(session), 80);
     }
-  }
-
-  function toggleSubtitleExpanded(force) {
-    const view = subtitleView;
-    if (!view) return;
-    const expanded = force ?? !view.player.classList.contains(`${SCRIPT_PREFIX}__expanded`);
-    view.player.classList.toggle(`${SCRIPT_PREFIX}__expanded`, expanded);
-    view.expand.setAttribute("aria-pressed", String(expanded));
-    view.expand.textContent = expanded ? "Exit expand" : "Expand";
-    setPreferencesOpen(view, false);
-    window.dispatchEvent(new Event("resize"));
   }
 
   function mountSubtitleView(player, video) {
@@ -306,13 +219,13 @@
         input.value = preferences[key];
         input.addEventListener("input", () => {
           preferences[key] = Number(input.value);
-          applySubtitlePreferences(false);
+          applySubtitlePreferences();
         });
       }
       input.addEventListener("change", () => {
         preferences[key] = type === "checkbox" ? input.checked : Number(input.value);
         GM_setValue(PREFERENCES_KEY, preferences);
-        applySubtitlePreferences(true);
+        applySubtitlePreferences();
         if (key === "smart" && subtitleSession) resegmentYoutubeSubtitles();
       });
       label.append(text, input);
@@ -322,17 +235,12 @@
     preference("Translation only", "translationOnly", "checkbox");
     preference("Text size", "fontSize", "range", 14, 36);
     preference("Bottom position", "bottom", "range", 0, 35);
-    const actions = document.createElement("div");
-    actions.className = `${SCRIPT_PREFIX}__actions`;
-    const expand = button("Expand", () => toggleSubtitleExpanded(), actions);
-    expand.setAttribute("aria-pressed", "false");
     button("API", () => {
       setPreferencesOpen(subtitleView, false);
       configureSettings().then((saved) => {
         if (saved && subtitleView?.preferences.enabled) restartYoutubeSubtitles();
       }).catch(reportError);
-    }, actions);
-    controls.append(actions);
+    }, controls);
     const retry = button("Retry", retryYoutubeSubtitles, toolbar);
     retry.hidden = true;
     const status = document.createElement("span");
@@ -396,7 +304,7 @@
     player.append(host);
     const position = player.style.position;
     if (getComputedStyle(player).position === "static") player.style.position = "relative";
-    subtitleView = { host, toolbar, player, video, trigger, toggle, controls, expand, retry, status, captions, source, translation, preferences, position, cleanup() {
+    subtitleView = { host, toolbar, player, video, trigger, toggle, controls, retry, status, captions, source, translation, preferences, position, cleanup() {
       clearTimeout(autohideTimer);
       cancelAnimationFrame(positionFrame);
       positionObserver.disconnect();
@@ -410,7 +318,7 @@
     applySubtitlePreferences();
   }
 
-  function applySubtitlePreferences(updateNative = true) {
+  function applySubtitlePreferences() {
     if (!subtitleView) return;
     const preferences = subtitleView.preferences;
     subtitleView.host.style.setProperty("--subtitle-size", `${preferences.fontSize}px`);
@@ -418,7 +326,6 @@
     updateSubtitlePosition();
     if (subtitleSession) {
       subtitleSession.preferences = { ...preferences };
-      if (updateNative) updateNativeSubtitles(subtitleSession);
       renderSubtitles();
     }
   }

@@ -16,7 +16,7 @@
     function captionUrl(value) {
       try {
         const url = new URL(value, location.href);
-        return url.protocol === "https:" && /^(www|m)\.youtube\.com$/.test(url.hostname) &&
+        return url.protocol === "https:" && url.hostname === "www.youtube.com" &&
           !url.username && !url.password && url.pathname === "/api/timedtext" &&
           /^[\w-]{11}$/.test(url.searchParams.get("v") || "") ? url : null;
       } catch { return null; }
@@ -85,7 +85,7 @@
       };
     }
     function captionsActive(current = player()) {
-      const button = current?.querySelector?.(".ytp-subtitles-button, .ytm-closed-caption-button");
+      const button = current?.querySelector?.(".ytp-subtitles-button");
       if (button?.hasAttribute("aria-pressed")) return button.getAttribute("aria-pressed") === "true";
       return Boolean(current?.getOption?.("captions", "track")?.languageCode);
     }
@@ -94,7 +94,7 @@
       const response = current?.getPlayerResponse?.() || root.ytInitialPlayerResponse;
       if (!current || response?.videoDetails?.videoId !== videoId) return;
       if (captionsActive(current) === turnOn) return;
-      const button = current.querySelector?.(".ytp-subtitles-button, .ytm-closed-caption-button");
+      const button = current.querySelector?.(".ytp-subtitles-button");
       if (typeof current.toggleSubtitles === "function") current.toggleSubtitles();
       else if (button) button.click();
       else if (turnOn) current.loadModule?.("captions");

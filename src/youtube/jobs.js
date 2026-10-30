@@ -114,7 +114,6 @@
       if (!current()) return;
       chunk.groups = groups;
       chunk.done = true;
-      updateNativeSubtitles(session, chunk);
       renderSubtitles(session);
       setSubtitleStatus("");
     } catch (error) {
@@ -139,7 +138,6 @@
       session.controller.abort();
       cancelSubtitleRequest(session);
       for (const [type, handler] of session.listeners) session.video.removeEventListener(type, handler);
-      leaveNativeSubtitles(session);
       session.player.classList.remove(`${SCRIPT_PREFIX}__active`);
       void captionBridgeRequest("restore", { videoId: session.videoId }).catch(() => {});
     }
@@ -212,14 +210,10 @@
       listen("play", () => { renderSubtitles(session); });
       listen("pause", () => { clearTimeout(session.renderTimer); renderSubtitles(session); });
       listen("ratechange", () => { void pumpSubtitleQueue(session); });
-      listen("webkitbeginfullscreen", () => { enterNativeSubtitles(session); renderSubtitles(session); });
-      listen("webkitendfullscreen", () => { leaveNativeSubtitles(session); renderSubtitles(session); });
       session.player.classList.add(`${SCRIPT_PREFIX}__active`);
       view.toggle.textContent = "Stop CC";
-      if (session.video.webkitDisplayingFullscreen) enterNativeSubtitles(session);
       renderSubtitles(session);
       if (session.nativeBilingual) {
-        updateNativeSubtitles(session);
         setSubtitleStatus("");
       } else {
         setSubtitleStatus("Translating nearby captions…");
@@ -257,7 +251,6 @@
     cancelSubtitleRequest(session);
     session.error = null;
     session.chunks = makeSubtitleChunks(session.rawFragments, session.automatic);
-    updateNativeSubtitles(session);
     renderSubtitles(session);
     setSubtitleStatus("Translating nearby captions…");
     void pumpSubtitleQueue(session);

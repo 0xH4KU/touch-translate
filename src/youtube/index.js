@@ -5,11 +5,10 @@
       parseSubtitleGroups, requestSubtitleTranslation, subtitleCacheKey, joinCaptionText,
       youtubeVideoId, selectYoutubeTrack, selectTargetYoutubeTrack, sameLanguage, youtubeCaptionUrl, youtubeTrackKey,
       captionBridgeRequest, youtubeCaptionBridge, installCaptionBridge,
-      subtitleAtTime, subtitleTrackText, subtitleQueueChunk, cancelSubtitleRequest,
+      subtitleAtTime, subtitleQueueChunk, cancelSubtitleRequest,
       pumpSubtitleQueue, loadYoutubeCaptions, loadSubtitlePreferences,
-      enterNativeSubtitles, leaveNativeSubtitles, updateNativeSubtitles,
       startYoutubeSubtitles, stopYoutubeSubtitles, retryYoutubeSubtitles, resegmentYoutubeSubtitles, checkSubtitleTrack,
-      mountSubtitleView, renderSubtitles, refreshYoutubePlayer, toggleSubtitleExpanded,
+      mountSubtitleView, renderSubtitles, refreshYoutubePlayer,
       cleanSettings, parseImportedSettings, endpointFor, loadCache, saveCache,
       getSession: () => subtitleSession, getView: () => subtitleView,
       setSession: (session) => { subtitleSession = session; },
@@ -24,11 +23,10 @@
         document.querySelector("video.html5-main-video") ||
         document.querySelector("video")
       : null;
-    const player = video?.closest("#movie_player, .html5-video-player, ytm-player") || video?.parentElement;
+    const player = video?.closest("#movie_player, .html5-video-player") || video?.parentElement;
     if (subtitleView && (!videoId || subtitleView.video !== video || !subtitleView.host.isConnected ||
       subtitleView.videoId !== videoId)) {
       stopYoutubeSubtitles();
-      toggleSubtitleExpanded(false);
       subtitleView.cleanup();
       if (subtitleView.player.style.position === "relative") subtitleView.player.style.position = subtitleView.position;
       subtitleView.trigger?.remove();
@@ -66,9 +64,6 @@
     setInterval(refreshYoutubePlayer, 1000);
     document.addEventListener("yt-navigate-start", () => stopYoutubeSubtitles());
     document.addEventListener("yt-navigate-finish", refreshYoutubePlayer);
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") toggleSubtitleExpanded(false);
-    });
     window.addEventListener("pagehide", () => stopYoutubeSubtitles());
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initializeYoutubeSubtitles, { once: true });

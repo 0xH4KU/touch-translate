@@ -12,7 +12,8 @@ const reply = (options, groups) => options.onload({ status: 200, responseText: J
 
 assert.match(youtubeSource, /@run-at\s+document-start/);
 assert.doesNotMatch(youtubeSource, /@match\s+\*:\/\/\*\/\*/);
-assert.equal(api.youtubeVideoId("https://m.youtube.com/watch?v=abcdefghijk"), "abcdefghijk");
+assert.equal(api.youtubeVideoId("https://www.youtube.com/watch?v=abcdefghijk"), "abcdefghijk");
+assert.equal(api.youtubeVideoId("https://m.youtube.com/watch?v=abcdefghijk"), null);
 assert.equal(api.youtubeVideoId("https://www.youtube.com/shorts/abcdefghijk"), null);
 assert.equal(api.youtubeVideoId("https://www.youtube.com/watch?v=bad"), null);
 
@@ -155,8 +156,6 @@ assert.equal(api.loadSubtitlePreferences().bottom, 20, "Existing custom position
 storage["youtube-preferences-v1"] = { bottom: 12, positionVersion: 1 };
 assert.equal(api.loadSubtitlePreferences().bottom, 12, "A newly chosen 12% offset must not be mistaken for the old default");
 delete storage["youtube-preferences-v1"];
-assert.equal(api.subtitleTrackText({ text: "Source", translation: "譯文" }, { translationOnly: true }), "譯文");
-assert.equal(api.subtitleTrackText({ text: "Source" }, { translationOnly: true }), "Source");
 
 const resilient = api.parseYoutubeCaptions(json3([
   event(0, 0, "Zero duration marker"),

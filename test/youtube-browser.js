@@ -49,7 +49,7 @@ export async function runYoutubeBrowserChecks(source) {
   const settings = { apiFormat: "chat-completions", baseURL: "https://api.example.invalid/v1", model: "fixture-model", apiKey: "fixture-private-secret", targetLanguage: "zh-TW", thinkingLevel: "low" };
   const store = { "settings-v1": { ...settings } };
   const requests = [], menus = [];
-  source = source.replace("  // Test interface", "  globalThis.youtubeBrowser = { startYoutubeSubtitles, stopYoutubeSubtitles, refreshYoutubePlayer, checkSubtitleTrack, renderSubtitles, enterNativeSubtitles, leaveNativeSubtitles, captionBridgeRequest, getSession: () => subtitleSession, getView: () => subtitleView };\n  // Test interface");
+  source = source.replace("  // Test interface", "  globalThis.youtubeBrowser = { startYoutubeSubtitles, stopYoutubeSubtitles, refreshYoutubePlayer, checkSubtitleTrack, renderSubtitles, captionBridgeRequest, getSession: () => subtitleSession, getView: () => subtitleView };\n  // Test interface");
   new Function("GM_getValue", "GM_setValue", "GM_deleteValue", "GM_registerMenuCommand", "GM_setClipboard", "GM_xmlhttpRequest", "GM_info", "GM_addElement", source)(
     (key, fallback) => structuredClone(store[key] ?? fallback),
     (key, value) => { store[key] = structuredClone(value); },
@@ -158,32 +158,31 @@ export async function runYoutubeBrowserChecks(source) {
     player.classList.remove("ytp-autohide");
   });
 
-  await check("Mobile controls respect hidden ancestors and ignore the volume slider", async () => {
+  await check("Control bar detection respects hidden ancestors", async () => {
     const view = api.getView();
+    const chrome = player.querySelector(".ytp-chrome-bottom");
+    chrome.hidden = true;
     const wrapper = document.createElement("div");
-    const bottom = document.createElement("div");
-    bottom.className = "player-controls-bottom";
-    bottom.style.cssText = "position:absolute;left:0;right:0;bottom:0;height:76px";
+    const progress = document.createElement("div");
+    progress.className = "ytp-progress-bar-container";
+    progress.style.cssText = "position:absolute;left:0;right:0;bottom:0;height:76px";
     wrapper.style.opacity = "0";
-    wrapper.append(bottom);
-    const volume = document.createElement("div");
-    volume.setAttribute("role", "slider");
-    volume.style.cssText = "position:absolute;bottom:110px;left:10px;width:40px;height:10px";
+    wrapper.append(progress);
     player.classList.add("ytp-autohide");
-    player.append(wrapper, volume);
+    player.append(wrapper);
     const gap = () => player.getBoundingClientRect().bottom - view.captions.getBoundingClientRect().bottom;
     await until(() => Math.abs(gap() - 8) < 1);
     wrapper.style.opacity = "1";
     await until(() => Math.abs(gap() - 84) < 1);
-    assert(view.captions.getBoundingClientRect().bottom <= bottom.getBoundingClientRect().top - 7, "Mobile captions must clear the visible progress controls");
-    bottom.hidden = true;
+    assert(view.captions.getBoundingClientRect().bottom <= progress.getBoundingClientRect().top - 7, "Captions must clear visible progress controls");
+    progress.hidden = true;
     await until(() => Math.abs(gap() - 8) < 1);
     wrapper.remove();
-    volume.remove();
+    chrome.hidden = false;
     player.classList.remove("ytp-autohide");
   });
 
-  await check("Display controls and web expansion update the active player", async () => {
+  await check("Display controls update the active player", async () => {
     const view = api.getView();
     const checkbox = [...view.host.querySelectorAll("label")].find((label) => label.textContent.includes("Translation only")).querySelector("input");
     checkbox.checked = true;
@@ -198,7 +197,7 @@ export async function runYoutubeBrowserChecks(source) {
     assert(getComputedStyle(view.captions).fontSize === "30px", "Dragging the size slider must preview the font size immediately on input");
     size.value = "28";
     size.dispatchEvent(new Event("change"));
-    assert(getComputedStyle(view.captions).fontSize === "28px", "The size slider must affect the actual rendered text on mobile and desktop");
+    assert(getComputedStyle(view.captions).fontSize === "28px", "The size slider must affect the actual rendered text");
     size.value = originalSize;
     size.dispatchEvent(new Event("change"));
     const priorLoads = captionLoads;
@@ -210,26 +209,6 @@ export async function runYoutubeBrowserChecks(source) {
     smartBox.checked = true;
     smartBox.dispatchEvent(new Event("change"));
     await finishPrefetch();
-    view.trigger.click();
-    assert(!view.controls.hidden, "Trigger button must open the preferences panel");
-    view.expand.click();
-    assert(view.controls.hidden, "Expanding must close the open preferences menu");
-    assert(player.classList.contains("touch-youtube-translate__expanded"), "Expand must keep the overlay and video in one player");
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    assert(!player.classList.contains("touch-youtube-translate__expanded"), "Escape must exit expansion");
-  });
-
-  await check("Native text tracks retain source timing and clean up after fullscreen", async () => {
-    const session = api.getSession();
-    api.enterNativeSubtitles(session);
-    const track = session.native?.track;
-    assert(track?.mode === "showing" && track.cues.length > 0, "A real browser subtitle track must be populated");
-    assert(track.cues[0].startTime === 0 && track.cues[0].endTime === 4, "Cue times must come directly from the source track");
-    assert(track.cues[0].line === "auto", "Native fullscreen must use the browser's automatic caption placement");
-    assert(track.cues[0].text.includes("&lt;img"), "Native cue markup must be escaped");
-    track.removeCue(track.cues[0]);
-    api.leaveNativeSubtitles(session);
-    assert(track.mode === "disabled" && !track.cues?.length, "Leaving native fullscreen must clear and disable the injected track");
   });
 
   await check("Seeking aborts obsolete work and rejects a late result", async () => {

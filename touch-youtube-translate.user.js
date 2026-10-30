@@ -1,11 +1,10 @@
 // ==UserScript==
 // @name         Touch YouTube Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.4
+// @version      0.1.5
 // @description  Private bilingual YouTube captions with smart segmentation and your own translation API.
 // @author       HAKU
 // @match        https://www.youtube.com/*
-// @match        https://m.youtube.com/*
 // @run-at       document-start
 // @noframes
 // @grant        GM_getValue
@@ -50,22 +49,20 @@
   const SUBTITLE_BATCH_MS = 30000;
   const SUBTITLE_BATCH_CHARS = 6000;
   const SUBTITLE_LOOKAHEAD_MS = 60000;
-  const YOUTUBE_BOTTOM_CONTROLS_SELECTOR = ".ytp-chrome-bottom, .ytp-progress-bar-container, .player-controls-bottom, ytm-progress-bar, [role='slider']";
-  const nativeSubtitleTracks = new WeakMap();
+  const YOUTUBE_BOTTOM_CONTROLS_SELECTOR = ".ytp-chrome-bottom, .ytp-progress-bar-container";
   let subtitleSession = null;
   let subtitleView = null;
   let subtitleIntent = 0;
 
   function loadSubtitlePreferences() {
     const saved = GM_getValue(PREFERENCES_KEY, {});
-    const defaultSize = globalThis.matchMedia?.("(max-width: 600px)")?.matches ? 18 : 22;
     const savedBottom = Number(saved?.bottom);
     const bottom = saved?.positionVersion === 1 || savedBottom !== 12 ? savedBottom : 0;
     return {
       enabled: saved?.enabled !== false,
       smart: saved?.smart !== false,
       translationOnly: saved?.translationOnly === true,
-      fontSize: Math.max(14, Math.min(36, Number(saved?.fontSize) || defaultSize)),
+      fontSize: Math.max(14, Math.min(36, Number(saved?.fontSize) || 22)),
       bottom: Math.max(0, Math.min(35, Number.isFinite(bottom) ? bottom : 0)),
       positionVersion: 1,
     };
@@ -1340,7 +1337,7 @@
     function captionUrl(value) {
       try {
         const url = new URL(value, location.href);
-        return url.protocol === "https:" && /^(www|m)\.youtube\.com$/.test(url.hostname) &&
+        return url.protocol === "https:" && url.hostname === "www.youtube.com" &&
           !url.username && !url.password && url.pathname === "/api/timedtext" &&
           /^[\w-]{11}$/.test(url.searchParams.get("v") || "") ? url : null;
       } catch { return null; }
@@ -1409,7 +1406,7 @@
       };
     }
     function captionsActive(current = player()) {
-      const button = current?.querySelector?.(".ytp-subtitles-button, .ytm-closed-caption-button");
+      const button = current?.querySelector?.(".ytp-subtitles-button");
       if (button?.hasAttribute("aria-pressed")) return button.getAttribute("aria-pressed") === "true";
       return Boolean(current?.getOption?.("captions", "track")?.languageCode);
     }
@@ -1418,7 +1415,7 @@
       const response = current?.getPlayerResponse?.() || root.ytInitialPlayerResponse;
       if (!current || response?.videoDetails?.videoId !== videoId) return;
       if (captionsActive(current) === turnOn) return;
-      const button = current.querySelector?.(".ytp-subtitles-button, .ytm-closed-caption-button");
+      const button = current.querySelector?.(".ytp-subtitles-button");
       if (typeof current.toggleSubtitles === "function") current.toggleSubtitles();
       else if (button) button.click();
       else if (turnOn) current.loadModule?.("captions");
@@ -1816,7 +1813,7 @@
     try {
       const parsed = new URL(url);
       const id = parsed.searchParams.get("v");
-      return parsed.pathname === "/watch" && /^[\w-]{11}$/.test(id || "") ? id : null;
+      return parsed.hostname !== "m.youtube.com" && parsed.pathname === "/watch" && /^[\w-]{11}$/.test(id || "") ? id : null;
     } catch { return null; }
   }
 
@@ -1874,7 +1871,7 @@
 
   function youtubeCaptionUrl(track, snapshot) {
     const url = new URL(track.baseUrl);
-    if (url.protocol !== "https:" || !/^(www|m)\.youtube\.com$/.test(url.hostname) ||
+    if (url.protocol !== "https:" || url.hostname !== "www.youtube.com" ||
       url.pathname !== "/api/timedtext" || url.username || url.password ||
       url.searchParams.get("v") !== snapshot.videoId || url.searchParams.has("tlang")) throw new Error("Invalid YouTube caption URL.");
     for (const [key, value] of Object.entries({ ...snapshot.clientParams, xorb: "2", xobt: "3", xovt: "3", c: "WEB", cplayer: "UNIPLAYER" })) {
@@ -1884,7 +1881,7 @@
     for (const value of candidates) {
       let candidate;
       try { candidate = new URL(value); } catch { continue; }
-      if (candidate.protocol !== "https:" || !/^(www|m)\.youtube\.com$/.test(candidate.hostname) || candidate.pathname !== "/api/timedtext") continue;
+      if (candidate.protocol !== "https:" || candidate.hostname !== "www.youtube.com" || candidate.pathname !== "/api/timedtext") continue;
       if (candidate.searchParams.get("v") !== snapshot.videoId) continue;
       if (candidate.searchParams.get("lang") !== track.languageCode ||
         (candidate.searchParams.get("kind") || "") !== (track.kind || "") ||
@@ -1900,11 +1897,6 @@
     return url.href;
   }
 
-  function subtitleTrackText(group, preferences) {
-    return preferences.translationOnly && group.translation ? group.translation :
-      [group.text, group.translation].filter(Boolean).join("\n");
-  }
-
   function subtitleAtTime(chunks, time) {
     let lo = 0, hi = chunks.length - 1;
     while (lo <= hi) {
@@ -1917,67 +1909,6 @@
     return null;
   }
 
-  function updateNativeSubtitles(session, chunk) {
-    const native = session.native;
-    if (!native) return;
-    const chunks = chunk ? [chunk] : session.chunks;
-    try {
-      for (const entry of chunks) {
-        removeNativeSubtitleCues(native, native.cues.get(entry) || []);
-        const cues = [];
-        native.cues.set(entry, cues);
-        for (const group of entry.groups) {
-          const text = subtitleTrackText(group, session.preferences).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-          const cue = new VTTCue(group.start / 1000, group.end / 1000, text);
-          native.track.addCue(cue);
-          cues.push(cue);
-        }
-      }
-    } catch {
-      leaveNativeSubtitles(session);
-      setSubtitleStatus("Use Expand for translated captions on this device.", true);
-    }
-  }
-
-  function removeNativeSubtitleCues(native, cues) {
-    for (const cue of cues) {
-      try { native.track.removeCue(cue); } catch { /* YouTube may already have removed cues while reloading its player. */ }
-    }
-  }
-
-  function enterNativeSubtitles(session) {
-    if (session !== subtitleSession || typeof VTTCue !== "function") return;
-    try {
-      let track = nativeSubtitleTracks.get(session.video);
-      if (!track) {
-        track = session.video.addTextTrack("subtitles", "Touch Translate", "");
-        nativeSubtitleTracks.set(session.video, track);
-      }
-      if (session.native) return;
-      session.native = { track, cues: new Map(), previous: [] };
-      for (const source of Array.from(session.video.textTracks)) {
-        if (source !== track && source.mode === "showing") {
-          session.native.previous.push(source);
-          source.mode = "hidden";
-        }
-      }
-      track.mode = "showing";
-      updateNativeSubtitles(session);
-    } catch (error) {
-      leaveNativeSubtitles(session);
-      setSubtitleStatus("Use Expand for translated captions on this device.", true);
-    }
-  }
-
-  function leaveNativeSubtitles(session) {
-    const native = session?.native;
-    if (!native) return;
-    for (const cues of native.cues.values()) removeNativeSubtitleCues(native, cues);
-    native.track.mode = "disabled";
-    for (const track of native.previous) if (track.mode === "hidden") track.mode = "showing";
-    session.native = null;
-  }
-
   function setSubtitleStatus(text, error = false) {
     if (!subtitleView) return;
     subtitleView.status.textContent = text;
@@ -1987,9 +1918,7 @@
   }
 
   function findNativeCcButton(player) {
-    return player?.querySelector?.(
-      ".ytp-right-controls .ytp-subtitles-button, .ytp-chrome-bottom .ytp-subtitles-button, .player-controls-top .ytm-closed-caption-button, ytm-custom-control .ytm-closed-caption-button, .ytm-closed-caption-button",
-    ) || null;
+    return player?.querySelector?.(".ytp-right-controls .ytp-subtitles-button, .ytp-chrome-bottom .ytp-subtitles-button") || null;
   }
 
   function syncSubtitleTriggerDock(view = subtitleView) {
@@ -2034,17 +1963,10 @@
     if (open) {
       const playerRect = view.player.getBoundingClientRect?.();
       const triggerRect = view.trigger.getBoundingClientRect?.();
-      const mobile = globalThis.location?.hostname === "m.youtube.com" || globalThis.matchMedia?.("(max-width: 600px)")?.matches;
       if (playerRect?.width > 0 && triggerRect?.width > 0) {
         const right = Math.max(8, Math.min(Math.max(8, playerRect.width - 252), Math.round(playerRect.right - triggerRect.right)));
-        const isBottom = triggerRect.top + triggerRect.height / 2 >= playerRect.top + playerRect.height / 2;
         view.controls.style.setProperty("--pref-right", `${right}px`);
-        view.controls.dataset.placement = isBottom ? "bottom" : "top";
-        view.controls.style.setProperty("--pref-offset", `${isBottom
-          ? Math.max(52, Math.round(playerRect.bottom - triggerRect.top + 8))
-          : Math.max(48, Math.round(triggerRect.bottom - playerRect.top + 6))}px`);
-      } else {
-        view.controls.dataset.placement = mobile ? "top" : "bottom";
+        view.controls.style.setProperty("--pref-offset", `${Math.max(52, Math.round(playerRect.bottom - triggerRect.top + 8))}px`);
       }
     }
     view.host.dataset.idle = String(!open && !view.status.textContent);
@@ -2058,22 +1980,10 @@
     if (subtitleView.source.textContent !== (group?.text || "")) subtitleView.source.textContent = group?.text || "";
     if (subtitleView.translation.textContent !== (group?.translation || "")) subtitleView.translation.textContent = group?.translation || "";
     subtitleView.source.hidden = session.preferences.translationOnly && !!group?.translation;
-    subtitleView.captions.hidden = !group || !!session.native;
-    if (session.native) session.native.track.mode = ad ? "hidden" : "showing";
+    subtitleView.captions.hidden = !group;
     if (!ad && session.video.paused === false && !session.video.ended) {
       session.renderTimer = setTimeout(() => renderSubtitles(session), 80);
     }
-  }
-
-  function toggleSubtitleExpanded(force) {
-    const view = subtitleView;
-    if (!view) return;
-    const expanded = force ?? !view.player.classList.contains(`${SCRIPT_PREFIX}__expanded`);
-    view.player.classList.toggle(`${SCRIPT_PREFIX}__expanded`, expanded);
-    view.expand.setAttribute("aria-pressed", String(expanded));
-    view.expand.textContent = expanded ? "Exit expand" : "Expand";
-    setPreferencesOpen(view, false);
-    window.dispatchEvent(new Event("resize"));
   }
 
   function mountSubtitleView(player, video) {
@@ -2120,13 +2030,13 @@
         input.value = preferences[key];
         input.addEventListener("input", () => {
           preferences[key] = Number(input.value);
-          applySubtitlePreferences(false);
+          applySubtitlePreferences();
         });
       }
       input.addEventListener("change", () => {
         preferences[key] = type === "checkbox" ? input.checked : Number(input.value);
         GM_setValue(PREFERENCES_KEY, preferences);
-        applySubtitlePreferences(true);
+        applySubtitlePreferences();
         if (key === "smart" && subtitleSession) resegmentYoutubeSubtitles();
       });
       label.append(text, input);
@@ -2136,17 +2046,12 @@
     preference("Translation only", "translationOnly", "checkbox");
     preference("Text size", "fontSize", "range", 14, 36);
     preference("Bottom position", "bottom", "range", 0, 35);
-    const actions = document.createElement("div");
-    actions.className = `${SCRIPT_PREFIX}__actions`;
-    const expand = button("Expand", () => toggleSubtitleExpanded(), actions);
-    expand.setAttribute("aria-pressed", "false");
     button("API", () => {
       setPreferencesOpen(subtitleView, false);
       configureSettings().then((saved) => {
         if (saved && subtitleView?.preferences.enabled) restartYoutubeSubtitles();
       }).catch(reportError);
-    }, actions);
-    controls.append(actions);
+    }, controls);
     const retry = button("Retry", retryYoutubeSubtitles, toolbar);
     retry.hidden = true;
     const status = document.createElement("span");
@@ -2210,7 +2115,7 @@
     player.append(host);
     const position = player.style.position;
     if (getComputedStyle(player).position === "static") player.style.position = "relative";
-    subtitleView = { host, toolbar, player, video, trigger, toggle, controls, expand, retry, status, captions, source, translation, preferences, position, cleanup() {
+    subtitleView = { host, toolbar, player, video, trigger, toggle, controls, retry, status, captions, source, translation, preferences, position, cleanup() {
       clearTimeout(autohideTimer);
       cancelAnimationFrame(positionFrame);
       positionObserver.disconnect();
@@ -2224,7 +2129,7 @@
     applySubtitlePreferences();
   }
 
-  function applySubtitlePreferences(updateNative = true) {
+  function applySubtitlePreferences() {
     if (!subtitleView) return;
     const preferences = subtitleView.preferences;
     subtitleView.host.style.setProperty("--subtitle-size", `${preferences.fontSize}px`);
@@ -2232,7 +2137,6 @@
     updateSubtitlePosition();
     if (subtitleSession) {
       subtitleSession.preferences = { ...preferences };
-      if (updateNative) updateNativeSubtitles(subtitleSession);
       renderSubtitles();
     }
   }
@@ -2355,7 +2259,6 @@
       if (!current()) return;
       chunk.groups = groups;
       chunk.done = true;
-      updateNativeSubtitles(session, chunk);
       renderSubtitles(session);
       setSubtitleStatus("");
     } catch (error) {
@@ -2380,7 +2283,6 @@
       session.controller.abort();
       cancelSubtitleRequest(session);
       for (const [type, handler] of session.listeners) session.video.removeEventListener(type, handler);
-      leaveNativeSubtitles(session);
       session.player.classList.remove(`${SCRIPT_PREFIX}__active`);
       void captionBridgeRequest("restore", { videoId: session.videoId }).catch(() => {});
     }
@@ -2453,14 +2355,10 @@
       listen("play", () => { renderSubtitles(session); });
       listen("pause", () => { clearTimeout(session.renderTimer); renderSubtitles(session); });
       listen("ratechange", () => { void pumpSubtitleQueue(session); });
-      listen("webkitbeginfullscreen", () => { enterNativeSubtitles(session); renderSubtitles(session); });
-      listen("webkitendfullscreen", () => { leaveNativeSubtitles(session); renderSubtitles(session); });
       session.player.classList.add(`${SCRIPT_PREFIX}__active`);
       view.toggle.textContent = "Stop CC";
-      if (session.video.webkitDisplayingFullscreen) enterNativeSubtitles(session);
       renderSubtitles(session);
       if (session.nativeBilingual) {
-        updateNativeSubtitles(session);
         setSubtitleStatus("");
       } else {
         setSubtitleStatus("Translating nearby captions…");
@@ -2498,7 +2396,6 @@
     cancelSubtitleRequest(session);
     session.error = null;
     session.chunks = makeSubtitleChunks(session.rawFragments, session.automatic);
-    updateNativeSubtitles(session);
     renderSubtitles(session);
     setSubtitleStatus("Translating nearby captions…");
     void pumpSubtitleQueue(session);
@@ -2533,7 +2430,6 @@
       .${SCRIPT_PREFIX}__host { position:absolute !important; inset:0 !important; z-index:65 !important; pointer-events:none !important; font:14px/1.4 -apple-system,BlinkMacSystemFont,sans-serif !important; color:#fff !important; text-align:start !important; }
       .${SCRIPT_PREFIX}__host [hidden] { display:none !important; }
       .${SCRIPT_PREFIX}__toolbar { position:absolute !important; bottom:12px !important; right:12px !important; left:12px !important; display:flex !important; align-items:center !important; justify-content:flex-end !important; flex-wrap:wrap !important; gap:6px !important; pointer-events:none !important; transition:opacity 180ms ease-out !important; }
-      @media (max-width: 600px) { .${SCRIPT_PREFIX}__toolbar { top:8px !important; right:48px !important; bottom:auto !important; } }
       .ytp-autohide .${SCRIPT_PREFIX}__host[data-idle=true] .${SCRIPT_PREFIX}__toolbar, .${SCRIPT_PREFIX}__host[data-autohide=true][data-idle=true] .${SCRIPT_PREFIX}__toolbar { opacity:0 !important; }
       .ytp-autohide .${SCRIPT_PREFIX}__host[data-idle=true] .${SCRIPT_PREFIX}__toolbar *, .${SCRIPT_PREFIX}__host[data-autohide=true][data-idle=true] .${SCRIPT_PREFIX}__toolbar * { pointer-events:none !important; }
       .${SCRIPT_PREFIX}__toolbar button, .${SCRIPT_PREFIX}__preferences button, .${SCRIPT_PREFIX}__trigger { appearance:none !important; box-sizing:border-box !important; min-width:44px !important; min-height:44px !important; margin:0 !important; padding:10px !important; border:1px solid #ffffff40 !important; border-radius:6px !important; background:#161618df !important; color:#fff !important; font:inherit !important; line-height:22px !important; cursor:pointer !important; pointer-events:auto !important; touch-action:manipulation !important; }
@@ -2544,10 +2440,7 @@
       .${SCRIPT_PREFIX}__toolbar button:focus-visible, .${SCRIPT_PREFIX}__preferences button:focus-visible, .${SCRIPT_PREFIX}__trigger:focus-visible, .${SCRIPT_PREFIX}__preferences input:focus-visible { outline:2px solid #a8c7ff !important; outline-offset:2px !important; }
       .${SCRIPT_PREFIX}__toolbar button[aria-pressed=true], .${SCRIPT_PREFIX}__preferences button[aria-pressed=true] { background:#315b9bdd !important; }
       .${SCRIPT_PREFIX}__preferences { position:absolute !important; bottom:var(--pref-offset,58px) !important; right:var(--pref-right,12px) !important; width:236px !important; padding:12px !important; background:#161618f5 !important; border:1px solid #ffffff40 !important; border-radius:8px !important; pointer-events:auto !important; z-index:70 !important; }
-      .${SCRIPT_PREFIX}__preferences[data-placement=top] { top:var(--pref-offset,52px) !important; bottom:auto !important; }
       .${SCRIPT_PREFIX}__preferences > button { width:100% !important; margin-bottom:4px !important; }
-      .${SCRIPT_PREFIX}__actions { display:flex !important; gap:6px !important; margin-top:6px !important; }
-      .${SCRIPT_PREFIX}__actions > button { flex:1 !important; }
       .${SCRIPT_PREFIX}__preferences label { display:flex !important; align-items:center !important; justify-content:space-between !important; min-height:44px !important; gap:12px !important; color:#fff !important; font:inherit !important; }
       .${SCRIPT_PREFIX}__preferences input { width:90px !important; min-height:28px !important; accent-color:#a8c7ff !important; }
       .${SCRIPT_PREFIX}__preferences input[type=checkbox] { width:24px !important; }
@@ -2559,8 +2452,6 @@
       .${SCRIPT_PREFIX}__captions > div:empty { display:none !important; }
       .${SCRIPT_PREFIX}__captions > .${SCRIPT_PREFIX}__translation { color:#ffedab !important; }
       .${SCRIPT_PREFIX}__active .ytp-caption-window-container { visibility:hidden !important; }
-      .${SCRIPT_PREFIX}__expanded { position:fixed !important; inset:0 !important; width:100vw !important; height:100dvh !important; max-width:none !important; max-height:none !important; margin:0 !important; z-index:2147483646 !important; background:#000 !important; }
-      .${SCRIPT_PREFIX}__expanded video { position:absolute !important; inset:0 !important; width:100% !important; height:100% !important; object-fit:contain !important; }
     `;
     document.documentElement.append(style);
   }
@@ -2574,11 +2465,10 @@
       parseSubtitleGroups, requestSubtitleTranslation, subtitleCacheKey, joinCaptionText,
       youtubeVideoId, selectYoutubeTrack, selectTargetYoutubeTrack, sameLanguage, youtubeCaptionUrl, youtubeTrackKey,
       captionBridgeRequest, youtubeCaptionBridge, installCaptionBridge,
-      subtitleAtTime, subtitleTrackText, subtitleQueueChunk, cancelSubtitleRequest,
+      subtitleAtTime, subtitleQueueChunk, cancelSubtitleRequest,
       pumpSubtitleQueue, loadYoutubeCaptions, loadSubtitlePreferences,
-      enterNativeSubtitles, leaveNativeSubtitles, updateNativeSubtitles,
       startYoutubeSubtitles, stopYoutubeSubtitles, retryYoutubeSubtitles, resegmentYoutubeSubtitles, checkSubtitleTrack,
-      mountSubtitleView, renderSubtitles, refreshYoutubePlayer, toggleSubtitleExpanded,
+      mountSubtitleView, renderSubtitles, refreshYoutubePlayer,
       cleanSettings, parseImportedSettings, endpointFor, loadCache, saveCache,
       getSession: () => subtitleSession, getView: () => subtitleView,
       setSession: (session) => { subtitleSession = session; },
@@ -2593,11 +2483,10 @@
         document.querySelector("video.html5-main-video") ||
         document.querySelector("video")
       : null;
-    const player = video?.closest("#movie_player, .html5-video-player, ytm-player") || video?.parentElement;
+    const player = video?.closest("#movie_player, .html5-video-player") || video?.parentElement;
     if (subtitleView && (!videoId || subtitleView.video !== video || !subtitleView.host.isConnected ||
       subtitleView.videoId !== videoId)) {
       stopYoutubeSubtitles();
-      toggleSubtitleExpanded(false);
       subtitleView.cleanup();
       if (subtitleView.player.style.position === "relative") subtitleView.player.style.position = subtitleView.position;
       subtitleView.trigger?.remove();
@@ -2635,9 +2524,6 @@
     setInterval(refreshYoutubePlayer, 1000);
     document.addEventListener("yt-navigate-start", () => stopYoutubeSubtitles());
     document.addEventListener("yt-navigate-finish", refreshYoutubePlayer);
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") toggleSubtitleExpanded(false);
-    });
     window.addEventListener("pagehide", () => stopYoutubeSubtitles());
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initializeYoutubeSubtitles, { once: true });
