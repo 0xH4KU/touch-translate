@@ -7,14 +7,21 @@
   #movie_player{position:relative;width:min(100%,960px);aspect-ratio:16/9;background:#1d2530;color:#fff}
   video{width:100%;height:100%;object-fit:contain}
   .ytp-caption-window-container{position:absolute;bottom:12%;left:10%;right:10%;text-align:center}
+  .ytp-chrome-bottom{position:absolute;left:0;right:0;bottom:0;height:52px}
+  .ytp-progress-bar-container{position:absolute;top:0;left:0;right:0;height:6px;background:#ffffff55}
+  .ytp-right-controls{position:absolute;bottom:0;right:8px;height:44px}
+  .ytp-autohide .ytp-chrome-bottom{opacity:0;pointer-events:none}
   pre{white-space:pre-wrap}
 </style>
 <h1>YouTube subtitle browser checks</h1>
 <div id="movie_player" class="html5-video-player">
   <video playsinline></video>
   <div class="ytp-caption-window-container">Native YouTube captions</div>
-  <div class="ytp-right-controls">
-    <button class="ytp-subtitles-button" aria-label="YouTube captions" aria-pressed="false">CC</button>
+  <div class="ytp-chrome-bottom">
+    <div class="ytp-progress-bar-container"></div>
+    <div class="ytp-right-controls">
+      <button class="ytp-subtitles-button" aria-label="YouTube captions" aria-pressed="false">CC</button>
+    </div>
   </div>
 </div>
 <pre id="results" data-touch-translate-ui>Running browser checks…</pre>

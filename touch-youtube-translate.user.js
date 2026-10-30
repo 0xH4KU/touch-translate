@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch YouTube Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.3
+// @version      0.1.4
 // @description  Private bilingual YouTube captions with smart segmentation and your own translation API.
 // @author       HAKU
 // @match        https://www.youtube.com/*
@@ -50,6 +50,7 @@
   const SUBTITLE_BATCH_MS = 30000;
   const SUBTITLE_BATCH_CHARS = 6000;
   const SUBTITLE_LOOKAHEAD_MS = 60000;
+  const YOUTUBE_BOTTOM_CONTROLS_SELECTOR = ".ytp-chrome-bottom, .ytp-progress-bar-container, .player-controls-bottom, ytm-progress-bar, [role='slider']";
   const nativeSubtitleTracks = new WeakMap();
   let subtitleSession = null;
   let subtitleView = null;
@@ -58,12 +59,15 @@
   function loadSubtitlePreferences() {
     const saved = GM_getValue(PREFERENCES_KEY, {});
     const defaultSize = globalThis.matchMedia?.("(max-width: 600px)")?.matches ? 18 : 22;
+    const savedBottom = Number(saved?.bottom);
+    const bottom = saved?.positionVersion === 1 || savedBottom !== 12 ? savedBottom : 0;
     return {
       enabled: saved?.enabled !== false,
       smart: saved?.smart !== false,
       translationOnly: saved?.translationOnly === true,
       fontSize: Math.max(14, Math.min(36, Number(saved?.fontSize) || defaultSize)),
-      bottom: Math.max(8, Math.min(35, Number(saved?.bottom) || 12)),
+      bottom: Math.max(0, Math.min(35, Number.isFinite(bottom) ? bottom : 0)),
+      positionVersion: 1,
     };
   }
 
@@ -1925,7 +1929,6 @@
         for (const group of entry.groups) {
           const text = subtitleTrackText(group, session.preferences).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
           const cue = new VTTCue(group.start / 1000, group.end / 1000, text);
-          cue.line = -3;
           native.track.addCue(cue);
           cues.push(cue);
         }
@@ -1998,6 +2001,28 @@
     } else {
       if (view.trigger.parentElement !== view.toolbar) view.toolbar.append(view.trigger);
       view.trigger.dataset.docked = "overlay";
+    }
+  }
+
+  function updateSubtitlePosition(view = subtitleView) {
+    if (!view) return;
+    const playerRect = view.player.getBoundingClientRect();
+    let bottom = 0;
+    for (const controls of view.player.querySelectorAll(YOUTUBE_BOTTOM_CONTROLS_SELECTOR)) {
+      const rect = controls.getBoundingClientRect();
+      if (rect.width < playerRect.width / 2 || rect.height <= 0 ||
+        rect.top < playerRect.top + playerRect.height / 2 || rect.top >= playerRect.bottom) continue;
+      let visible = true;
+      for (let element = controls; element; element = element.parentElement) {
+        const style = getComputedStyle(element);
+        if (style.display === "none" || style.visibility !== "visible" || Number(style.opacity) === 0) { visible = false; break; }
+        if (element === view.player) break;
+      }
+      if (visible) bottom = Math.max(bottom, Math.ceil(playerRect.bottom - rect.top + 8));
+    }
+    const value = `${bottom}px`;
+    if (view.host.style.getPropertyValue("--subtitle-controls-bottom") !== value) {
+      view.host.style.setProperty("--subtitle-controls-bottom", value);
     }
   }
 
@@ -2110,7 +2135,7 @@
     preference("Smart segmentation", "smart", "checkbox");
     preference("Translation only", "translationOnly", "checkbox");
     preference("Text size", "fontSize", "range", 14, 36);
-    preference("Bottom position", "bottom", "range", 8, 35);
+    preference("Bottom position", "bottom", "range", 0, 35);
     const actions = document.createElement("div");
     actions.className = `${SCRIPT_PREFIX}__actions`;
     const expand = button("Expand", () => toggleSubtitleExpanded(), actions);
@@ -2147,8 +2172,14 @@
       }
     }
     let autohideTimer;
+    let positionFrame;
+    const schedulePosition = () => {
+      cancelAnimationFrame(positionFrame);
+      positionFrame = requestAnimationFrame(() => updateSubtitlePosition(subtitleView));
+    };
     const noteActivity = (event) => {
       syncSubtitleTriggerDock(subtitleView);
+      schedulePosition();
       if (!controls.hidden && event?.target && !controls.contains(event.target) && !trigger.contains(event.target)) {
         setPreferencesOpen(subtitleView, false);
       }
@@ -2164,10 +2195,31 @@
     for (const type of ["play", "pause", "ended"]) {
       video.addEventListener(type, noteActivity);
     }
+    const positionObserver = new MutationObserver((records) => {
+      const changes = records.filter((record) => !isSuiteUi(record.target));
+      if (!changes.length) return;
+      const bars = [...player.querySelectorAll(YOUTUBE_BOTTOM_CONTROLS_SELECTOR)];
+      if (changes.some((record) => record.type === "childList" || record.target === player ||
+        bars.some((bar) => record.target.contains(bar)))) schedulePosition();
+    });
+    positionObserver.observe(player, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "hidden"] });
+    const sizeObserver = new ResizeObserver(schedulePosition);
+    sizeObserver.observe(player);
+    window.addEventListener("resize", schedulePosition);
+    player.addEventListener("transitionend", schedulePosition);
     player.append(host);
     const position = player.style.position;
     if (getComputedStyle(player).position === "static") player.style.position = "relative";
-    subtitleView = { host, toolbar, player, video, trigger, toggle, controls, expand, retry, status, captions, source, translation, preferences, position, autohideTimer: () => clearTimeout(autohideTimer) };
+    subtitleView = { host, toolbar, player, video, trigger, toggle, controls, expand, retry, status, captions, source, translation, preferences, position, cleanup() {
+      clearTimeout(autohideTimer);
+      cancelAnimationFrame(positionFrame);
+      positionObserver.disconnect();
+      sizeObserver.disconnect();
+      window.removeEventListener("resize", schedulePosition);
+      player.removeEventListener("transitionend", schedulePosition);
+      for (const type of ["pointerdown", "pointermove", "touchstart", "keydown"]) player.removeEventListener(type, noteActivity);
+      for (const type of ["play", "pause", "ended"]) video.removeEventListener(type, noteActivity);
+    } };
     syncSubtitleTriggerDock(subtitleView);
     applySubtitlePreferences();
   }
@@ -2177,6 +2229,7 @@
     const preferences = subtitleView.preferences;
     subtitleView.host.style.setProperty("--subtitle-size", `${preferences.fontSize}px`);
     subtitleView.host.style.setProperty("--subtitle-bottom", `${preferences.bottom}%`);
+    updateSubtitlePosition();
     if (subtitleSession) {
       subtitleSession.preferences = { ...preferences };
       if (updateNative) updateNativeSubtitles(subtitleSession);
@@ -2501,7 +2554,7 @@
       .${SCRIPT_PREFIX}__status { max-width:min(90%, 520px) !important; padding:6px 8px !important; border-radius:4px !important; background:#161618cc !important; font:12px/1.4 -apple-system,BlinkMacSystemFont,sans-serif !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; }
       .${SCRIPT_PREFIX}__status:empty { display:none !important; }
       .${SCRIPT_PREFIX}__status[data-error=true] { color:#ffb4ab !important; max-height:140px !important; overflow:auto !important; pointer-events:auto !important; }
-      .${SCRIPT_PREFIX}__captions { position:absolute !important; bottom:var(--subtitle-bottom,12%) !important; left:4% !important; right:4% !important; width:92% !important; margin:auto !important; text-align:center !important; font:500 var(--subtitle-size,22px)/1.4 -apple-system,BlinkMacSystemFont,sans-serif !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; text-shadow:0 1px 3px #000 !important; }
+      .${SCRIPT_PREFIX}__captions { position:absolute !important; bottom:max(calc(var(--subtitle-bottom,0%) + 8px),var(--subtitle-controls-bottom,0px)) !important; left:4% !important; right:4% !important; width:92% !important; margin:auto !important; text-align:center !important; font:500 var(--subtitle-size,22px)/1.4 -apple-system,BlinkMacSystemFont,sans-serif !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; text-shadow:0 1px 3px #000 !important; }
       .${SCRIPT_PREFIX}__captions > div { width:fit-content !important; max-width:100% !important; box-sizing:border-box !important; margin:2px auto !important; padding:3px 8px !important; border-radius:4px !important; background:#000c !important; color:#fff !important; }
       .${SCRIPT_PREFIX}__captions > div:empty { display:none !important; }
       .${SCRIPT_PREFIX}__captions > .${SCRIPT_PREFIX}__translation { color:#ffedab !important; }
@@ -2545,7 +2598,7 @@
       subtitleView.videoId !== videoId)) {
       stopYoutubeSubtitles();
       toggleSubtitleExpanded(false);
-      subtitleView.autohideTimer?.();
+      subtitleView.cleanup();
       if (subtitleView.player.style.position === "relative") subtitleView.player.style.position = subtitleView.position;
       subtitleView.trigger?.remove();
       subtitleView.host.remove();
@@ -2556,7 +2609,10 @@
       subtitleView.videoId = videoId;
       if (subtitleView.preferences.enabled) void startYoutubeSubtitles(true);
     }
-    if (subtitleView) syncSubtitleTriggerDock(subtitleView);
+    if (subtitleView) {
+      syncSubtitleTriggerDock(subtitleView);
+      updateSubtitlePosition(subtitleView);
+    }
     const session = subtitleSession;
     if (session) {
       if (JSON.stringify(session.settings) !== JSON.stringify(loadSettings())) {

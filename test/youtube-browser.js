@@ -139,6 +139,50 @@ export async function runYoutubeBrowserChecks(source) {
     assert(!JSON.stringify(store["youtube-cache-v1"]).includes("A complete caption"), "Source captions must not be persisted");
   });
 
+  await check("Captions sit at the bottom and rise above visible playback controls", async () => {
+    const view = api.getView();
+    const chrome = player.querySelector(".ytp-chrome-bottom");
+    const gap = () => player.getBoundingClientRect().bottom - view.captions.getBoundingClientRect().bottom;
+    player.classList.add("ytp-autohide");
+    await until(() => Math.abs(gap() - 8) < 1);
+    player.classList.remove("ytp-autohide");
+    await until(() => view.captions.getBoundingClientRect().bottom <= chrome.getBoundingClientRect().top - 7);
+    assert(gap() >= chrome.getBoundingClientRect().height + 7, "Captions must clear the entire control bar");
+    chrome.style.height = "20%";
+    player.style.height = "300px";
+    await until(() => Math.abs(gap() - 68) < 1);
+    chrome.style.height = "";
+    player.style.height = "";
+    player.classList.add("ytp-autohide");
+    await until(() => Math.abs(gap() - 8) < 1);
+    player.classList.remove("ytp-autohide");
+  });
+
+  await check("Mobile controls respect hidden ancestors and ignore the volume slider", async () => {
+    const view = api.getView();
+    const wrapper = document.createElement("div");
+    const bottom = document.createElement("div");
+    bottom.className = "player-controls-bottom";
+    bottom.style.cssText = "position:absolute;left:0;right:0;bottom:0;height:76px";
+    wrapper.style.opacity = "0";
+    wrapper.append(bottom);
+    const volume = document.createElement("div");
+    volume.setAttribute("role", "slider");
+    volume.style.cssText = "position:absolute;bottom:110px;left:10px;width:40px;height:10px";
+    player.classList.add("ytp-autohide");
+    player.append(wrapper, volume);
+    const gap = () => player.getBoundingClientRect().bottom - view.captions.getBoundingClientRect().bottom;
+    await until(() => Math.abs(gap() - 8) < 1);
+    wrapper.style.opacity = "1";
+    await until(() => Math.abs(gap() - 84) < 1);
+    assert(view.captions.getBoundingClientRect().bottom <= bottom.getBoundingClientRect().top - 7, "Mobile captions must clear the visible progress controls");
+    bottom.hidden = true;
+    await until(() => Math.abs(gap() - 8) < 1);
+    wrapper.remove();
+    volume.remove();
+    player.classList.remove("ytp-autohide");
+  });
+
   await check("Display controls and web expansion update the active player", async () => {
     const view = api.getView();
     const checkbox = [...view.host.querySelectorAll("label")].find((label) => label.textContent.includes("Translation only")).querySelector("input");
@@ -181,6 +225,7 @@ export async function runYoutubeBrowserChecks(source) {
     const track = session.native?.track;
     assert(track?.mode === "showing" && track.cues.length > 0, "A real browser subtitle track must be populated");
     assert(track.cues[0].startTime === 0 && track.cues[0].endTime === 4, "Cue times must come directly from the source track");
+    assert(track.cues[0].line === "auto", "Native fullscreen must use the browser's automatic caption placement");
     assert(track.cues[0].text.includes("&lt;img"), "Native cue markup must be escaped");
     track.removeCue(track.cues[0]);
     api.leaveNativeSubtitles(session);

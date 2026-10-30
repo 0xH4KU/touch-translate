@@ -146,6 +146,15 @@ assert.ok(api.subtitleQueueChunk(bounded));
 assert.equal(api.subtitleAtTime(session.chunks, 1000).translation, groups[0].translation);
 assert.equal(api.subtitleAtTime(session.chunks, 4800), null);
 assert.equal(api.loadSubtitlePreferences().enabled, true, "Bilingual subtitles must be enabled by default");
+assert.equal(api.loadSubtitlePreferences().bottom, 0, "Captions must default to the bottom of the player");
+storage["youtube-preferences-v1"] = { bottom: 12, fontSize: 30 };
+assert.equal(api.loadSubtitlePreferences().bottom, 0, "The previously saved default must migrate to bottom placement");
+assert.equal(api.loadSubtitlePreferences().fontSize, 30, "Position migration must preserve unrelated preferences");
+storage["youtube-preferences-v1"] = { bottom: 20 };
+assert.equal(api.loadSubtitlePreferences().bottom, 20, "Existing custom positions must be preserved");
+storage["youtube-preferences-v1"] = { bottom: 12, positionVersion: 1 };
+assert.equal(api.loadSubtitlePreferences().bottom, 12, "A newly chosen 12% offset must not be mistaken for the old default");
+delete storage["youtube-preferences-v1"];
 assert.equal(api.subtitleTrackText({ text: "Source", translation: "譯文" }, { translationOnly: true }), "譯文");
 assert.equal(api.subtitleTrackText({ text: "Source" }, { translationOnly: true }), "Source");
 

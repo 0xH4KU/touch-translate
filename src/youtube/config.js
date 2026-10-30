@@ -22,6 +22,7 @@
   const SUBTITLE_BATCH_MS = 30000;
   const SUBTITLE_BATCH_CHARS = 6000;
   const SUBTITLE_LOOKAHEAD_MS = 60000;
+  const YOUTUBE_BOTTOM_CONTROLS_SELECTOR = ".ytp-chrome-bottom, .ytp-progress-bar-container, .player-controls-bottom, ytm-progress-bar, [role='slider']";
   const nativeSubtitleTracks = new WeakMap();
   let subtitleSession = null;
   let subtitleView = null;
@@ -30,11 +31,14 @@
   function loadSubtitlePreferences() {
     const saved = GM_getValue(PREFERENCES_KEY, {});
     const defaultSize = globalThis.matchMedia?.("(max-width: 600px)")?.matches ? 18 : 22;
+    const savedBottom = Number(saved?.bottom);
+    const bottom = saved?.positionVersion === 1 || savedBottom !== 12 ? savedBottom : 0;
     return {
       enabled: saved?.enabled !== false,
       smart: saved?.smart !== false,
       translationOnly: saved?.translationOnly === true,
       fontSize: Math.max(14, Math.min(36, Number(saved?.fontSize) || defaultSize)),
-      bottom: Math.max(8, Math.min(35, Number(saved?.bottom) || 12)),
+      bottom: Math.max(0, Math.min(35, Number.isFinite(bottom) ? bottom : 0)),
+      positionVersion: 1,
     };
   }
