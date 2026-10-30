@@ -8,7 +8,8 @@ export const customGatewayBaseURL = "https://ai.example.com/google-ai-studio";
 export function createHarness() {
   const source = readFileSync(new URL("../touch-translate.user.js", import.meta.url), "utf8");
   const imageSource = readFileSync(new URL("../touch-image-translate.user.js", import.meta.url), "utf8");
-  const api = {}, imageApi = {}, body = {}, documentElement = {};
+  const youtubeSource = readFileSync(new URL("../touch-youtube-translate.user.js", import.meta.url), "utf8");
+  const api = {}, imageApi = {}, youtubeApi = {}, body = {}, documentElement = {};
   const transport = { options: null, history: [], aborted: false };
   const storage = {};
   const NodeFilter = { FILTER_ACCEPT: 1, FILTER_REJECT: 2, SHOW_TEXT: 4 };
@@ -23,7 +24,8 @@ export function createHarness() {
   const context = vm.createContext({
     __TOUCH_TRANSLATE_TEST__: api,
     __TOUCH_IMAGE_TRANSLATE_TEST__: imageApi,
-    URL, clearTimeout, console, document, NodeFilter, setTimeout,
+    __TOUCH_YOUTUBE_TRANSLATE_TEST__: youtubeApi,
+    URL, AbortController, clearTimeout, console, document, NodeFilter, setTimeout,
     GM_info: { script: { version: source.match(/@version\s+(\S+)/)[1] } },
     GM_getValue: (key, fallback) => structuredClone(storage[key] ?? fallback),
     GM_setValue: (key, value) => { storage[key] = structuredClone(value); },
@@ -42,5 +44,6 @@ export function createHarness() {
   });
   vm.runInContext(source, context);
   vm.runInContext(imageSource, context);
-  return { api, imageApi, source, imageSource, context, document, body, documentElement, transport, storage };
+  vm.runInContext(youtubeSource, context);
+  return { api, imageApi, youtubeApi, source, imageSource, youtubeSource, context, document, body, documentElement, transport, storage };
 }

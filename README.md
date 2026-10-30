@@ -4,6 +4,7 @@ A private, touch-first bilingual translation userscript suite for iOS Safari and
 
 - **[Touch Translate (`touch-translate.user.js`)](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-translate.user.js)** — Pure text translation via right-swipe on paragraphs and four-finger tap for full-page translation. Keeps the source DOM intact and inserts each translation as a clearly separated block below the original.
 - **[Touch Image Translate (`touch-image-translate.user.js`)](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-image-translate.user.js)** — Standalone Babel Lens image translation userscript triggered by a two-finger right-swipe on an image, featuring dense macro-block merging, Spotlight Mode, and a full-screen zoomable lightbox viewer.
+- **[Touch YouTube Translate (`touch-youtube-translate.user.js`)](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-youtube-translate.user.js)** — YouTube bilingual captions with optional AI sentence segmentation, playback-aware prefetching, and your own API. Runs only on desktop and mobile YouTube.
 
 ## Text Translation (`touch-translate.user.js`)
 
@@ -32,10 +33,26 @@ Region pins keep a readable size and a 44px touch area while zooming, and follow
 
 When multiple images are loading, only the most recent image action can open the viewer automatically. Other completed results remain available from their image badges. Gestures inside either plugin's controls are excluded from page translation gestures.
 
+## YouTube Subtitles (`touch-youtube-translate.user.js`)
+
+1. Install the YouTube script and reload the YouTube page so its caption observer can start early.
+2. Open a regular video on `www.youtube.com/watch` or `m.youtube.com/watch`. Open **Captions → API** in the player, or use the Tampermonkey **Configure API** menu, to configure a text model. The existing settings export/import format works here too; each script keeps its own API settings.
+3. Start playback and tap **Translate CC**. The script reads the currently selected YouTube caption track, falling back to the player's default track, then a human-created track, then automatic captions. If YouTube returns empty captions, it tries enabling CC; otherwise, turn on YouTube CC yourself and press **Retry**.
+4. Open **Captions** to toggle **Smart segmentation**, **Translation only**, text size, or bottom position. **Expand** keeps the video and translated overlay together in a page-filling player; press Escape or **Exit expand** to return.
+5. Tap **Stop CC** to cancel requests and restore the original caption display. If the script enabled CC, it restores the previous off state unless you subsequently chose a different caption language. A new video requires an explicit tap to start translation again.
+
+Smart segmentation is on by default for auto-generated captions. Each model response groups consecutive source fragments and translates them in the same request. IDs, coverage, silence gaps, and reading limits are checked locally; start and end times always come from the original fragments. Human-created caption boundaries are preserved. An invalid smart segmentation response falls back once to translation with basic boundaries. Provider failures retain the original captions and wait for **Retry**. The script has no account or membership requirement; your API provider's normal charges still apply.
+
+Translation uses batches of up to 30 seconds and 6,000 source characters, prefetching chunks that start within the next 60 seconds of video time (scaled for playback speed, up to 4×). A chunk crossing that boundary can extend the window by up to one batch. It does not eagerly translate the entire video. Seeking cancels obsolete requests; late results are discarded. Caption language changes restart the session, API changes stop it, and ads hide the overlay and pause new requests.
+
+The page bridge observes YouTube's caption requests and reads player metadata to reuse the current caption URL and its playback token. It can fetch only YouTube's caption endpoint for the current video, and receives no translation API key or GM APIs. API requests contain caption text, a few seconds of preceding context, local fragment IDs, durations and gaps; they omit the video URL, title, account and viewing history. Original captions and signed caption URLs remain in page memory. Persistent cache entries contain only hashes, translated text, group indexes and timestamps; they can be removed with **Clear cache**.
+
+The script also creates a native `TextTrack` with `VTTCue` entries on Safari's video-fullscreen events and clears it when fullscreen ends. Native fullscreen rendering and JavaScript scheduling depend on the Safari/iOS version and still require iPhone testing; font and position controls primarily affect the web overlay. Use **Expand** if native fullscreen does not show translations reliably. Shorts, embeds, live captions, videos without exposed captions, speech recognition and the native YouTube app are outside this first version. YouTube's internal player and caption format can change; playback-token failures or page-script injection restrictions are reported in the player rather than sending the video to a third-party transcript service.
+
 ## Installation
 
 1. Install and enable Tampermonkey in Safari.
-2. Open the direct install link for [Touch Translate](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-translate.user.js) and/or [Touch Image Translate](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-image-translate.user.js) and confirm the installation in Tampermonkey.
+2. Open the direct install link for [Touch Translate](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-translate.user.js), [Touch Image Translate](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-image-translate.user.js), or [Touch YouTube Translate](https://raw.githubusercontent.com/0xH4KU/touch-translate/main/touch-youtube-translate.user.js) and confirm the installation in Tampermonkey.
 3. Open the Tampermonkey script menu and run the API setup command. Choose **Chat Completions** (default) or **Gemini (native)** under API format.
 
 For Chat Completions, use a Base URL such as `https://api.openai.com/v1`. The script appends `/chat/completions`; you may also enter a complete `/chat/completions` URL. Local and private network HTTP endpoints (e.g. `http://localhost:11434`, `http://127.0.0.1:11434`, `http://192.168.x.x`, or `http://*.local`) are also supported for self-hosted setups (Ollama, LocalAI, vLLM). Requests use Bearer authentication. Model names and domains never switch the selected API format.
@@ -54,7 +71,7 @@ Select **Gemini (native)** to enable the native request and response format, inc
 - Send the source strings as JSON and request JSON Schema output, retaining JSON mode if schema support is unavailable.
 - Send the configured thinking level (`minimal`, `low`, `medium`, or `high`, defaulting to `low`) in `generationConfig.thinkingConfig.thinkingLevel`.
 
-Both plugins use shared instructions for natural phrasing, regional language usage, consistent terminology, and faithful handling of negation, tone, names, numbers, and code. Image translation also reads the whole scene for context and keeps different speakers and panels separate. Thought parts are excluded from the answer; blocked or incomplete responses are reported without treating them as successful translations.
+All three plugins use shared instructions for natural phrasing, regional language usage, consistent terminology, and faithful handling of negation, tone, names, numbers, and code. Image translation also reads the whole scene for context and keeps different speakers and panels separate. Thought parts are excluded from the answer; blocked or incomplete responses are reported without treating them as successful translations.
 
 For Google directly, use Base URL `https://generativelanguage.googleapis.com/v1beta` and your Google API key. The script appends `/models/{model}:generateContent` and sends `safetySettings` with `x-goog-api-key` authentication. Native proxies can use their own Base URL. An explicit `/v1` or `/v1beta` is preserved; `/v1beta` is added when neither is present. Google's `/v1beta/openai` URL belongs to Chat Completions and is not rewritten to the native API.
 
@@ -64,22 +81,22 @@ Chat Completions always uses generic parameters and `reasoning_effort` for the c
 
 The selected API format is saved and included in settings exports. Older settings and imports without this field default to Chat Completions; select Gemini (native) explicitly when using a native endpoint.
 
-The two plugins keep separate settings so text and image models can differ. Both accept the same versioned export or a flat settings object. Importing another provider endpoint or API format without an API key clears the previous key; enter the new provider's key separately.
+The three plugins keep separate settings so text, image and subtitle models can differ. All accept the same versioned export or a flat settings object. Importing another provider endpoint or API format without an API key clears the previous key; enter the new provider's key separately.
 
 ## Privacy
 
-- API request bodies contain only extracted visible plain text (or the normalized image when you explicitly swipe right on an image), the selected model, and the translation instruction. The page HTML, URL, and title are not included. The API provider may still receive normal network metadata such as your IP address.
+- API request bodies contain extracted plain text (or the normalized image when you explicitly swipe right on an image), the selected model, and the translation instruction. YouTube requests additionally contain local fragment IDs, durations and gaps for nearby captions and preceding caption context. The page HTML, URL, and title are not included. The API provider may still receive normal network metadata such as your IP address.
 - API requests use Tampermonkey's `anonymous` mode.
 - Provider error diagnostics omit URL credentials, query strings, and fragments, and redact the configured API key before displaying or logging them.
 - The scripts include no analytics, tracking, or unrelated external requests.
 - The API key is entered in a masked field and stored in Tampermonkey storage, not in the userscript source. Use the clear API settings menu command to delete it and the other API settings.
-- The cache stores only 64-bit hashes of the settings and source text or image URL plus the translation and a timestamp. It never stores the source text.
+- The cache stores only 64-bit hashes of the settings and source text or image URL plus the translation and a timestamp. YouTube entries additionally contain group indexes. It never stores the source text.
 - `@connect *` allows custom API domains and cross-origin image fetching when you trigger image translation.
-- Settings exports omit the API key by default in both plugins.
+- Settings exports omit the API key by default in all plugins.
 
 ## Limitations
 
-Browser-protected pages, frames that deny extension access, closed Shadow DOM, Canvas, PDFs, and video subtitles remain inaccessible because they do not expose ordinary HTML text to userscripts. New API requests are limited to 6,000 characters per text block and 10 MB per image. API responses are never inserted as HTML.
+Browser-protected pages, frames that deny extension access, closed Shadow DOM, Canvas, PDFs, and ordinary video subtitles remain inaccessible to the text script because they do not expose ordinary HTML text. The separate YouTube script reads YouTube's exposed caption tracks; it limits a track to 10 MB and 50,000 fragments. New API requests are limited to 6,000 source characters per text block or subtitle batch and 10 MB per image. API responses are never inserted as HTML; native subtitle cue markup is escaped.
 
 ## Development and self-check
 
@@ -87,7 +104,8 @@ The root `.user.js` files are generated install artifacts. Edit `src/` and rebui
 
 - `src/shared/`: settings, provider transport and diagnostics, cache, gesture helpers, notifications and common styles.
 - `src/text/` and `src/image/`: matching `config`, `content`, `translation`, `jobs`, `gestures`, `styles`, and `index` files. Image translation adds `viewer.js`.
-- `test/`: separate text, image and shared regression suites. `test.mjs` remains the entry point.
+- `src/youtube/`: caption bridge, parsing and segmentation, playback queue, overlay, native text tracks, configuration, styles and initialization. Uses the shared provider, settings and cache without loading text/image gestures.
+- `test/`: separate text, image, YouTube and shared regression suites. `test.mjs` remains the entry point.
 
 Build after source changes:
 
@@ -101,9 +119,10 @@ Check that the install artifacts match their source, validate syntax, and run th
 node scripts/build.mjs --check
 node --check touch-translate.user.js
 node --check touch-image-translate.user.js
+node --check touch-youtube-translate.user.js
 node test.mjs
 ```
 
-For real DOM and gesture integration checks, run `node scripts/serve-tests.mjs` and open [the local browser fixture](http://127.0.0.1:8765/test/browser.html). It loads both complete userscripts with separate mock GM stores and synthetic responses, covering normal initialization, concurrent cache writes, viewer ordering, gesture isolation, settings and automatic page translation. It uses no API keys or paid requests. Safari touch behavior and translation quality on real model output still require device and provider checks.
+For real DOM and gesture integration checks, run `node scripts/serve-tests.mjs` and open [the suite browser fixture](http://127.0.0.1:8765/test/browser.html). It loads all three complete userscripts with separate mock GM stores and synthetic responses, covering normal initialization, concurrent cache writes, viewer ordering, gesture isolation, settings and automatic page translation. The [YouTube browser fixture](http://127.0.0.1:8765/test/youtube-browser.html) additionally exercises the page bridge, explicit activation, caption display, native cue creation and cleanup, seeking, ads, language changes, settings changes and navigation. Both fixtures use synthetic credentials and no paid requests. They validate browser behavior with simulated YouTube responses; actual YouTube playback, Tampermonkey injection on Safari, iPhone fullscreen and translation quality on real model output still require device and provider checks.
 
 Prompt and generation-profile changes use new cache keys, so previously cached translations are refreshed when requested again.

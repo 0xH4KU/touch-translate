@@ -1,17 +1,18 @@
-export async function runBrowserChecks(textSource, imageSource) {
+export async function runBrowserChecks(textSource, imageSource, youtubeSource) {
   const results = [];
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
   const check = async (name, run) => { await run(); results.push(`PASS ${name}`); };
   const tick = async () => { for (let i = 0; i < 10; i += 1) await Promise.resolve(); };
   const article = document.querySelector("article");
   const settings = { apiFormat: "chat-completions", baseURL: "https://api.example.invalid/v1", model: "browser-model", apiKey: "synthetic-key", targetLanguage: "zh-TW", thinkingLevel: "low" };
-  const stores = { text: { "settings-v1": { ...settings } }, image: { "settings-v1": { ...settings } } };
+  const stores = { text: { "settings-v1": { ...settings } }, image: { "settings-v1": { ...settings } }, youtube: { "settings-v1": { ...settings } } };
   const requests = [], menus = [];
   const capture = (source, kind, functions) => source.replace("  // Test interface", `  globalThis.browser${kind} = { ${functions} };\n  // Test interface`);
   textSource = capture(textSource, "Text", "translateElements, cancelJob, readySettings, configureSettings, parseImportedSettings, startPageTranslation, getPageTask: () => pageTask");
   imageSource = capture(imageSource, "Image", "translateImage, openImageViewer, closeImageViewer, ensureImageOverlay, readySettings, configureSettings");
+  youtubeSource = capture(youtubeSource, "Youtube", "readySettings, configureSettings");
   const load = (kind, source) => new Function(
-    "GM_getValue", "GM_setValue", "GM_deleteValue", "GM_registerMenuCommand", "GM_setClipboard", "GM_xmlhttpRequest", "GM_info", source,
+    "GM_getValue", "GM_setValue", "GM_deleteValue", "GM_registerMenuCommand", "GM_setClipboard", "GM_xmlhttpRequest", "GM_info", "GM_addElement", source,
   )(
     (key, fallback) => structuredClone(stores[kind][key] ?? fallback),
     (key, value) => { stores[kind][key] = structuredClone(value); },
@@ -20,9 +21,11 @@ export async function runBrowserChecks(textSource, imageSource) {
     () => {},
     (options) => { requests.push({ kind, options }); return { abort() { options.onabort?.(); } }; },
     { script: { version: "browser-test" } },
+    (tag, attributes) => { const element = Object.assign(document.createElement(tag), attributes); document.head.append(element); return element; },
   );
   load("text", textSource);
   load("image", imageSource);
+  load("youtube", youtubeSource);
   const t = globalThis.browserText, im = globalThis.browserImage;
   const paragraph = (text) => { const p = document.createElement("p"); p.textContent = text; article.append(p); return p; };
   const image = async (label) => {
@@ -46,9 +49,9 @@ export async function runBrowserChecks(textSource, imageSource) {
     send(target, "touchend", [], points(70));
   };
 
-  await check("Both complete userscripts initialize with separate storage", async () => {
-    assert(menus.length === 11, "Both scripts must register their menus");
-    assert(document.querySelectorAll("style[data-touch-translate], style[data-touch-image-translate]").length === 2, "Both stylesheets must load");
+  await check("All three complete userscripts initialize with separate storage", async () => {
+    assert(menus.length === 17, "All scripts must register their menus");
+    assert(document.querySelectorAll("style[data-touch-translate], style[data-touch-image-translate], style[data-touch-youtube-translate]").length === 3, "All stylesheets must load");
     assert(!document.querySelector(".touch-image-translate__overlay"), "Idle images should not create overlays");
   });
 
@@ -130,7 +133,7 @@ export async function runBrowserChecks(textSource, imageSource) {
   });
 
   await check("Each plugin opens only one settings dialog for concurrent callers", async () => {
-    for (const [kind, suite, prefix] of [["text", t, "touch-translate"], ["image", im, "touch-image-translate"]]) {
+    for (const [kind, suite, prefix] of [["text", t, "touch-translate"], ["image", im, "touch-image-translate"], ["youtube", globalThis.browserYoutube, "touch-youtube-translate"]]) {
       const saved = stores[kind]["settings-v1"];
       delete stores[kind]["settings-v1"];
       const one = suite.readySettings(), two = suite.readySettings();

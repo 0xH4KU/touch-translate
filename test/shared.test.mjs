@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { createHarness, cacheSettings, googleBaseURL } from "./fixtures.mjs";
 import { buildUserscript } from "../scripts/build.mjs";
 
-const { api, imageApi, source, imageSource, context, transport, storage } = createHarness();
+const { api, imageApi, youtubeApi, source, imageSource, youtubeSource, context, transport, storage } = createHarness();
 assert.equal(await buildUserscript("text"), source);
 assert.equal(await buildUserscript("image"), imageSource);
+assert.equal(await buildUserscript("youtube"), youtubeSource);
 
 const settings = { ...cacheSettings, apiKey: "synthetic-api-secret", apiFormat: "chat-completions", thinkingLevel: "medium" };
 const nativeSettings = { ...settings, apiFormat: "gemini-native", baseURL: googleBaseURL, model: "gemini-3.5-flash-lite", thinkingLevel: "minimal" };
@@ -13,6 +14,9 @@ const imageResult = { has_text: true, regions: [{ box_2d: [100, 100, 300, 700], 
 const requests = [
   { suite: api, start: (s) => api.requestTranslations(["An ambiguous sentence."], s), answer: { translations: ["完整的譯文。"] } },
   { suite: imageApi, start: (s) => imageApi.requestImageTranslation(imageData, s), answer: imageResult },
+  { suite: youtubeApi, start: (s) => youtubeApi.requestSubtitleTranslation({
+    fragments: [{ start: 1000, end: 2500, text: "A complete caption." }], context: "", automatic: false,
+  }, s, true), answer: { groups: [{ from: 0, to: 0, translation: "完整字幕。" }] } },
 ];
 
 for (const { suite, start, answer } of requests) {
@@ -96,7 +100,7 @@ assert.equal(imageApi.hashImageCacheKey("same", nativeSettings), imageApi.hashIm
 assert.notEqual(api.hashCacheKey("same", settings), api.hashCacheKey("same", { ...settings, thinkingLevel: "high" }));
 assert.notEqual(imageApi.hashImageCacheKey("same", nativeSettings), imageApi.hashImageCacheKey("same", { ...nativeSettings, thinkingLevel: "high" }));
 
-for (const [suite, key, limit] of [[api, "cache-v1", 500], [imageApi, "image-cache-v1", 150]]) {
+for (const [suite, key, limit] of [[api, "cache-v1", 500], [imageApi, "image-cache-v1", 150], [youtubeApi, "youtube-cache-v1", 200]]) {
   delete storage[key];
   suite.saveCache({ first: { at: 1, translation: "first" } });
   suite.saveCache({ second: { at: 2, translation: "second" } });

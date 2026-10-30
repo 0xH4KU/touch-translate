@@ -4,17 +4,19 @@ import { resolve } from "node:path";
 
 const root = new URL("../", import.meta.url);
 const shared = ["utils", "settings", "provider", "cache", "gestures", "ui"];
+const scripts = { text: "touch-translate.user.js", image: "touch-image-translate.user.js", youtube: "touch-youtube-translate.user.js" };
 
 export async function buildUserscript(kind) {
-  if (!["text", "image"].includes(kind)) throw new Error(`Unknown script: ${kind}`);
+  if (!Object.hasOwn(scripts, kind)) throw new Error(`Unknown script: ${kind}`);
   const files = [
     `${kind}/config`,
-    ...shared.map((name) => `shared/${name}`),
+    ...shared.filter((name) => kind !== "youtube" || name !== "gestures").map((name) => `shared/${name}`),
+    ...(kind === "youtube" ? [`${kind}/bridge`] : []),
     `${kind}/translation`,
     `${kind}/content`,
     ...(kind === "image" ? [`${kind}/viewer`] : []),
     `${kind}/jobs`,
-    `${kind}/gestures`,
+    ...(kind === "youtube" ? [] : [`${kind}/gestures`]),
     `${kind}/styles`,
     `${kind}/index`,
   ];
@@ -29,8 +31,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (process.argv.slice(2).some((arg) => arg !== "--check")) {
     throw new Error("Usage: node scripts/build.mjs [--check]");
   }
-  for (const kind of ["text", "image"]) {
-    const filename = kind === "text" ? "touch-translate.user.js" : "touch-image-translate.user.js";
+  for (const [kind, filename] of Object.entries(scripts)) {
     const output = new URL(filename, root);
     const generated = await buildUserscript(kind);
     if (process.argv.includes("--check")) {
@@ -41,5 +42,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       await writeFile(output, generated);
     }
   }
-  console.log(process.argv.includes("--check") ? "Userscripts are up to date" : "Built both userscripts");
+  console.log(process.argv.includes("--check") ? "Userscripts are up to date" : "Built all userscripts");
 }

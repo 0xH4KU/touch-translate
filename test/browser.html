@@ -7,7 +7,7 @@
 <pre id="results" data-touch-translate-ui>Running browser checks…</pre>
 <script type="module">
   import { runBrowserChecks } from "./browser.js";
-  const sources = await Promise.all(["../touch-translate.user.js", "../touch-image-translate.user.js"].map(async path => {
+  const sources = await Promise.all(["../touch-translate.user.js", "../touch-image-translate.user.js", "../touch-youtube-translate.user.js"].map(async path => {
     const response = await fetch(path);
     if (!response.ok) throw new Error(`Could not load ${path}`);
     return response.text();
