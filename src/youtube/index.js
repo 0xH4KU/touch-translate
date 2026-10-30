@@ -55,6 +55,7 @@
 
   installCaptionBridge();
   function initializeYoutubeSubtitles() {
+    installCaptionBridge();
     addStyles();
     registerCommonMenus();
     GM_registerMenuCommand(`${SCRIPT_NAME}: Toggle captions`, toggleYoutubeSubtitles);

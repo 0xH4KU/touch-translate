@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch YouTube Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.1
+// @version      0.1.2
 // @description  Private bilingual YouTube captions with smart segmentation and your own translation API.
 // @author       HAKU
 // @match        https://www.youtube.com/*
@@ -16,6 +16,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addElement
 // @grant        GM_info
+// @grant        unsafeWindow
 // @connect      *
 // ==/UserScript==
 
@@ -1318,13 +1319,14 @@
   // Source: src/youtube/bridge.js
 
   // Runs in the page world, with no GM APIs, settings, or translation credentials.
-  function youtubeCaptionBridge(channel, maxBytes) {
-    if (window.__touchYoutubeCaptionBridge) return;
-    window.__touchYoutubeCaptionBridge = true;
+  function youtubeCaptionBridge(channel, maxBytes, root = window) {
+    if (root.__touchYoutubeCaptionBridge) return;
+    root.__touchYoutubeCaptionBridge = true;
+    document.documentElement?.setAttribute?.("data-touch-youtube-bridge", "page");
     const observed = new Map();
     const loads = new Map();
-    const originalFetch = window.fetch.bind(window);
-    const originalOpen = XMLHttpRequest.prototype.open;
+    const originalFetch = root.fetch.bind(root);
+    const originalOpen = root.XMLHttpRequest.prototype.open;
     const xhrUrls = new WeakMap();
     let enabledByUs = null;
 
@@ -1347,8 +1349,8 @@
       observed.set(key, { url: url.href, body: body || prior?.body || "", at: Date.now() });
       while (observed.size > 6) observed.delete(observed.keys().next().value);
     }
-    for (const resource of performance.getEntriesByType("resource")) remember(resource.name);
-    window.fetch = function (...args) {
+    for (const resource of root.performance?.getEntriesByType?.("resource") || []) remember(resource.name);
+    root.fetch = function (...args) {
       const result = originalFetch(...args);
       const url = args[0]?.url || String(args[0]);
       if (captionUrl(url)) result.then((response) => {
@@ -1358,7 +1360,7 @@
       }).catch(() => {});
       return result;
     };
-    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    root.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
       xhrUrls.set(this, String(url));
       this.addEventListener("load", () => {
         const responseUrl = this.responseURL || xhrUrls.get(this);
@@ -1370,11 +1372,12 @@
       return originalOpen.call(this, method, url, ...rest);
     };
     function player() {
-      return document.querySelector("#movie_player") || document.querySelector(".html5-video-player");
+      const doc = root.document || document;
+      return doc.querySelector("#movie_player") || doc.querySelector(".html5-video-player");
     }
     function snapshot() {
       const current = player();
-      const response = current?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
+      const response = current?.getPlayerResponse?.() || root.ytInitialPlayerResponse;
       const videoId = response?.videoDetails?.videoId;
       const renderer = response?.captions?.playerCaptionsTracklistRenderer;
       const selected = current?.getOption?.("captions", "track");
@@ -1390,7 +1393,7 @@
         audioUrls: (current?.getAudioTrack?.()?.captionTracks || []).map((track) => track.url).filter((url) => captionUrl(url)),
         observedUrls: [...observed.values()].filter((entry) => Date.now() - entry.at < 300000).map((entry) => entry.url),
         clientParams: {
-          ...Object.fromEntries([...new URLSearchParams(window.ytcfg?.get?.("DEVICE") || "")].filter(([key]) =>
+          ...Object.fromEntries([...new URLSearchParams(root.ytcfg?.get?.("DEVICE") || "")].filter(([key]) =>
             ["cbrand", "cbr", "cbrver", "cos", "cosver", "cplatform"].includes(key))),
           cver: current?.getWebPlayerContextConfig?.()?.innertubeContextClientVersion || "",
         },
@@ -1403,7 +1406,7 @@
     }
     function toggleCaptions(turnOn, videoId) {
       const current = player();
-      const response = current?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
+      const response = current?.getPlayerResponse?.() || root.ytInitialPlayerResponse;
       if (!current || response?.videoDetails?.videoId !== videoId) return;
       if (captionsActive(current) === turnOn) return;
       const button = current.querySelector?.(".ytp-subtitles-button, .ytm-closed-caption-button");
@@ -1413,7 +1416,8 @@
     }
     window.addEventListener("message", async (event) => {
       const message = event.data;
-      if (event.source !== window || event.origin !== location.origin || message?.channel !== channel ||
+      const sameSource = Boolean(event.source) && (event.source === window || event.source === root || event.source === event.target);
+      if (!sameSource || event.origin !== location.origin || message?.channel !== channel ||
         message.reply || typeof message.id !== "string" || message.id.length > 100) return;
       const reply = (data, error) => window.postMessage({ channel, id: message.id, reply: true, data, error }, location.origin);
       try {
@@ -1453,22 +1457,37 @@
   }
 
   function installCaptionBridge() {
+    if (document.documentElement?.getAttribute?.("data-touch-youtube-bridge") === "page") return;
+    const target = document.head || document.documentElement;
+    const nonce = document.querySelector?.("script[nonce]")?.nonce;
     const textContent = `(${youtubeCaptionBridge.toString()})(${JSON.stringify(BRIDGE_CHANNEL)}, ${CAPTION_MAX_BYTES});`;
-    try {
-      if (typeof GM_addElement === "function") {
-        GM_addElement("script", { textContent })?.remove();
-      } else {
-        const script = document.createElement("script");
-        script.textContent = textContent;
-        const nonce = document.querySelector("script[nonce]")?.nonce;
-        if (nonce) script.nonce = nonce;
-        (document.head || document.documentElement).append(script);
-        script.remove();
+    const attributes = nonce ? { textContent, nonce } : { textContent };
+    if (target && typeof GM_addElement === "function") {
+      try {
+        const element = document.head
+          ? GM_addElement("script", attributes)
+          : GM_addElement(target, "script", attributes);
+        element?.remove?.();
+      } catch {
+        try { GM_addElement("script", { textContent })?.remove?.(); } catch {}
       }
-    } catch { /* A blocked bridge is reported when the user enables subtitles. */ }
+    }
+    if (target && document.documentElement?.getAttribute?.("data-touch-youtube-bridge") !== "page") {
+      try {
+        const script = document.createElement("script");
+        if (nonce) script.nonce = nonce;
+        script.textContent = textContent;
+        target.append(script);
+        script.remove();
+      } catch {}
+    }
+    if (document.documentElement?.getAttribute?.("data-touch-youtube-bridge") !== "page" && typeof unsafeWindow !== "undefined") {
+      try { youtubeCaptionBridge(BRIDGE_CHANNEL, CAPTION_MAX_BYTES, unsafeWindow); } catch {}
+    }
   }
 
   function captionBridgeRequest(action, data = {}, signal) {
+    installCaptionBridge();
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return new Promise((resolve, reject) => {
       let timer;
@@ -1484,7 +1503,12 @@
       };
       const receive = (event) => {
         const message = event.data;
-        if (event.source !== window || event.origin !== location.origin || message?.channel !== BRIDGE_CHANNEL ||
+        const sameSource = Boolean(event.source) && (
+          event.source === window ||
+          event.source === event.target ||
+          (typeof unsafeWindow !== "undefined" && event.source === unsafeWindow)
+        );
+        if (!sameSource || event.origin !== location.origin || message?.channel !== BRIDGE_CHANNEL ||
           message.id !== id || message.reply !== true) return;
         finish(message.error ? new Error(String(message.error).slice(0, 300)) : null, message.data);
       };
@@ -2517,6 +2541,7 @@
 
   installCaptionBridge();
   function initializeYoutubeSubtitles() {
+    installCaptionBridge();
     addStyles();
     registerCommonMenus();
     GM_registerMenuCommand(`${SCRIPT_NAME}: Toggle captions`, toggleYoutubeSubtitles);

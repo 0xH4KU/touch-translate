@@ -16,5 +16,6 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addElement
 // @grant        GM_info
+// @grant        unsafeWindow
 // @connect      *
 // ==/UserScript==
