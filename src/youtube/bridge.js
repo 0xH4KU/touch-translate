@@ -77,14 +77,20 @@
         },
       };
     }
+    function captionsActive(current = player()) {
+      const button = current?.querySelector?.(".ytp-subtitles-button, .ytm-closed-caption-button");
+      if (button?.hasAttribute("aria-pressed")) return button.getAttribute("aria-pressed") === "true";
+      return Boolean(current?.getOption?.("captions", "track")?.languageCode);
+    }
     function toggleCaptions(turnOn, videoId) {
       const current = player();
-      const button = current?.querySelector(".ytp-subtitles-button");
-      if (!button || current?.getPlayerResponse?.()?.videoDetails?.videoId !== videoId) return;
-      const on = button.getAttribute("aria-pressed") === "true";
-      if (on === turnOn) return;
+      const response = current?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
+      if (!current || response?.videoDetails?.videoId !== videoId) return;
+      if (captionsActive(current) === turnOn) return;
+      const button = current.querySelector?.(".ytp-subtitles-button, .ytm-closed-caption-button");
       if (typeof current.toggleSubtitles === "function") current.toggleSubtitles();
-      else button.click();
+      else if (button) button.click();
+      else if (turnOn) current.loadModule?.("captions");
     }
     window.addEventListener("message", async (event) => {
       const message = event.data;
@@ -94,7 +100,7 @@
       try {
         if (message.action === "snapshot") reply(snapshot());
         else if (message.action === "enable") {
-          const wasOff = player()?.querySelector(".ytp-subtitles-button")?.getAttribute("aria-pressed") === "false";
+          const wasOff = !captionsActive();
           toggleCaptions(true, message.videoId);
           if (wasOff) enabledByUs = { videoId: message.videoId, languageCode: message.languageCode, kind: message.kind || "" };
           reply(null);

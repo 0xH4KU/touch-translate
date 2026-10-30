@@ -40,6 +40,12 @@
   const SUBTITLE_MAX_CHARS = 180;
   const SUBTITLE_MAX_MS = 8000;
   const SUBTITLE_PAUSE_MS = 1000;
+  const SUBTITLE_HARD_MAX_CHARS = 240;
+  const SUBTITLE_HARD_MAX_MS = 10000;
+  const SUBTITLE_HARD_PAUSE_MS = 1400;
+  const SUBTITLE_CLAUSE_MS = 3000;
+  const SUBTITLE_CLAUSE_CHARS = 60;
+  const SUBTITLE_CLAUSE_PAUSE_MS = 400;
   const SUBTITLE_BATCH_MS = 30000;
   const SUBTITLE_BATCH_CHARS = 6000;
   const SUBTITLE_LOOKAHEAD_MS = 60000;
@@ -1389,14 +1395,20 @@
         },
       };
     }
+    function captionsActive(current = player()) {
+      const button = current?.querySelector?.(".ytp-subtitles-button, .ytm-closed-caption-button");
+      if (button?.hasAttribute("aria-pressed")) return button.getAttribute("aria-pressed") === "true";
+      return Boolean(current?.getOption?.("captions", "track")?.languageCode);
+    }
     function toggleCaptions(turnOn, videoId) {
       const current = player();
-      const button = current?.querySelector(".ytp-subtitles-button");
-      if (!button || current?.getPlayerResponse?.()?.videoDetails?.videoId !== videoId) return;
-      const on = button.getAttribute("aria-pressed") === "true";
-      if (on === turnOn) return;
+      const response = current?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
+      if (!current || response?.videoDetails?.videoId !== videoId) return;
+      if (captionsActive(current) === turnOn) return;
+      const button = current.querySelector?.(".ytp-subtitles-button, .ytm-closed-caption-button");
       if (typeof current.toggleSubtitles === "function") current.toggleSubtitles();
-      else button.click();
+      else if (button) button.click();
+      else if (turnOn) current.loadModule?.("captions");
     }
     window.addEventListener("message", async (event) => {
       const message = event.data;
@@ -1406,7 +1418,7 @@
       try {
         if (message.action === "snapshot") reply(snapshot());
         else if (message.action === "enable") {
-          const wasOff = player()?.querySelector(".ytp-subtitles-button")?.getAttribute("aria-pressed") === "false";
+          const wasOff = !captionsActive();
           toggleCaptions(true, message.videoId);
           if (wasOff) enabledByUs = { videoId: message.videoId, languageCode: message.languageCode, kind: message.kind || "" };
           reply(null);
@@ -1506,26 +1518,30 @@
     if (!Array.isArray(data?.events) || data.events.length > 100000) throw new Error("Invalid YouTube caption events.");
     const fragments = [];
     const seen = new Map();
-    for (const event of data.events) {
+    for (let eventIndex = 0; eventIndex < data.events.length; eventIndex++) {
+      const event = data.events[eventIndex];
       if (!Array.isArray(event?.segs) || !event.segs.some((seg) => typeof seg?.utf8 === "string" && seg.utf8.trim())) continue;
-      if (!Number.isFinite(event.tStartMs) || event.tStartMs < 0 ||
-        !Number.isFinite(event.dDurationMs) || event.dDurationMs <= 0) throw new Error("Invalid YouTube caption timing.");
+      if (!Number.isFinite(event.tStartMs) || event.tStartMs < 0) continue;
+      const nextEvent = data.events[eventIndex + 1];
+      const durationMs = event.dDurationMs === undefined
+        ? (Number.isFinite(nextEvent?.tStartMs) && nextEvent.tStartMs > event.tStartMs ? Math.min(5000, nextEvent.tStartMs - event.tStartMs) : 0)
+        : event.dDurationMs;
+      if (!Number.isFinite(durationMs) || durationMs <= 0) continue;
       const pieces = [];
       for (const seg of event.segs) {
-        if (typeof seg?.utf8 !== "string") throw new Error("Invalid YouTube caption text.");
-        if (!seg.utf8.trim()) continue;
+        if (typeof seg?.utf8 !== "string" || !seg.utf8.trim()) continue;
         const offset = automatic ? seg.tOffsetMs ?? 0 : 0;
-        if (!Number.isFinite(offset) || offset < 0 || offset >= event.dDurationMs) throw new Error("Invalid YouTube word timing.");
+        if (!Number.isFinite(offset) || offset < 0 || offset >= durationMs) continue;
         const last = pieces.at(-1);
-        if (last?.offset === offset) last.text += seg.utf8;
+        if (last && offset <= last.offset) last.text += seg.utf8;
         else pieces.push({ offset, text: seg.utf8 });
       }
       pieces.forEach((piece, index) => {
         const content = normalizeText(piece.text);
         if (!content) return;
         const start = event.tStartMs + piece.offset;
-        const end = event.tStartMs + (pieces[index + 1]?.offset ?? event.dDurationMs);
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) throw new Error("Invalid YouTube word order.");
+        const end = event.tStartMs + (pieces[index + 1]?.offset ?? durationMs);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
         const key = `${start}\u0000${content}`;
         if (seen.has(key)) {
           seen.get(key).end = Math.max(seen.get(key).end, end);
@@ -1562,10 +1578,13 @@
       const last = groups.at(-1);
       const fragment = fragments[index];
       const previous = fragments[index - 1];
-      if (automatic && last && fragment.end - fragments[last.from].start <= SUBTITLE_MAX_MS &&
-        fragment.start - previous.end <= SUBTITLE_PAUSE_MS &&
-        !/[.!?。！？…]["'’”)]?$/u.test(previous.text) &&
-        joinCaptionText(fragments.slice(last.from, index + 1)).length <= SUBTITLE_MAX_CHARS) {
+      const duration = last ? fragment.end - fragments[last.from].start : 0;
+      const pause = previous ? fragment.start - previous.end : 0;
+      const chars = last ? joinCaptionText(fragments.slice(last.from, index + 1)).length : 0;
+      const clauseBreak = (pause >= SUBTITLE_CLAUSE_PAUSE_MS && (duration >= SUBTITLE_CLAUSE_MS || chars >= SUBTITLE_CLAUSE_CHARS)) ||
+        (/[,;，；、：:]["'’”)]?$/u.test(previous?.text || "") && (duration >= 2500 || chars >= 45));
+      if (automatic && last && duration <= SUBTITLE_MAX_MS && pause <= SUBTITLE_PAUSE_MS &&
+        !clauseBreak && !/[.!?。！？…]["'’”)]?$/u.test(previous.text) && chars <= SUBTITLE_MAX_CHARS) {
         last.to = index;
       } else groups.push({ from: index, to: index });
     }
@@ -1598,12 +1617,57 @@
       chunk.end = entries.at(-1).end;
     }
     chunks.forEach((entry, index) => {
+      const rawEnd = entry.rawFrom + entry.fragments.length;
       entry.context = joinCaptionText(fragments.slice(Math.max(0, entry.rawFrom - 30), entry.rawFrom)
         .filter((fragment) => fragment.end > entry.start - 5000));
+      entry.followingContext = joinCaptionText(fragments.slice(rawEnd, rawEnd + 20)
+        .filter((fragment) => fragment.start < entry.end + 5000));
       entry.groups = subtitleGroupsFromRanges(ruleSubtitleGroups(entry.fragments, automatic), entry.fragments);
       entry.index = index;
     });
     return chunks;
+  }
+
+  function mergeBilingualCaptions(sourceFragments, targetFragments, automatic = false) {
+    const bestTarget = (fragment) => {
+      const mid = (fragment.start + fragment.end) / 2;
+      let best = -1, bestScore = 0;
+      for (let i = 0; i < targetFragments.length; i++) {
+        const target = targetFragments[i];
+        const overlap = Math.min(fragment.end, target.end) - Math.max(fragment.start, target.start);
+        if (overlap > bestScore) { bestScore = overlap; best = i; }
+        else if (bestScore === 0 && mid >= target.start - 300 && mid <= target.end + 300) best = i;
+      }
+      return best;
+    };
+    return makeSubtitleChunks(sourceFragments, automatic).map((chunk) => {
+      const { fragments } = chunk;
+      const targets = fragments.map(bestTarget);
+      const ranges = [];
+      for (let i = 0; i < fragments.length; i++) {
+        const last = ranges.at(-1);
+        const fragment = fragments[i], prev = fragments[i - 1];
+        const sameTarget = last && targets[i] >= 0 && targets[i] === targets[last.from];
+        if (automatic && last && fragment.end - fragments[last.from].start <= SUBTITLE_HARD_MAX_MS &&
+          fragment.start - prev.end <= SUBTITLE_PAUSE_MS &&
+          joinCaptionText(fragments.slice(last.from, i + 1)).length <= SUBTITLE_HARD_MAX_CHARS &&
+          (sameTarget || (targets[i] < 0 && targets[last.from] < 0 && !/[.!?。！？…]["'’”)]?$/u.test(prev.text)))) {
+          last.to = i;
+        } else ranges.push({ from: i, to: i });
+      }
+      chunk.groups = subtitleGroupsFromRanges(ranges.map((range) => {
+        const start = fragments[range.from].start, end = fragments[range.to].end;
+        const matched = targetFragments.filter((target, idx) => {
+          const overlap = Math.min(end, target.end) - Math.max(start, target.start);
+          const mid = (target.start + target.end) / 2;
+          return overlap > 0 && (idx === targets[range.from] || idx === targets[range.to] ||
+            (mid >= start && mid <= end) || overlap >= Math.min(end - start, target.end - target.start) * 0.4);
+        });
+        return { ...range, translation: matched.map((t) => t.text).join(" ") };
+      }), fragments);
+      chunk.done = true;
+      return chunk;
+    });
   }
 
   function parseSubtitleGroups(content, chunk, smart) {
@@ -1618,6 +1682,9 @@
     const groups = value?.groups;
     const { fragments } = chunk;
     const fixed = ruleSubtitleGroups(fragments, chunk.automatic);
+    const maxMs = smart && chunk.automatic ? SUBTITLE_HARD_MAX_MS : SUBTITLE_MAX_MS;
+    const maxChars = smart && chunk.automatic ? SUBTITLE_HARD_MAX_CHARS : SUBTITLE_MAX_CHARS;
+    const maxPause = smart && chunk.automatic ? SUBTITLE_HARD_PAUSE_MS : SUBTITLE_PAUSE_MS;
     if (!Array.isArray(groups) || !groups.length || groups.length > fragments.length) fail("Invalid subtitle group count.");
     let next = 0;
     groups.forEach((group, index) => {
@@ -1626,10 +1693,10 @@
       if (typeof group.translation !== "string" || !group.translation.trim() || group.translation.length > 12000) fail("A subtitle translation is empty or too long.");
       if ((!smart || !chunk.automatic) && (fixed[index]?.from !== group.from || fixed[index]?.to !== group.to)) fail("The translation changed a fixed subtitle boundary.");
       if (group.to > group.from) {
-        if (fragments[group.to].end - fragments[group.from].start > SUBTITLE_MAX_MS ||
-          joinCaptionText(fragments.slice(group.from, group.to + 1)).length > SUBTITLE_MAX_CHARS) fail("A subtitle group exceeds the reading limit.");
+        if (fragments[group.to].end - fragments[group.from].start > maxMs ||
+          joinCaptionText(fragments.slice(group.from, group.to + 1)).length > maxChars) fail("A subtitle group exceeds the reading limit.");
         for (let i = group.from + 1; i <= group.to; i++) {
-          if (fragments[i].start - fragments[i - 1].end > SUBTITLE_PAUSE_MS) fail("A subtitle crosses a long silence.");
+          if (fragments[i].start - fragments[i - 1].end > maxPause) fail("A subtitle crosses a long silence.");
         }
       }
       next = group.to + 1;
@@ -1643,6 +1710,7 @@
       fragments: chunk.fragments.map((fragment, index) => [fragment.text, fragment.end - fragment.start,
         index ? fragment.start - chunk.fragments[index - 1].end : 0]),
       context: chunk.context,
+      ...(chunk.followingContext ? { followingContext: chunk.followingContext } : {}),
     }), settings, `youtube-v1-${chunk.automatic}-${smart}`);
   }
 
@@ -1651,14 +1719,18 @@
     const systemPrompt = [
       translationRulesFor(settings.targetLanguage),
       "Translate these video captions. Input IDs are local fragment indexes, not timestamps.",
+      ...(chunk.automatic ? [
+        "The source comes from auto-generated speech recognition (ASR) and may lack punctuation or contain minor homophone or transcription errors; infer the intended spoken meaning from context.",
+      ] : []),
       smart && chunk.automatic
         ? `Group consecutive fragments into natural sentences or clauses before translating. Each group must span at most ${SUBTITLE_MAX_MS} milliseconds and ${SUBTITLE_MAX_CHARS} source characters; an individually longer fragment must remain alone. Never group across a gap over ${SUBTITLE_PAUSE_MS} milliseconds.`
         : "Keep exactly the supplied fixedGroups boundaries; translate each complete group using the neighboring groups as context.",
       "Use every input ID exactly once, in order, without omissions or overlaps. Return only groups with inclusive integer from/to IDs and a nonempty translation. Do not return timestamps or rewrite the original captions.",
-      "context is read-only context; never translate it as an additional group.",
+      "context and followingContext are read-only surrounding context; never translate them as additional groups.",
     ].join(" ");
     const userContent = JSON.stringify({
       context: chunk.context,
+      ...(chunk.followingContext ? { followingContext: chunk.followingContext } : {}),
       fragments: chunk.fragments.map((fragment, id) => ({ id, text: fragment.text,
         durationMs: fragment.end - fragment.start, gapBeforeMs: id ? fragment.start - chunk.fragments[id - 1].end : 0 })),
       ...(!smart || !chunk.automatic ? { fixedGroups: fixed } : {}),
@@ -1689,12 +1761,52 @@
     } catch { return null; }
   }
 
-  function selectYoutubeTrack(snapshot) {
+  function normalizeLanguageTag(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    if (/^(?:zh[-_](?:tw|hk|mo|hant)|traditional\s+chinese|繁體|正體)/i.test(raw)) return "zh-hant";
+    if (/^(?:zh[-_](?:cn|sg|hans)|simplified\s+chinese|简体|簡體)/i.test(raw)) return "zh-hans";
+    if (/^(?:zh|chinese|中文|漢語|汉语)$/i.test(raw)) return "zh";
+    const aliases = {
+      english: "en", 英文: "en", 英語: "en",
+      japanese: "ja", 日文: "ja", 日語: "ja", 日本語: "ja",
+      korean: "ko", 韓文: "ko", 韓語: "ko", 한국어: "ko",
+      spanish: "es", 西班牙文: "es", español: "es",
+      french: "fr", 法文: "fr", français: "fr",
+      german: "de", 德文: "de", deutsch: "de",
+    };
+    const lower = raw.toLowerCase();
+    return aliases[lower] || lower.split(/[-_]/)[0];
+  }
+
+  function sameLanguage(a, b) {
+    const tagA = normalizeLanguageTag(a);
+    const tagB = normalizeLanguageTag(b);
+    if (!tagA || !tagB) return false;
+    if (tagA === tagB) return true;
+    return (tagA === "zh" && tagB.startsWith("zh")) || (tagB === "zh" && tagA.startsWith("zh"));
+  }
+
+  function selectYoutubeTrack(snapshot, targetLanguage = "") {
     const tracks = Array.isArray(snapshot?.tracks) ? snapshot.tracks : [];
     const selected = snapshot?.selected;
-    return tracks.find((track) => selected?.vssId && track.vssId === selected.vssId) ||
-      tracks.find((track) => selected?.languageCode && track.languageCode === selected.languageCode && track.kind === selected.kind) ||
-      tracks[snapshot?.defaultIndex] || tracks.find((track) => track.kind !== "asr") || tracks[0] || null;
+    const chosen = tracks.find((track) => selected?.vssId && track.vssId === selected.vssId) ||
+      tracks.find((track) => selected?.languageCode && track.languageCode === selected.languageCode && track.kind === selected.kind);
+    if (chosen && (!targetLanguage || !sameLanguage(chosen.languageCode, targetLanguage))) return chosen;
+    const pool = targetLanguage ? tracks.filter((track) => !sameLanguage(track.languageCode, targetLanguage)) : [];
+    const candidates = pool.length ? pool : tracks;
+    const defaultTrack = tracks[snapshot?.defaultIndex];
+    return (defaultTrack && candidates.includes(defaultTrack) ? defaultTrack : null) ||
+      candidates.find((track) => track.kind !== "asr") || candidates[0] || chosen || null;
+  }
+
+  function selectTargetYoutubeTrack(snapshot, sourceTrack, targetLanguage = "") {
+    if (!sourceTrack || !targetLanguage || sameLanguage(sourceTrack.languageCode, targetLanguage)) return null;
+    const tracks = Array.isArray(snapshot?.tracks) ? snapshot.tracks : [];
+    const exact = tracks.find((track) => track !== sourceTrack && track.kind !== "asr" &&
+      String(track.languageCode || "").toLowerCase() === String(targetLanguage).trim().toLowerCase());
+    return exact || tracks.find((track) => track !== sourceTrack && track.kind !== "asr" &&
+      sameLanguage(track.languageCode, targetLanguage)) || null;
   }
 
   function youtubeTrackKey(track) {
@@ -1714,7 +1826,7 @@
       let candidate;
       try { candidate = new URL(value); } catch { continue; }
       if (candidate.protocol !== "https:" || !/^(www|m)\.youtube\.com$/.test(candidate.hostname) || candidate.pathname !== "/api/timedtext") continue;
-      if (candidate.searchParams.get("v") !== snapshot.videoId || candidate.searchParams.has("tlang")) continue;
+      if (candidate.searchParams.get("v") !== snapshot.videoId) continue;
       if (candidate.searchParams.get("lang") !== track.languageCode ||
         (candidate.searchParams.get("kind") || "") !== (track.kind || "") ||
         (candidate.searchParams.get("name") || "") !== (url.searchParams.get("name") || "")) continue;
@@ -1813,10 +1925,12 @@
     subtitleView.status.textContent = text;
     subtitleView.status.dataset.error = String(error);
     subtitleView.retry.hidden = !error;
+    subtitleView.host.dataset.idle = String(!subtitleView.menu?.open && !text);
   }
 
   function renderSubtitles(session = subtitleSession) {
     if (!subtitleView || !session || session !== subtitleSession) return;
+    clearTimeout(session.renderTimer);
     const ad = session.player.classList.contains("ad-showing") || session.player.classList.contains("ad-interrupting");
     const group = ad ? null : subtitleAtTime(session.chunks, session.video.currentTime * 1000);
     if (subtitleView.source.textContent !== (group?.text || "")) subtitleView.source.textContent = group?.text || "";
@@ -1824,6 +1938,9 @@
     subtitleView.source.hidden = session.preferences.translationOnly && !!group?.translation;
     subtitleView.captions.hidden = !group || !!session.native;
     if (session.native) session.native.track.mode = ad ? "hidden" : "showing";
+    if (!ad && session.video.paused === false && !session.video.ended) {
+      session.renderTimer = setTimeout(() => renderSubtitles(session), 80);
+    }
   }
 
   function toggleSubtitleExpanded(force) {
@@ -1833,6 +1950,10 @@
     view.player.classList.toggle(`${SCRIPT_PREFIX}__expanded`, expanded);
     view.expand.setAttribute("aria-pressed", String(expanded));
     view.expand.textContent = expanded ? "Exit expand" : "Expand";
+    if (view.menu) {
+      view.menu.open = false;
+      view.host.dataset.idle = String(!view.status.textContent);
+    }
     window.dispatchEvent(new Event("resize"));
   }
 
@@ -1840,6 +1961,7 @@
     const host = document.createElement("div");
     host.className = `${SCRIPT_PREFIX}__host`;
     host.dataset.touchTranslateUi = "";
+    host.dataset.idle = "true";
     const toolbar = document.createElement("div");
     toolbar.className = `${SCRIPT_PREFIX}__toolbar`;
     const button = (text, action) => {
@@ -1863,12 +1985,20 @@
       const input = document.createElement("input");
       input.type = type;
       if (type === "checkbox") input.checked = preferences[key];
-      else { input.min = min; input.max = max; input.value = preferences[key]; }
+      else {
+        input.min = min;
+        input.max = max;
+        input.value = preferences[key];
+        input.addEventListener("input", () => {
+          preferences[key] = Number(input.value);
+          applySubtitlePreferences(false);
+        });
+      }
       input.addEventListener("change", () => {
         preferences[key] = type === "checkbox" ? input.checked : Number(input.value);
         GM_setValue(PREFERENCES_KEY, preferences);
-        applySubtitlePreferences();
-        if (key === "smart" && subtitleSession) restartYoutubeSubtitles();
+        applySubtitlePreferences(true);
+        if (key === "smart" && subtitleSession) resegmentYoutubeSubtitles();
       });
       label.append(text, input);
       controls.append(label);
@@ -1878,10 +2008,17 @@
     preference("Text size", "fontSize", "range", 14, 36);
     preference("Bottom position", "bottom", "range", 8, 35);
     menu.append(summary, controls);
+    menu.addEventListener("toggle", () => {
+      host.dataset.idle = String(!menu.open && !status.textContent);
+    });
     toolbar.append(menu);
     const expand = button("Expand", () => toggleSubtitleExpanded());
     expand.setAttribute("aria-pressed", "false");
-    controls.append(expand, button("API", () => { stopYoutubeSubtitles(); configureSettings().catch(reportError); }));
+    controls.append(expand, button("API", () => {
+      menu.open = false;
+      host.dataset.idle = String(!status.textContent);
+      configureSettings().catch(reportError);
+    }));
     const retry = button("Retry", retryYoutubeSubtitles);
     retry.hidden = true;
     const status = document.createElement("span");
@@ -1900,21 +2037,39 @@
     for (const type of ["click", "dblclick", "pointerdown", "keydown", "touchstart", "touchend"]) {
       toolbar.addEventListener(type, (event) => event.stopPropagation());
     }
+    let autohideTimer;
+    const noteActivity = (event) => {
+      if (menu.open && event?.target && !menu.contains(event.target)) {
+        menu.open = false;
+        host.dataset.idle = String(!status.textContent);
+      }
+      host.dataset.autohide = "false";
+      clearTimeout(autohideTimer);
+      if (video.paused === false && !video.ended) {
+        autohideTimer = setTimeout(() => { host.dataset.autohide = "true"; }, 3000);
+      }
+    };
+    for (const type of ["pointerdown", "pointermove", "touchstart", "keydown"]) {
+      player.addEventListener(type, noteActivity, { passive: true });
+    }
+    for (const type of ["play", "pause", "ended"]) {
+      video.addEventListener(type, noteActivity);
+    }
     player.append(host);
     const position = player.style.position;
     if (getComputedStyle(player).position === "static") player.style.position = "relative";
-    subtitleView = { host, player, video, toggle, expand, retry, status, captions, source, translation, preferences, position };
+    subtitleView = { host, player, video, toggle, menu, expand, retry, status, captions, source, translation, preferences, position, autohideTimer: () => clearTimeout(autohideTimer) };
     applySubtitlePreferences();
   }
 
-  function applySubtitlePreferences() {
+  function applySubtitlePreferences(updateNative = true) {
     if (!subtitleView) return;
     const preferences = subtitleView.preferences;
     subtitleView.host.style.setProperty("--subtitle-size", `${preferences.fontSize}px`);
     subtitleView.host.style.setProperty("--subtitle-bottom", `${preferences.bottom}%`);
     if (subtitleSession) {
       subtitleSession.preferences = { ...preferences };
-      updateNativeSubtitles(subtitleSession);
+      if (updateNative) updateNativeSubtitles(subtitleSession);
       renderSubtitles();
     }
   }
@@ -1937,12 +2092,13 @@
     let lastUrl = "";
     let requestedCaptions = false;
     let lastFailure = "";
+    const targetLanguage = session.settings?.targetLanguage || "";
     for (let attempt = 0; attempt < 40; attempt++) {
       if (signal.aborted || youtubeVideoId() !== session.videoId) throw cancelledError();
       const snapshot = await captionBridgeRequest("snapshot", {}, signal);
       if (snapshot?.videoId === session.videoId) {
         if (snapshot.live) throw new Error("Live captions are not supported yet. Use a regular YouTube video.");
-        const track = selectYoutubeTrack(snapshot);
+        const track = selectYoutubeTrack(snapshot, targetLanguage);
         if (!track) throw new Error("This video has no available captions. Speech transcription is not included.");
         if (typeof track.languageCode !== "string" || track.languageCode.length > 64 || !["", "asr"].includes(track.kind || "")) throw new Error("Invalid YouTube caption track.");
         const url = youtubeCaptionUrl(track, snapshot);
@@ -1956,8 +2112,23 @@
             lastFailure = error.message;
           }
           if (typeof text === "string" && text.trim()) {
+            const fragments = parseYoutubeCaptions(text, track.kind === "asr");
             session.trackKey = youtubeTrackKey(track);
-            return makeSubtitleChunks(parseYoutubeCaptions(text, track.kind === "asr"), track.kind === "asr");
+            session.rawFragments = fragments;
+            session.automatic = track.kind === "asr";
+            const targetTrack = selectTargetYoutubeTrack(snapshot, track, targetLanguage);
+            if (targetTrack && typeof targetTrack.languageCode === "string" && targetTrack.languageCode.length <= 64) {
+              try {
+                const targetText = await captionBridgeRequest("load", { url: youtubeCaptionUrl(targetTrack, snapshot) }, signal);
+                if (typeof targetText === "string" && targetText.trim()) {
+                  session.nativeBilingual = true;
+                  return mergeBilingualCaptions(fragments, parseYoutubeCaptions(targetText, false), session.automatic);
+                }
+              } catch (error) {
+                if (error?.name === "AbortError") throw error;
+              }
+            }
+            return makeSubtitleChunks(fragments, session.automatic);
           }
         }
         if (!requestedCaptions) {
@@ -1990,7 +2161,10 @@
     if (session !== subtitleSession || session.running || session.error || session.controller.signal.aborted ||
       session.player.classList.contains("ad-showing") || session.player.classList.contains("ad-interrupting")) return;
     const chunk = subtitleQueueChunk(session);
-    if (!chunk) return;
+    if (!chunk) {
+      if ( subtitleView && !subtitleView.status.dataset.error?.includes("true")) setSubtitleStatus("");
+      return;
+    }
     session.running = true;
     const generation = session.generation;
     const current = () => session === subtitleSession && generation === session.generation && !session.controller.signal.aborted;
@@ -2002,6 +2176,7 @@
         try { groups = parseSubtitleGroups(cached, chunk, session.preferences.smart); } catch { /* Ignore corrupt or outdated local cache entries. */ }
       }
       if (!groups) {
+        if (session.video.currentTime * 1000 >= chunk.start - 3000) setSubtitleStatus("Translating nearby captions…");
         session.request = requestSubtitleTranslation(chunk, session.settings, session.preferences.smart);
         try { groups = await session.request.promise; }
         catch (error) {
@@ -2038,6 +2213,7 @@
     const session = subtitleSession;
     subtitleSession = null;
     if (session) {
+      clearTimeout(session.renderTimer);
       session.controller.abort();
       cancelSubtitleRequest(session);
       for (const [type, handler] of session.listeners) session.video.removeEventListener(type, handler);
@@ -2062,7 +2238,15 @@
     view.toggle.textContent = "Cancel";
     view.toggle.setAttribute("aria-pressed", "true");
     try {
-      const settings = await readySettings();
+      let settings = loadSettings();
+      let hasNativeTarget = false;
+      try { requireReadySettings(settings); }
+      catch {
+        const snapshot = await captionBridgeRequest("snapshot").catch(() => null);
+        const source = selectYoutubeTrack(snapshot, settings.targetLanguage);
+        hasNativeTarget = Boolean(selectTargetYoutubeTrack(snapshot, source, settings.targetLanguage));
+        if (!hasNativeTarget) settings = await readySettings();
+      }
       if (intent !== subtitleIntent || view !== subtitleView) return;
       if (!settings) { stopYoutubeSubtitles(); return; }
       const session = {
@@ -2074,12 +2258,28 @@
       setSubtitleStatus("Loading YouTube captions…");
       session.chunks = await loadYoutubeCaptions(session);
       if (session !== subtitleSession || session.controller.signal.aborted) return;
+      if (!session.nativeBilingual && hasNativeTarget) {
+        const ready = await readySettings();
+        if (session !== subtitleSession || session.controller.signal.aborted) return;
+        if (!ready) { stopYoutubeSubtitles(); return; }
+        session.settings = ready;
+      }
       const listen = (type, handler) => {
         session.listeners.push([type, handler]);
         session.video.addEventListener(type, handler);
       };
-      listen("seeking", () => { cancelSubtitleRequest(session); renderSubtitles(session); void pumpSubtitleQueue(session); });
+      listen("seeking", () => {
+        cancelSubtitleRequest(session);
+        if (session.error && subtitleQueueChunk(session)) {
+          session.error = null;
+          setSubtitleStatus("");
+        }
+        renderSubtitles(session);
+        void pumpSubtitleQueue(session);
+      });
       listen("timeupdate", () => { renderSubtitles(session); void pumpSubtitleQueue(session); });
+      listen("play", () => { renderSubtitles(session); });
+      listen("pause", () => { clearTimeout(session.renderTimer); renderSubtitles(session); });
       listen("ratechange", () => { void pumpSubtitleQueue(session); });
       listen("webkitbeginfullscreen", () => { enterNativeSubtitles(session); renderSubtitles(session); });
       listen("webkitendfullscreen", () => { leaveNativeSubtitles(session); renderSubtitles(session); });
@@ -2087,8 +2287,13 @@
       view.toggle.textContent = "Stop CC";
       if (session.video.webkitDisplayingFullscreen) enterNativeSubtitles(session);
       renderSubtitles(session);
-      setSubtitleStatus("Translating nearby captions…");
-      void pumpSubtitleQueue(session);
+      if (session.nativeBilingual) {
+        updateNativeSubtitles(session);
+        setSubtitleStatus("");
+      } else {
+        setSubtitleStatus("Translating nearby captions…");
+        void pumpSubtitleQueue(session);
+      }
     } catch (error) {
       if (intent !== subtitleIntent) return;
       stopYoutubeSubtitles();
@@ -2106,6 +2311,22 @@
     void startYoutubeSubtitles();
   }
 
+  function resegmentYoutubeSubtitles() {
+    const session = subtitleSession;
+    if (!session) return;
+    if (session.nativeBilingual || !session.rawFragments) {
+      if (!session.nativeBilingual) restartYoutubeSubtitles();
+      return;
+    }
+    cancelSubtitleRequest(session);
+    session.error = null;
+    session.chunks = makeSubtitleChunks(session.rawFragments, session.automatic);
+    updateNativeSubtitles(session);
+    renderSubtitles(session);
+    setSubtitleStatus("Translating nearby captions…");
+    void pumpSubtitleQueue(session);
+  }
+
   function retryYoutubeSubtitles() {
     if (!subtitleSession?.chunks.length) { void startYoutubeSubtitles(); return; }
     subtitleSession.error = null;
@@ -2120,7 +2341,7 @@
     try {
       const snapshot = await captionBridgeRequest("snapshot", {}, session.controller.signal);
       if (session !== subtitleSession || snapshot?.videoId !== session.videoId) return;
-      if (youtubeTrackKey(selectYoutubeTrack(snapshot)) !== session.trackKey) restartYoutubeSubtitles();
+      if (youtubeTrackKey(selectYoutubeTrack(snapshot, session.settings?.targetLanguage)) !== session.trackKey) restartYoutubeSubtitles();
     } catch { /* Playback can briefly replace the player during ads and navigation. */ }
     finally { session.checking = false; }
   }
@@ -2134,7 +2355,9 @@
     style.textContent = `${COMMON_STYLES}
       .${SCRIPT_PREFIX}__host { position:absolute !important; inset:0 !important; z-index:65 !important; pointer-events:none !important; font:14px/1.4 -apple-system,BlinkMacSystemFont,sans-serif !important; color:#fff !important; text-align:start !important; }
       .${SCRIPT_PREFIX}__host [hidden] { display:none !important; }
-      .${SCRIPT_PREFIX}__toolbar { position:absolute !important; top:8px !important; left:8px !important; right:8px !important; display:flex !important; align-items:start !important; flex-wrap:wrap !important; gap:4px !important; pointer-events:none !important; }
+      .${SCRIPT_PREFIX}__toolbar { position:absolute !important; top:8px !important; left:8px !important; right:8px !important; display:flex !important; align-items:start !important; flex-wrap:wrap !important; gap:4px !important; pointer-events:none !important; transition:opacity 180ms ease-out !important; }
+      .ytp-autohide .${SCRIPT_PREFIX}__host[data-idle=true] .${SCRIPT_PREFIX}__toolbar, .${SCRIPT_PREFIX}__host[data-autohide=true][data-idle=true] .${SCRIPT_PREFIX}__toolbar { opacity:0 !important; }
+      .ytp-autohide .${SCRIPT_PREFIX}__host[data-idle=true] .${SCRIPT_PREFIX}__toolbar *, .${SCRIPT_PREFIX}__host[data-autohide=true][data-idle=true] .${SCRIPT_PREFIX}__toolbar * { pointer-events:none !important; }
       .${SCRIPT_PREFIX}__toolbar button, .${SCRIPT_PREFIX}__toolbar summary { appearance:none !important; box-sizing:border-box !important; min-width:44px !important; min-height:44px !important; margin:0 !important; padding:10px !important; border:1px solid #ffffff40 !important; border-radius:6px !important; background:#161618df !important; color:#fff !important; font:inherit !important; line-height:22px !important; cursor:pointer !important; pointer-events:auto !important; touch-action:manipulation !important; list-style:none !important; }
       .${SCRIPT_PREFIX}__toolbar button:focus-visible, .${SCRIPT_PREFIX}__toolbar summary:focus-visible, .${SCRIPT_PREFIX}__preferences input:focus-visible { outline:2px solid #a8c7ff !important; outline-offset:2px !important; }
       .${SCRIPT_PREFIX}__toolbar button[aria-pressed=true] { background:#315b9bdd !important; }
@@ -2163,14 +2386,14 @@
   // Test interface
   if (globalThis.__TOUCH_YOUTUBE_TRANSLATE_TEST__) {
     Object.assign(globalThis.__TOUCH_YOUTUBE_TRANSLATE_TEST__, {
-      parseYoutubeCaptions, ruleSubtitleGroups, subtitleGroupsFromRanges, makeSubtitleChunks,
+      parseYoutubeCaptions, ruleSubtitleGroups, subtitleGroupsFromRanges, makeSubtitleChunks, mergeBilingualCaptions,
       parseSubtitleGroups, requestSubtitleTranslation, subtitleCacheKey, joinCaptionText,
-      youtubeVideoId, selectYoutubeTrack, youtubeCaptionUrl, youtubeTrackKey,
+      youtubeVideoId, selectYoutubeTrack, selectTargetYoutubeTrack, sameLanguage, youtubeCaptionUrl, youtubeTrackKey,
       captionBridgeRequest, youtubeCaptionBridge, installCaptionBridge,
       subtitleAtTime, subtitleTrackText, subtitleQueueChunk, cancelSubtitleRequest,
       pumpSubtitleQueue, loadYoutubeCaptions, loadSubtitlePreferences,
       enterNativeSubtitles, leaveNativeSubtitles, updateNativeSubtitles,
-      startYoutubeSubtitles, stopYoutubeSubtitles, retryYoutubeSubtitles, checkSubtitleTrack,
+      startYoutubeSubtitles, stopYoutubeSubtitles, retryYoutubeSubtitles, resegmentYoutubeSubtitles, checkSubtitleTrack,
       mountSubtitleView, renderSubtitles, refreshYoutubePlayer, toggleSubtitleExpanded,
       cleanSettings, parseImportedSettings, endpointFor, loadCache, saveCache,
       getSession: () => subtitleSession, getView: () => subtitleView,
@@ -2181,12 +2404,17 @@
 
   function refreshYoutubePlayer() {
     const videoId = youtubeVideoId();
-    const video = videoId ? document.querySelector("#movie_player video, video.html5-main-video, video") : null;
+    const video = videoId
+      ? document.querySelector("#movie_player video") ||
+        document.querySelector("video.html5-main-video") ||
+        document.querySelector("video")
+      : null;
     const player = video?.closest("#movie_player, .html5-video-player, ytm-player") || video?.parentElement;
     if (subtitleView && (!videoId || subtitleView.video !== video || !subtitleView.host.isConnected ||
       subtitleView.videoId !== videoId)) {
       stopYoutubeSubtitles();
       toggleSubtitleExpanded(false);
+      subtitleView.autohideTimer?.();
       if (subtitleView.player.style.position === "relative") subtitleView.player.style.position = subtitleView.position;
       subtitleView.host.remove();
       subtitleView = null;

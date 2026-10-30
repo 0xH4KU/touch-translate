@@ -14,12 +14,13 @@
     let lastUrl = "";
     let requestedCaptions = false;
     let lastFailure = "";
+    const targetLanguage = session.settings?.targetLanguage || "";
     for (let attempt = 0; attempt < 40; attempt++) {
       if (signal.aborted || youtubeVideoId() !== session.videoId) throw cancelledError();
       const snapshot = await captionBridgeRequest("snapshot", {}, signal);
       if (snapshot?.videoId === session.videoId) {
         if (snapshot.live) throw new Error("Live captions are not supported yet. Use a regular YouTube video.");
-        const track = selectYoutubeTrack(snapshot);
+        const track = selectYoutubeTrack(snapshot, targetLanguage);
         if (!track) throw new Error("This video has no available captions. Speech transcription is not included.");
         if (typeof track.languageCode !== "string" || track.languageCode.length > 64 || !["", "asr"].includes(track.kind || "")) throw new Error("Invalid YouTube caption track.");
         const url = youtubeCaptionUrl(track, snapshot);
@@ -33,8 +34,23 @@
             lastFailure = error.message;
           }
           if (typeof text === "string" && text.trim()) {
+            const fragments = parseYoutubeCaptions(text, track.kind === "asr");
             session.trackKey = youtubeTrackKey(track);
-            return makeSubtitleChunks(parseYoutubeCaptions(text, track.kind === "asr"), track.kind === "asr");
+            session.rawFragments = fragments;
+            session.automatic = track.kind === "asr";
+            const targetTrack = selectTargetYoutubeTrack(snapshot, track, targetLanguage);
+            if (targetTrack && typeof targetTrack.languageCode === "string" && targetTrack.languageCode.length <= 64) {
+              try {
+                const targetText = await captionBridgeRequest("load", { url: youtubeCaptionUrl(targetTrack, snapshot) }, signal);
+                if (typeof targetText === "string" && targetText.trim()) {
+                  session.nativeBilingual = true;
+                  return mergeBilingualCaptions(fragments, parseYoutubeCaptions(targetText, false), session.automatic);
+                }
+              } catch (error) {
+                if (error?.name === "AbortError") throw error;
+              }
+            }
+            return makeSubtitleChunks(fragments, session.automatic);
           }
         }
         if (!requestedCaptions) {
@@ -67,7 +83,10 @@
     if (session !== subtitleSession || session.running || session.error || session.controller.signal.aborted ||
       session.player.classList.contains("ad-showing") || session.player.classList.contains("ad-interrupting")) return;
     const chunk = subtitleQueueChunk(session);
-    if (!chunk) return;
+    if (!chunk) {
+      if ( subtitleView && !subtitleView.status.dataset.error?.includes("true")) setSubtitleStatus("");
+      return;
+    }
     session.running = true;
     const generation = session.generation;
     const current = () => session === subtitleSession && generation === session.generation && !session.controller.signal.aborted;
@@ -79,6 +98,7 @@
         try { groups = parseSubtitleGroups(cached, chunk, session.preferences.smart); } catch { /* Ignore corrupt or outdated local cache entries. */ }
       }
       if (!groups) {
+        if (session.video.currentTime * 1000 >= chunk.start - 3000) setSubtitleStatus("Translating nearby captions…");
         session.request = requestSubtitleTranslation(chunk, session.settings, session.preferences.smart);
         try { groups = await session.request.promise; }
         catch (error) {
@@ -115,6 +135,7 @@
     const session = subtitleSession;
     subtitleSession = null;
     if (session) {
+      clearTimeout(session.renderTimer);
       session.controller.abort();
       cancelSubtitleRequest(session);
       for (const [type, handler] of session.listeners) session.video.removeEventListener(type, handler);
@@ -139,7 +160,15 @@
     view.toggle.textContent = "Cancel";
     view.toggle.setAttribute("aria-pressed", "true");
     try {
-      const settings = await readySettings();
+      let settings = loadSettings();
+      let hasNativeTarget = false;
+      try { requireReadySettings(settings); }
+      catch {
+        const snapshot = await captionBridgeRequest("snapshot").catch(() => null);
+        const source = selectYoutubeTrack(snapshot, settings.targetLanguage);
+        hasNativeTarget = Boolean(selectTargetYoutubeTrack(snapshot, source, settings.targetLanguage));
+        if (!hasNativeTarget) settings = await readySettings();
+      }
       if (intent !== subtitleIntent || view !== subtitleView) return;
       if (!settings) { stopYoutubeSubtitles(); return; }
       const session = {
@@ -151,12 +180,28 @@
       setSubtitleStatus("Loading YouTube captions…");
       session.chunks = await loadYoutubeCaptions(session);
       if (session !== subtitleSession || session.controller.signal.aborted) return;
+      if (!session.nativeBilingual && hasNativeTarget) {
+        const ready = await readySettings();
+        if (session !== subtitleSession || session.controller.signal.aborted) return;
+        if (!ready) { stopYoutubeSubtitles(); return; }
+        session.settings = ready;
+      }
       const listen = (type, handler) => {
         session.listeners.push([type, handler]);
         session.video.addEventListener(type, handler);
       };
-      listen("seeking", () => { cancelSubtitleRequest(session); renderSubtitles(session); void pumpSubtitleQueue(session); });
+      listen("seeking", () => {
+        cancelSubtitleRequest(session);
+        if (session.error && subtitleQueueChunk(session)) {
+          session.error = null;
+          setSubtitleStatus("");
+        }
+        renderSubtitles(session);
+        void pumpSubtitleQueue(session);
+      });
       listen("timeupdate", () => { renderSubtitles(session); void pumpSubtitleQueue(session); });
+      listen("play", () => { renderSubtitles(session); });
+      listen("pause", () => { clearTimeout(session.renderTimer); renderSubtitles(session); });
       listen("ratechange", () => { void pumpSubtitleQueue(session); });
       listen("webkitbeginfullscreen", () => { enterNativeSubtitles(session); renderSubtitles(session); });
       listen("webkitendfullscreen", () => { leaveNativeSubtitles(session); renderSubtitles(session); });
@@ -164,8 +209,13 @@
       view.toggle.textContent = "Stop CC";
       if (session.video.webkitDisplayingFullscreen) enterNativeSubtitles(session);
       renderSubtitles(session);
-      setSubtitleStatus("Translating nearby captions…");
-      void pumpSubtitleQueue(session);
+      if (session.nativeBilingual) {
+        updateNativeSubtitles(session);
+        setSubtitleStatus("");
+      } else {
+        setSubtitleStatus("Translating nearby captions…");
+        void pumpSubtitleQueue(session);
+      }
     } catch (error) {
       if (intent !== subtitleIntent) return;
       stopYoutubeSubtitles();
@@ -183,6 +233,22 @@
     void startYoutubeSubtitles();
   }
 
+  function resegmentYoutubeSubtitles() {
+    const session = subtitleSession;
+    if (!session) return;
+    if (session.nativeBilingual || !session.rawFragments) {
+      if (!session.nativeBilingual) restartYoutubeSubtitles();
+      return;
+    }
+    cancelSubtitleRequest(session);
+    session.error = null;
+    session.chunks = makeSubtitleChunks(session.rawFragments, session.automatic);
+    updateNativeSubtitles(session);
+    renderSubtitles(session);
+    setSubtitleStatus("Translating nearby captions…");
+    void pumpSubtitleQueue(session);
+  }
+
   function retryYoutubeSubtitles() {
     if (!subtitleSession?.chunks.length) { void startYoutubeSubtitles(); return; }
     subtitleSession.error = null;
@@ -197,7 +263,7 @@
     try {
       const snapshot = await captionBridgeRequest("snapshot", {}, session.controller.signal);
       if (session !== subtitleSession || snapshot?.videoId !== session.videoId) return;
-      if (youtubeTrackKey(selectYoutubeTrack(snapshot)) !== session.trackKey) restartYoutubeSubtitles();
+      if (youtubeTrackKey(selectYoutubeTrack(snapshot, session.settings?.targetLanguage)) !== session.trackKey) restartYoutubeSubtitles();
     } catch { /* Playback can briefly replace the player during ads and navigation. */ }
     finally { session.checking = false; }
   }

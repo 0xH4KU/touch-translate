@@ -133,14 +133,30 @@ export async function runYoutubeBrowserChecks(source) {
     checkbox.checked = true;
     checkbox.dispatchEvent(new Event("change"));
     assert(view.source.hidden, "Translation-only mode must hide the source");
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event("change"));
     const size = [...view.host.querySelectorAll("label")].find((label) => label.textContent.includes("Text size")).querySelector("input");
     const originalSize = size.value;
+    size.value = "30";
+    size.dispatchEvent(new Event("input"));
+    assert(getComputedStyle(view.captions).fontSize === "30px", "Dragging the size slider must preview the font size immediately on input");
     size.value = "28";
     size.dispatchEvent(new Event("change"));
     assert(getComputedStyle(view.captions).fontSize === "28px", "The size slider must affect the actual rendered text on mobile and desktop");
     size.value = originalSize;
     size.dispatchEvent(new Event("change"));
+    const priorLoads = captionLoads;
+    const smartBox = [...view.host.querySelectorAll("label")].find((label) => label.textContent.includes("Smart segmentation")).querySelector("input");
+    smartBox.checked = false;
+    smartBox.dispatchEvent(new Event("change"));
+    await finishPrefetch();
+    assert(captionLoads === priorLoads, "Toggling smart segmentation must re-segment in memory without re-downloading YouTube captions");
+    smartBox.checked = true;
+    smartBox.dispatchEvent(new Event("change"));
+    await finishPrefetch();
+    view.menu.open = true;
     view.expand.click();
+    assert(!view.menu.open, "Expanding must close the open preferences menu");
     assert(player.classList.contains("touch-youtube-translate__expanded"), "Expand must keep the overlay and video in one player");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     assert(!player.classList.contains("touch-youtube-translate__expanded"), "Escape must exit expansion");
@@ -191,6 +207,21 @@ export async function runYoutubeBrowserChecks(source) {
     assert(previous.controller.signal.aborted, "The previous language session must be cancelled");
     assert(api.getSession().trackKey.includes("ja"), "The newly selected caption track must be used");
     await finishPrefetch();
+  });
+
+  await check("Native target-language subtitle track merges directly without API calls", async () => {
+    const zhTrack = { baseUrl: `https://www.youtube.com/api/timedtext?v=${videoId}&lang=zh-TW`, languageCode: "zh-TW", vssId: ".zh-TW", name: { simpleText: "Chinese (Taiwan)" } };
+    tracks.push(zhTrack);
+    selected = { languageCode: "zh-TW", kind: "", vssId: ".zh-TW" };
+    const priorRequests = requests.length;
+    await api.startYoutubeSubtitles();
+    await until(() => api.getSession()?.nativeBilingual);
+    api.renderSubtitles();
+    assert(requests.length === priorRequests, "Direct bilingual synthesis must not call the translation API");
+    assert(api.getView().source.textContent.includes("caption 0"), "Original source track must be shown even when YouTube selected the target track");
+    assert(api.getView().translation.textContent.includes("caption 0"), "Native target track must populate the translation line");
+    tracks.pop();
+    selected = { languageCode: "ja", kind: "", vssId: ".ja" };
   });
 
   await check("Changing API settings and navigating away cleanly stop captions", async () => {

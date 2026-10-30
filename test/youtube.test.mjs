@@ -148,5 +148,54 @@ assert.equal(api.subtitleAtTime(session.chunks, 4800), null);
 assert.equal(api.subtitleTrackText({ text: "Source", translation: "譯文" }, { translationOnly: true }), "譯文");
 assert.equal(api.subtitleTrackText({ text: "Source" }, { translationOnly: true }), "Source");
 
+const resilient = api.parseYoutubeCaptions(json3([
+  event(0, 0, "Zero duration marker"),
+  { tStartMs: 1000, segs: [{ utf8: "Inferred duration." }] },
+  { tStartMs: 2500, dDurationMs: 1500, segs: [{ utf8: "Bad offset", tOffsetMs: -5 }, { utf8: "Kept word", tOffsetMs: 200 }] },
+]));
+assert.deepEqual(plain(resilient), [
+  { start: 1000, end: 2500, text: "Inferred duration." },
+  { start: 2700, end: 4000, text: "Kept word" },
+], "Single malformed ASR events or offsets must be skipped or repaired without rejecting the whole track");
+
+const unpunctuatedAsr = [
+  { start: 0, end: 1200, text: "first clause words" },
+  { start: 1200, end: 2400, text: "continuing smoothly" },
+  { start: 2400, end: 3600, text: "past three seconds" },
+  { start: 4100, end: 5200, text: "after a half second breath" },
+];
+assert.deepEqual(plain(api.ruleSubtitleGroups(unpunctuatedAsr, true)), [
+  { from: 0, to: 2 }, { from: 3, to: 3 },
+], "ASR rule grouping must split at natural breathing pauses once a clause is long enough");
+
+const tolerantChunk = api.makeSubtitleChunks([
+  { start: 0, end: 4500, text: "a".repeat(95) },
+  { start: 5600, end: 8600, text: "b".repeat(95) },
+], true)[0];
+const tolerantGroups = api.parseSubtitleGroups({ groups: [{ from: 0, to: 1, translation: "自然長句不誤殺。" }] }, tolerantChunk, true);
+assert.equal(tolerantGroups.length, 1, "Smart segmentation validator must tolerate minor length/pause overrun within hard limits");
+
+const zhTwTrack = { baseUrl: `https://www.youtube.com/api/timedtext?v=${videoId}&lang=zh-TW`, languageCode: "zh-TW", kind: "", vssId: ".zh-TW" };
+const zhCnTrack = { baseUrl: `https://www.youtube.com/api/timedtext?v=${videoId}&lang=zh-CN`, languageCode: "zh-CN", kind: "", vssId: ".zh-CN" };
+const bilingualSnapshot = { videoId, tracks: [track, zhTwTrack], selected: { languageCode: "zh-TW", kind: "", vssId: ".zh-TW" }, defaultIndex: 0 };
+assert.equal(api.selectYoutubeTrack(bilingualSnapshot, "zh-TW"), track, "Source track selection must avoid picking the target language when an original track exists");
+assert.equal(api.selectTargetYoutubeTrack(bilingualSnapshot, track, "zh-TW"), zhTwTrack, "Target track selection must match an existing human subtitle track in the target language");
+assert.equal(api.selectTargetYoutubeTrack({ videoId, tracks: [track, zhCnTrack] }, track, "zh-TW"), null, "Simplified Chinese tracks must not be treated as native zh-TW tracks");
+assert.equal(
+  new URL(api.youtubeCaptionUrl(track, { ...snapshot, observedUrls: [baseUrl + "&tlang=zh-Hant&pot=tlang-observed-token"] })).searchParams.get("pot"),
+  "tlang-observed-token",
+  "Observed auto-translated URLs must still contribute their pot token while stripping tlang",
+);
+
+const mergedChunks = api.mergeBilingualCaptions(raw.slice(0, 4), [
+  { start: 1000, end: 2900, text: "當我們到達時，" },
+  { start: 2900, end: 4800, text: "便坐了下來。" },
+], true);
+assert.equal(mergedChunks[0].done, true);
+assert.deepEqual(plain(mergedChunks[0].groups), [
+  { from: 0, to: 2, start: 1000, end: 3000, text: "When we arrived", translation: "當我們到達時，" },
+  { from: 3, to: 3, start: 3000, end: 4800, text: "we sat down.", translation: "便坐了下來。" },
+], "Native bilingual merging must align ASR words to human target cues without API calls");
+
 api.setSession(null);
 console.log("YouTube subtitle checks passed");
