@@ -1,8 +1,11 @@
   // Runs in the page world, with no GM APIs, settings, or translation credentials.
   function youtubeCaptionBridge(channel, maxBytes, root = window) {
-    if (root.__touchYoutubeCaptionBridge) return;
-    root.__touchYoutubeCaptionBridge = true;
-    document.documentElement?.setAttribute?.("data-touch-youtube-bridge", "page");
+    const doc = root.document || document;
+    const ready = () => {
+      doc.documentElement?.setAttribute?.("data-touch-youtube-bridge", "dom-v2");
+      doc.dispatchEvent(new CustomEvent(`${channel}:ready`));
+    };
+    if (root.__touchYoutubeCaptionBridge === "dom-v2") { ready(); return; }
     const observed = new Map();
     const loads = new Map();
     const originalFetch = root.fetch.bind(root);
@@ -30,7 +33,7 @@
       while (observed.size > 6) observed.delete(observed.keys().next().value);
     }
     for (const resource of root.performance?.getEntriesByType?.("resource") || []) remember(resource.name);
-    root.fetch = function (...args) {
+    const observeFetch = function (...args) {
       const result = originalFetch(...args);
       const url = args[0]?.url || String(args[0]);
       if (captionUrl(url)) result.then((response) => {
@@ -40,7 +43,7 @@
       }).catch(() => {});
       return result;
     };
-    root.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    const observeOpen = function (method, url, ...rest) {
       xhrUrls.set(this, String(url));
       this.addEventListener("load", () => {
         const responseUrl = this.responseURL || xhrUrls.get(this);
@@ -51,8 +54,10 @@
       }, { once: true });
       return originalOpen.call(this, method, url, ...rest);
     };
+    // Read-only hooks must not prevent the bridge from answering player requests.
+    try { root.fetch = observeFetch; } catch {}
+    try { root.XMLHttpRequest.prototype.open = observeOpen; } catch {}
     function player() {
-      const doc = root.document || document;
       return doc.querySelector("#movie_player") || doc.querySelector(".html5-video-player");
     }
     function snapshot() {
@@ -94,12 +99,16 @@
       else if (button) button.click();
       else if (turnOn) current.loadModule?.("captions");
     }
-    window.addEventListener("message", async (event) => {
-      const message = event.data;
-      const sameSource = Boolean(event.source) && (event.source === window || event.source === root || event.source === event.target);
-      if (!sameSource || event.origin !== location.origin || message?.channel !== channel ||
+    // DOM events carry JSON strings across userscript worlds without Window identity checks.
+    doc.addEventListener(`${channel}:request`, async (event) => {
+      if (typeof event.detail !== "string" || event.detail.length > 16384) return;
+      let message;
+      try { message = JSON.parse(event.detail); } catch { return; }
+      if (message?.channel !== channel ||
         message.reply || typeof message.id !== "string" || message.id.length > 100) return;
-      const reply = (data, error) => window.postMessage({ channel, id: message.id, reply: true, data, error }, location.origin);
+      const reply = (data, error) => doc.dispatchEvent(new CustomEvent(`${channel}:reply`, {
+        detail: JSON.stringify({ channel, id: message.id, reply: true, data, error }),
+      }));
       try {
         if (message.action === "snapshot") reply(snapshot());
         else if (message.action === "enable") {
@@ -134,10 +143,13 @@
         }
       } catch (error) { reply(null, error?.name === "AbortError" ? "Caption request cancelled." : error?.message || "Could not read YouTube captions."); }
     });
+    root.__touchYoutubeCaptionBridge = "dom-v2";
+    ready();
   }
 
   function installCaptionBridge() {
-    if (document.documentElement?.getAttribute?.("data-touch-youtube-bridge") === "page") return;
+    const installed = () => document.documentElement?.getAttribute?.("data-touch-youtube-bridge") === "dom-v2";
+    if (installed()) return;
     const target = document.head || document.documentElement;
     const nonce = document.querySelector?.("script[nonce]")?.nonce;
     const textContent = `(${youtubeCaptionBridge.toString()})(${JSON.stringify(BRIDGE_CHANNEL)}, ${CAPTION_MAX_BYTES});`;
@@ -147,58 +159,76 @@
         const element = document.head
           ? GM_addElement("script", attributes)
           : GM_addElement(target, "script", attributes);
-        element?.remove?.();
+        if (installed()) element?.remove?.();
       } catch {
-        try { GM_addElement("script", { textContent })?.remove?.(); } catch {}
+        try {
+          const element = GM_addElement("script", { textContent });
+          if (installed()) element?.remove?.();
+        } catch {}
       }
     }
-    if (target && document.documentElement?.getAttribute?.("data-touch-youtube-bridge") !== "page") {
+    if (target && !installed()) {
       try {
         const script = document.createElement("script");
         if (nonce) script.nonce = nonce;
         script.textContent = textContent;
         target.append(script);
-        script.remove();
+        if (installed()) script.remove();
       } catch {}
     }
-    if (document.documentElement?.getAttribute?.("data-touch-youtube-bridge") !== "page" && typeof unsafeWindow !== "undefined") {
+    if (!installed() && typeof unsafeWindow !== "undefined") {
       try { youtubeCaptionBridge(BRIDGE_CHANNEL, CAPTION_MAX_BYTES, unsafeWindow); } catch {}
     }
   }
 
   function captionBridgeRequest(action, data = {}, signal) {
-    installCaptionBridge();
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return new Promise((resolve, reject) => {
       let timer;
+      let sent = false;
+      let settled = false;
+      const dispatch = (message) => document.dispatchEvent(new CustomEvent(`${BRIDGE_CHANNEL}:request`, {
+        detail: JSON.stringify({ ...message, channel: BRIDGE_CHANNEL }),
+      }));
       const finish = (error, result) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        window.removeEventListener("message", receive);
+        document.removeEventListener(`${BRIDGE_CHANNEL}:reply`, receive);
+        document.removeEventListener(`${BRIDGE_CHANNEL}:ready`, send);
         signal?.removeEventListener("abort", abort);
         error ? reject(error) : resolve(result);
       };
       const abort = () => {
-        window.postMessage({ channel: BRIDGE_CHANNEL, id: `${id}-cancel`, action: "cancel", loadId: id }, location.origin);
+        if (sent) dispatch({ id: `${id}-cancel`, action: "cancel", loadId: id });
         finish(cancelledError());
       };
       const receive = (event) => {
-        const message = event.data;
-        const sameSource = Boolean(event.source) && (
-          event.source === window ||
-          event.source === event.target ||
-          (typeof unsafeWindow !== "undefined" && event.source === unsafeWindow)
-        );
-        if (!sameSource || event.origin !== location.origin || message?.channel !== BRIDGE_CHANNEL ||
+        if (typeof event.detail !== "string" || event.detail.length > CAPTION_MAX_BYTES * 2 + 4096) return;
+        let message;
+        try { message = JSON.parse(event.detail); } catch { return; }
+        if (message?.channel !== BRIDGE_CHANNEL ||
           message.id !== id || message.reply !== true) return;
         finish(message.error ? new Error(String(message.error).slice(0, 300)) : null, message.data);
       };
+      const send = () => {
+        if (sent || settled || document.documentElement?.getAttribute?.("data-touch-youtube-bridge") !== "dom-v2") return;
+        sent = true;
+        Promise.resolve().then(() => {
+          if (!settled) dispatch({ ...data, id, action });
+        }).catch((error) => finish(error));
+      };
       if (signal?.aborted) { reject(cancelledError()); return; }
-      window.addEventListener("message", receive);
+      document.addEventListener(`${BRIDGE_CHANNEL}:reply`, receive);
+      document.addEventListener(`${BRIDGE_CHANNEL}:ready`, send);
       signal?.addEventListener("abort", abort, { once: true });
       timer = setTimeout(() => {
-        window.postMessage({ channel: BRIDGE_CHANNEL, id: `${id}-cancel`, action: "cancel", loadId: id }, location.origin);
-        finish(new Error("YouTube did not answer. Reload the page and enable the userscript, then try again."));
+        if (sent) dispatch({ id: `${id}-cancel`, action: "cancel", loadId: id });
+        finish(new Error(sent
+          ? `YouTube caption request timed out (${action}). Reload the page and try again.`
+          : "YouTube caption bridge could not start. Reload the page and check that Tampermonkey can run scripts on YouTube."));
       }, action === "load" ? 15000 : 2000);
-      window.postMessage({ ...data, channel: BRIDGE_CHANNEL, id, action }, location.origin);
+      installCaptionBridge();
+      send();
     });
   }
