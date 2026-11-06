@@ -72,9 +72,15 @@
     return session.chunks.find((chunk) => !chunk.done && !chunk.failed && chunk.end > time && chunk.start <= time + lookahead);
   }
 
+  function subtitleRetryDelay(attempt = 1, baseMs = SUBTITLE_RETRY_BASE_MS) {
+    return Math.min(30000, baseMs * Math.pow(2, Math.max(0, attempt - 1)));
+  }
+
   function cancelSubtitleRequest(session) {
     if (!session) return;
     session.generation++;
+    clearTimeout(session.retryTimer);
+    session.retryTimer = null;
     session.request?.abort();
     session.request = null;
   }
@@ -114,13 +120,23 @@
       if (!current()) return;
       chunk.groups = groups;
       chunk.done = true;
+      session.retryCount = 0;
       renderSubtitles(session);
       setSubtitleStatus("");
     } catch (error) {
       if (current() && error.name !== "AbortError") {
         chunk.failed = true;
         session.error = error;
+        session.retryCount = (session.retryCount || 0) + 1;
         setSubtitleStatus(redactProviderDiagnostic(errorMessageFor(error), session.settings.apiKey), true);
+        clearTimeout(session.retryTimer);
+        session.retryTimer = setTimeout(() => {
+          session.retryTimer = null;
+          if (session !== subtitleSession || session.controller.signal.aborted) return;
+          session.error = null;
+          session.chunks.forEach((entry) => { entry.failed = false; });
+          void pumpSubtitleQueue(session);
+        }, subtitleRetryDelay(session.retryCount, session.retryBaseMs));
       }
     } finally {
       session.request = null;
@@ -199,8 +215,9 @@
       };
       listen("seeking", () => {
         cancelSubtitleRequest(session);
-        if (session.error && subtitleQueueChunk(session)) {
+        if (session.error) {
           session.error = null;
+          session.chunks.forEach((chunk) => { chunk.failed = false; });
           setSubtitleStatus("");
         }
         renderSubtitles(session);
@@ -258,6 +275,9 @@
 
   function retryYoutubeSubtitles() {
     if (!subtitleSession?.chunks.length) { void startYoutubeSubtitles(); return; }
+    clearTimeout(subtitleSession.retryTimer);
+    subtitleSession.retryTimer = null;
+    subtitleSession.retryCount = 0;
     subtitleSession.error = null;
     subtitleSession.chunks.forEach((chunk) => { chunk.failed = false; });
     setSubtitleStatus("Retrying captions…");

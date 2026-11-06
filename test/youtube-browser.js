@@ -49,7 +49,7 @@ export async function runYoutubeBrowserChecks(source) {
   const settings = { apiFormat: "chat-completions", baseURL: "https://api.example.invalid/v1", model: "fixture-model", apiKey: "fixture-private-secret", targetLanguage: "zh-TW", thinkingLevel: "low" };
   const store = { "settings-v1": { ...settings } };
   const requests = [], menus = [];
-  source = source.replace("  // Test interface", "  globalThis.youtubeBrowser = { startYoutubeSubtitles, stopYoutubeSubtitles, refreshYoutubePlayer, checkSubtitleTrack, renderSubtitles, captionBridgeRequest, getSession: () => subtitleSession, getView: () => subtitleView };\n  // Test interface");
+  source = source.replace("  // Test interface", "  globalThis.youtubeBrowser = { startYoutubeSubtitles, stopYoutubeSubtitles, refreshYoutubePlayer, checkSubtitleTrack, renderSubtitles, captionBridgeRequest, setSubtitleStatus, getSession: () => subtitleSession, getView: () => subtitleView };\n  // Test interface");
   new Function("GM_getValue", "GM_setValue", "GM_deleteValue", "GM_registerMenuCommand", "GM_setClipboard", "GM_xmlhttpRequest", "GM_info", "GM_addElement", source)(
     (key, fallback) => structuredClone(store[key] ?? fallback),
     (key, value) => { store[key] = structuredClone(value); },
@@ -89,6 +89,20 @@ export async function runYoutubeBrowserChecks(source) {
     assert(!view.controls.hidden && view.toggle.getBoundingClientRect().height >= 44, "Clicking the trigger button must open detailed preferences");
     view.trigger.click();
     assert(view.controls.hidden, "Clicking the trigger button again must close detailed preferences");
+    view.trigger.click();
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    assert(view.controls.hidden, "Touching anywhere on the screen outside preferences must close preferences");
+    view.dismissMs = 40;
+    view.trigger.click();
+    assert(!view.controls.hidden, "Preferences must reopen before inactivity check");
+    await until(() => view.controls.hidden);
+    api.setSubtitleStatus("Transient translation error", true);
+    assert(view.status.textContent === "Transient translation error" && !view.retry.hidden, "Error status must display with retry action");
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    assert(!view.status.textContent && view.retry.hidden, "Touching the screen must dismiss the error status");
+    api.setSubtitleStatus("Auto-hiding translation error", true);
+    await until(() => !view.status.textContent && view.retry.hidden);
+    delete view.dismissMs;
     assert(!window.GM_xmlhttpRequest && !JSON.stringify(window.__touchYoutubeCaptionBridge).includes(settings.apiKey), "The page bridge must not receive privileged APIs or the translation key");
     await until(() => requests.length > 0);
     assert(view.trigger.dataset.active === "true", "Default auto-start must mark the trigger active");

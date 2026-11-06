@@ -146,17 +146,36 @@ await inFlight;
 assert.equal(seeking.chunks[0].done, false);
 assert.equal(storage["youtube-cache-v1"], undefined, "A late result after seeking must neither render nor enter cache");
 
-const failing = makeSession(api.makeSubtitleChunks(raw.slice(0, 4), true));
+assert.ok(
+  api.subtitleRetryDelay(1) < api.subtitleRetryDelay(2) && api.subtitleRetryDelay(2) < api.subtitleRetryDelay(3),
+  "Automatic retry intervals must increase across consecutive failures",
+);
+const failing = { ...makeSession(api.makeSubtitleChunks(raw.slice(0, 4), true)), retryBaseMs: 20 };
 api.setSession(failing);
 const failed = api.pumpSubtitleQueue(failing);
 transport.options.onload({ status: 401, responseText: '{"error":{"message":"bad synthetic-subtitle-secret"}}' });
 await failed;
 assert.equal(failing.chunks[0].failed, true);
+assert.equal(failing.retryCount, 1);
 assert.equal(storage["youtube-cache-v1"], undefined);
 assert.doesNotMatch(failing.error.message, /synthetic-subtitle-secret/);
 const failedCount = transport.history.length;
 await api.pumpSubtitleQueue(failing);
-assert.equal(transport.history.length, failedCount, "Provider failures must wait for manual Retry");
+assert.equal(transport.history.length, failedCount, "Provider failures must wait for the backoff timer before retrying");
+await new Promise((resolve) => setTimeout(resolve, 30));
+assert.equal(transport.history.length, failedCount + 1, "First automatic retry must fire after the initial backoff interval");
+transport.options.onload({ status: 401, responseText: '{"error":{"message":"still failing"}}' });
+for (let i = 0; i < 5; i++) await Promise.resolve();
+assert.equal(failing.retryCount, 2);
+await new Promise((resolve) => setTimeout(resolve, 25));
+assert.equal(transport.history.length, failedCount + 1, "Second automatic retry must wait for the longer backoff interval");
+await new Promise((resolve) => setTimeout(resolve, 30));
+assert.equal(transport.history.length, failedCount + 2, "Second automatic retry must fire after the increased interval");
+reply(transport.options, groups);
+for (let i = 0; i < 5; i++) await Promise.resolve();
+assert.equal(failing.chunks[0].done, true);
+assert.equal(failing.retryCount, 0);
+delete storage["youtube-cache-v1"];
 
 const far = api.makeSubtitleChunks(Array.from({ length: 100 }, (_, index) => ({ start: index * 4000, end: index * 4000 + 3000, text: "A complete sentence." })), false);
 const bounded = makeSession(far);

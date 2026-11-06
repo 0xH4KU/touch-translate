@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch YouTube Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.4
+// @version      0.1.5
 // @description  Private bilingual YouTube captions with smart segmentation and your own translation API.
 // @author       HAKU
 // @match        https://www.youtube.com/*
@@ -49,6 +49,8 @@
   const SUBTITLE_BATCH_MS = 30000;
   const SUBTITLE_BATCH_CHARS = 6000;
   const SUBTITLE_LOOKAHEAD_MS = 60000;
+  const SUBTITLE_DISMISS_MS = 4000;
+  const SUBTITLE_RETRY_BASE_MS = 2000;
   const YOUTUBE_BOTTOM_CONTROLS_SELECTOR = ".ytp-chrome-bottom, .ytp-progress-bar-container";
   let subtitleSession = null;
   let subtitleView = null;
@@ -1912,10 +1914,16 @@
 
   function setSubtitleStatus(text, error = false) {
     if (!subtitleView) return;
+    clearTimeout(subtitleView.errorTimer);
     subtitleView.status.textContent = text;
     subtitleView.status.dataset.error = String(error);
     subtitleView.retry.hidden = !error;
     subtitleView.host.dataset.idle = String(Boolean(subtitleView.controls?.hidden) && !text);
+    if (error && text) {
+      subtitleView.errorTimer = setTimeout(() => {
+        if (subtitleView?.status.dataset.error === "true") setSubtitleStatus("");
+      }, subtitleView.dismissMs ?? SUBTITLE_DISMISS_MS);
+    }
   }
 
   function findNativeCcButton(player) {
@@ -1956,6 +1964,16 @@
     }
   }
 
+  function schedulePreferencesHide(view = subtitleView) {
+    if (!view) return;
+    clearTimeout(view.controlsTimer);
+    if (!view.controls.hidden) {
+      view.controlsTimer = setTimeout(() => {
+        setPreferencesOpen(view, false);
+      }, view.dismissMs ?? SUBTITLE_DISMISS_MS);
+    }
+  }
+
   function setPreferencesOpen(view = subtitleView, open = Boolean(view?.controls.hidden)) {
     if (!view) return;
     syncSubtitleTriggerDock(view);
@@ -1970,6 +1988,7 @@
         view.controls.style.setProperty("--pref-offset", `${Math.max(52, Math.round(playerRect.bottom - triggerRect.top + 8))}px`);
       }
     }
+    schedulePreferencesHide(view);
     view.host.dataset.idle = String(!open && !view.status.textContent);
   }
 
@@ -2077,24 +2096,38 @@
         element.addEventListener(type, (event) => event.stopPropagation());
       }
     }
+    for (const type of ["pointermove", "input", "change", "keydown"]) {
+      controls.addEventListener(type, () => schedulePreferencesHide(subtitleView), { passive: true });
+    }
     let autohideTimer;
     let positionFrame;
     const schedulePosition = () => {
       cancelAnimationFrame(positionFrame);
       positionFrame = requestAnimationFrame(() => updateSubtitlePosition(subtitleView));
     };
-    const noteActivity = (event) => {
+    const dismissOnScreenTouch = (event) => {
+      const target = event?.target;
+      if (!target?.nodeType) return;
+      if (!controls.hidden) {
+        if (controls.contains(target)) schedulePreferencesHide(subtitleView);
+        else if (!trigger.contains(target)) setPreferencesOpen(subtitleView, false);
+      }
+      if (status.dataset.error === "true" && !retry.contains(target)) {
+        setSubtitleStatus("");
+      }
+    };
+    const noteActivity = () => {
       syncSubtitleTriggerDock(subtitleView);
       schedulePosition();
-      if (!controls.hidden && event?.target && !controls.contains(event.target) && !trigger.contains(event.target)) {
-        setPreferencesOpen(subtitleView, false);
-      }
       host.dataset.autohide = "false";
       clearTimeout(autohideTimer);
       if (video.paused === false && !video.ended) {
         autohideTimer = setTimeout(() => { host.dataset.autohide = "true"; }, 3000);
       }
     };
+    for (const type of ["pointerdown", "touchstart", "click"]) {
+      document.addEventListener(type, dismissOnScreenTouch, { capture: true, passive: true });
+    }
     for (const type of ["pointerdown", "pointermove", "touchstart", "keydown"]) {
       player.addEventListener(type, noteActivity, { passive: true });
     }
@@ -2118,11 +2151,14 @@
     if (getComputedStyle(player).position === "static") player.style.position = "relative";
     subtitleView = { host, toolbar, player, video, trigger, toggle, controls, retry, status, captions, source, translation, preferences, position, cleanup() {
       clearTimeout(autohideTimer);
+      clearTimeout(subtitleView.controlsTimer);
+      clearTimeout(subtitleView.errorTimer);
       cancelAnimationFrame(positionFrame);
       positionObserver.disconnect();
       sizeObserver.disconnect();
       window.removeEventListener("resize", schedulePosition);
       player.removeEventListener("transitionend", schedulePosition);
+      for (const type of ["pointerdown", "touchstart", "click"]) document.removeEventListener(type, dismissOnScreenTouch, { capture: true });
       for (const type of ["pointerdown", "pointermove", "touchstart", "keydown"]) player.removeEventListener(type, noteActivity);
       for (const type of ["play", "pause", "ended"]) video.removeEventListener(type, noteActivity);
     } };
@@ -2218,9 +2254,15 @@
     return session.chunks.find((chunk) => !chunk.done && !chunk.failed && chunk.end > time && chunk.start <= time + lookahead);
   }
 
+  function subtitleRetryDelay(attempt = 1, baseMs = SUBTITLE_RETRY_BASE_MS) {
+    return Math.min(30000, baseMs * Math.pow(2, Math.max(0, attempt - 1)));
+  }
+
   function cancelSubtitleRequest(session) {
     if (!session) return;
     session.generation++;
+    clearTimeout(session.retryTimer);
+    session.retryTimer = null;
     session.request?.abort();
     session.request = null;
   }
@@ -2260,13 +2302,23 @@
       if (!current()) return;
       chunk.groups = groups;
       chunk.done = true;
+      session.retryCount = 0;
       renderSubtitles(session);
       setSubtitleStatus("");
     } catch (error) {
       if (current() && error.name !== "AbortError") {
         chunk.failed = true;
         session.error = error;
+        session.retryCount = (session.retryCount || 0) + 1;
         setSubtitleStatus(redactProviderDiagnostic(errorMessageFor(error), session.settings.apiKey), true);
+        clearTimeout(session.retryTimer);
+        session.retryTimer = setTimeout(() => {
+          session.retryTimer = null;
+          if (session !== subtitleSession || session.controller.signal.aborted) return;
+          session.error = null;
+          session.chunks.forEach((entry) => { entry.failed = false; });
+          void pumpSubtitleQueue(session);
+        }, subtitleRetryDelay(session.retryCount, session.retryBaseMs));
       }
     } finally {
       session.request = null;
@@ -2345,8 +2397,9 @@
       };
       listen("seeking", () => {
         cancelSubtitleRequest(session);
-        if (session.error && subtitleQueueChunk(session)) {
+        if (session.error) {
           session.error = null;
+          session.chunks.forEach((chunk) => { chunk.failed = false; });
           setSubtitleStatus("");
         }
         renderSubtitles(session);
@@ -2404,6 +2457,9 @@
 
   function retryYoutubeSubtitles() {
     if (!subtitleSession?.chunks.length) { void startYoutubeSubtitles(); return; }
+    clearTimeout(subtitleSession.retryTimer);
+    subtitleSession.retryTimer = null;
+    subtitleSession.retryCount = 0;
     subtitleSession.error = null;
     subtitleSession.chunks.forEach((chunk) => { chunk.failed = false; });
     setSubtitleStatus("Retrying captions…");
@@ -2466,13 +2522,16 @@
       parseSubtitleGroups, requestSubtitleTranslation, subtitleCacheKey, joinCaptionText,
       youtubeVideoId, selectYoutubeTrack, selectTargetYoutubeTrack, sameLanguage, youtubeCaptionUrl, youtubeTrackKey,
       captionBridgeRequest, youtubeCaptionBridge, installCaptionBridge,
-      subtitleAtTime, subtitleQueueChunk, cancelSubtitleRequest,
+      subtitleAtTime, subtitleQueueChunk, subtitleRetryDelay, cancelSubtitleRequest,
       pumpSubtitleQueue, loadYoutubeCaptions, loadSubtitlePreferences,
       startYoutubeSubtitles, stopYoutubeSubtitles, retryYoutubeSubtitles, resegmentYoutubeSubtitles, checkSubtitleTrack,
-      mountSubtitleView, renderSubtitles, refreshYoutubePlayer,
+      mountSubtitleView, renderSubtitles, refreshYoutubePlayer, setSubtitleStatus, setPreferencesOpen,
       cleanSettings, parseImportedSettings, endpointFor, loadCache, saveCache,
       getSession: () => subtitleSession, getView: () => subtitleView,
-      setSession: (session) => { subtitleSession = session; },
+      setSession: (session) => {
+        clearTimeout(subtitleSession?.retryTimer);
+        subtitleSession = session;
+      },
     });
     return;
   }

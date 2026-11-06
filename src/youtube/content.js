@@ -100,10 +100,16 @@
 
   function setSubtitleStatus(text, error = false) {
     if (!subtitleView) return;
+    clearTimeout(subtitleView.errorTimer);
     subtitleView.status.textContent = text;
     subtitleView.status.dataset.error = String(error);
     subtitleView.retry.hidden = !error;
     subtitleView.host.dataset.idle = String(Boolean(subtitleView.controls?.hidden) && !text);
+    if (error && text) {
+      subtitleView.errorTimer = setTimeout(() => {
+        if (subtitleView?.status.dataset.error === "true") setSubtitleStatus("");
+      }, subtitleView.dismissMs ?? SUBTITLE_DISMISS_MS);
+    }
   }
 
   function findNativeCcButton(player) {
@@ -144,6 +150,16 @@
     }
   }
 
+  function schedulePreferencesHide(view = subtitleView) {
+    if (!view) return;
+    clearTimeout(view.controlsTimer);
+    if (!view.controls.hidden) {
+      view.controlsTimer = setTimeout(() => {
+        setPreferencesOpen(view, false);
+      }, view.dismissMs ?? SUBTITLE_DISMISS_MS);
+    }
+  }
+
   function setPreferencesOpen(view = subtitleView, open = Boolean(view?.controls.hidden)) {
     if (!view) return;
     syncSubtitleTriggerDock(view);
@@ -158,6 +174,7 @@
         view.controls.style.setProperty("--pref-offset", `${Math.max(52, Math.round(playerRect.bottom - triggerRect.top + 8))}px`);
       }
     }
+    schedulePreferencesHide(view);
     view.host.dataset.idle = String(!open && !view.status.textContent);
   }
 
@@ -265,24 +282,38 @@
         element.addEventListener(type, (event) => event.stopPropagation());
       }
     }
+    for (const type of ["pointermove", "input", "change", "keydown"]) {
+      controls.addEventListener(type, () => schedulePreferencesHide(subtitleView), { passive: true });
+    }
     let autohideTimer;
     let positionFrame;
     const schedulePosition = () => {
       cancelAnimationFrame(positionFrame);
       positionFrame = requestAnimationFrame(() => updateSubtitlePosition(subtitleView));
     };
-    const noteActivity = (event) => {
+    const dismissOnScreenTouch = (event) => {
+      const target = event?.target;
+      if (!target?.nodeType) return;
+      if (!controls.hidden) {
+        if (controls.contains(target)) schedulePreferencesHide(subtitleView);
+        else if (!trigger.contains(target)) setPreferencesOpen(subtitleView, false);
+      }
+      if (status.dataset.error === "true" && !retry.contains(target)) {
+        setSubtitleStatus("");
+      }
+    };
+    const noteActivity = () => {
       syncSubtitleTriggerDock(subtitleView);
       schedulePosition();
-      if (!controls.hidden && event?.target && !controls.contains(event.target) && !trigger.contains(event.target)) {
-        setPreferencesOpen(subtitleView, false);
-      }
       host.dataset.autohide = "false";
       clearTimeout(autohideTimer);
       if (video.paused === false && !video.ended) {
         autohideTimer = setTimeout(() => { host.dataset.autohide = "true"; }, 3000);
       }
     };
+    for (const type of ["pointerdown", "touchstart", "click"]) {
+      document.addEventListener(type, dismissOnScreenTouch, { capture: true, passive: true });
+    }
     for (const type of ["pointerdown", "pointermove", "touchstart", "keydown"]) {
       player.addEventListener(type, noteActivity, { passive: true });
     }
@@ -306,11 +337,14 @@
     if (getComputedStyle(player).position === "static") player.style.position = "relative";
     subtitleView = { host, toolbar, player, video, trigger, toggle, controls, retry, status, captions, source, translation, preferences, position, cleanup() {
       clearTimeout(autohideTimer);
+      clearTimeout(subtitleView.controlsTimer);
+      clearTimeout(subtitleView.errorTimer);
       cancelAnimationFrame(positionFrame);
       positionObserver.disconnect();
       sizeObserver.disconnect();
       window.removeEventListener("resize", schedulePosition);
       player.removeEventListener("transitionend", schedulePosition);
+      for (const type of ["pointerdown", "touchstart", "click"]) document.removeEventListener(type, dismissOnScreenTouch, { capture: true });
       for (const type of ["pointerdown", "pointermove", "touchstart", "keydown"]) player.removeEventListener(type, noteActivity);
       for (const type of ["play", "pause", "ended"]) video.removeEventListener(type, noteActivity);
     } };

@@ -22,6 +22,8 @@
   const SUBTITLE_BATCH_MS = 30000;
   const SUBTITLE_BATCH_CHARS = 6000;
   const SUBTITLE_LOOKAHEAD_MS = 60000;
+  const SUBTITLE_DISMISS_MS = 4000;
+  const SUBTITLE_RETRY_BASE_MS = 2000;
   const YOUTUBE_BOTTOM_CONTROLS_SELECTOR = ".ytp-chrome-bottom, .ytp-progress-bar-container";
   let subtitleSession = null;
   let subtitleView = null;

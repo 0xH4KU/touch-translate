@@ -5,13 +5,16 @@
       parseSubtitleGroups, requestSubtitleTranslation, subtitleCacheKey, joinCaptionText,
       youtubeVideoId, selectYoutubeTrack, selectTargetYoutubeTrack, sameLanguage, youtubeCaptionUrl, youtubeTrackKey,
       captionBridgeRequest, youtubeCaptionBridge, installCaptionBridge,
-      subtitleAtTime, subtitleQueueChunk, cancelSubtitleRequest,
+      subtitleAtTime, subtitleQueueChunk, subtitleRetryDelay, cancelSubtitleRequest,
       pumpSubtitleQueue, loadYoutubeCaptions, loadSubtitlePreferences,
       startYoutubeSubtitles, stopYoutubeSubtitles, retryYoutubeSubtitles, resegmentYoutubeSubtitles, checkSubtitleTrack,
-      mountSubtitleView, renderSubtitles, refreshYoutubePlayer,
+      mountSubtitleView, renderSubtitles, refreshYoutubePlayer, setSubtitleStatus, setPreferencesOpen,
       cleanSettings, parseImportedSettings, endpointFor, loadCache, saveCache,
       getSession: () => subtitleSession, getView: () => subtitleView,
-      setSession: (session) => { subtitleSession = session; },
+      setSession: (session) => {
+        clearTimeout(subtitleSession?.retryTimer);
+        subtitleSession = session;
+      },
     });
     return;
   }
