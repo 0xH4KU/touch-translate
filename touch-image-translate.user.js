@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Image Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.2.2
+// @version      0.2.3
 // @description  Two-finger swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
 // @author       HAKU
 // @match        *://*/*
@@ -37,7 +37,7 @@
   const IMAGE_MAX_PIXELS = 4096 * 4096;
   const IMAGE_MAX_REGIONS = 99;
   const EXPECTED_FORMAT =
-    '{"has_text":true,"regions":[{"box_2d":[ymin,xmin,ymax,xmax],"translation":"<translated text>"}]}';
+    '{"has_text":true,"regions":[{"ids":[1],"source":"<original text>","box_2d":[ymin,xmin,ymax,xmax],"translation":"<translated text>"}]}';
 
   const IMAGE_OVERLAY_CLASS = "touch-image-translate__overlay";
   const IMAGE_BUTTON_CLASS = "touch-image-translate__button";
@@ -1376,24 +1376,94 @@
   // Source: src/image/translation.js
 
   function hashImageCacheKey(imageHash, settings) {
-    return translationCacheKey(imageHash, settings, "image-prompt-v10");
+    return translationCacheKey(imageHash, settings, "image-prompt-v11");
   }
 
-  function normalizeImageRegion(value) {
-    const box = value?.box_2d;
-    if (!Array.isArray(box) || box.length !== 4) return null;
-    const coords = box.map((item) => Math.round(Number(item)));
-    if (coords.some((item) => !Number.isFinite(item))) return null;
-    const [ymin, xmin, ymax, xmax] = coords;
-    if (ymin < 0 || xmin < 0 || ymax > 1000 || xmax > 1000) return null;
-    if (ymin >= ymax || xmin >= xmax) return null;
+  function resolveCandidateBoxUnion(ids, rawBox, candidateMap) {
+    if (!(candidateMap instanceof Map) || !candidateMap.size) return null;
+    let matched = ids.map((id) => candidateMap.get(id)).filter(Boolean);
+    if (matched.length && rawBox) {
+      const rawCy = (rawBox[0] + rawBox[2]) / 2;
+      const rawCx = (rawBox[1] + rawBox[3]) / 2;
+      const near = matched.filter((box) => {
+        const cy = (box[0] + box[2]) / 2;
+        const cx = (box[1] + box[3]) / 2;
+        return Math.hypot(cx - rawCx, cy - rawCy) <= 450;
+      });
+      if (near.length) matched = near;
+    }
+    if (!matched.length && rawBox) {
+      for (const candBox of candidateMap.values()) {
+        const iy0 = Math.max(rawBox[0], candBox[0]);
+        const ix0 = Math.max(rawBox[1], candBox[1]);
+        const iy1 = Math.min(rawBox[2], candBox[2]);
+        const ix1 = Math.min(rawBox[3], candBox[3]);
+        if (iy1 > iy0 && ix1 > ix0) {
+          const inter = (iy1 - iy0) * (ix1 - ix0);
+          const candArea = Math.max(
+            1,
+            (candBox[2] - candBox[0]) * (candBox[3] - candBox[1]),
+          );
+          if (inter / candArea >= 0.6) matched.push(candBox);
+        }
+      }
+    }
+    if (!matched.length) return null;
+    return [
+      Math.min(...matched.map((b) => b[0])),
+      Math.min(...matched.map((b) => b[1])),
+      Math.max(...matched.map((b) => b[2])),
+      Math.max(...matched.map((b) => b[3])),
+    ];
+  }
+
+  function normalizeImageRegion(value, candidateMap = null, profile = null) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const rawIds = Array.isArray(value.ids)
+      ? value.ids
+      : Number.isInteger(value.id)
+        ? [value.id]
+        : [];
+    const ids = rawIds
+      .map((item) => Math.round(Number(item)))
+      .filter((item) => Number.isInteger(item) && item > 0);
+
+    let rawBox = null;
+    const box = value.box_2d;
+    if (Array.isArray(box) && box.length === 4) {
+      const coords = box.map((item) => Math.round(Number(item)));
+      if (
+        coords.every((item) => Number.isFinite(item)) &&
+        coords[0] >= 0 &&
+        coords[1] >= 0 &&
+        coords[2] <= 1000 &&
+        coords[3] <= 1000 &&
+        coords[0] < coords[2] &&
+        coords[1] < coords[3]
+      ) {
+        rawBox = coords;
+      }
+    }
+
+    const candidateUnion = resolveCandidateBoxUnion(ids, rawBox, candidateMap);
+    let finalBox = candidateUnion || rawBox;
+    if (!finalBox) return null;
+    if (profile && typeof snapBoxToInk === "function") {
+      finalBox = snapBoxToInk(finalBox, profile) || finalBox;
+    }
+
     const translation =
-      typeof value?.translation === "string" ? value.translation.trim() : "";
+      typeof value.translation === "string" ? value.translation.trim() : "";
     if (!translation) return null;
-    return {
-      box_2d: [ymin, xmin, ymax, xmax],
+    const source =
+      typeof value.source === "string" ? value.source.trim() : "";
+    const normalized = {
+      box_2d: finalBox,
       translation,
     };
+    if (source) normalized.source = source;
+    if (ids.length || candidateUnion) normalized.ids = ids;
+    return normalized;
   }
 
   function isUsefulImageText(value) {
@@ -1414,13 +1484,55 @@
     if (!region || !Array.isArray(region.box_2d)) return false;
     const [ymin, xmin, ymax, xmax] = region.box_2d;
     if (ymax - ymin < 8 || xmax - xmin < 8) return false;
+    if (region.source && !isUsefulImageText(region.source)) return false;
     return isUsefulImageText(region.translation);
   }
 
+  function normalizeComparableText(value) {
+    return String(value || "")
+      .replace(/[\s\p{P}\p{S}\d]+/gu, "")
+      .toLowerCase();
+  }
+
+  function isChineseTargetLanguage(targetLanguage) {
+    return /^(?:zh\b|chinese|traditional chinese|simplified chinese|繁體|簡體|中文|正體)/i.test(
+      String(targetLanguage || "").trim(),
+    );
+  }
+
+  function isUntranslatedImageRegion(region, targetLanguage = "") {
+    const trans = String(region?.translation || "").trim();
+    const source = String(region?.source || "").trim();
+    if (!trans) return true;
+    if (source) {
+      const normSource = normalizeComparableText(source);
+      const normTrans = normalizeComparableText(trans);
+      if (normSource && normSource === normTrans) {
+        return true;
+      }
+    }
+    if (isChineseTargetLanguage(targetLanguage)) {
+      const kanaOrHangul = (
+        trans.match(/[\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/g) || []
+      ).length;
+      const letters = (trans.match(/\p{L}/gu) || []).length;
+      if (kanaOrHangul >= 2 && kanaOrHangul / Math.max(1, letters) >= 0.25) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function mergeDenseImageRegions(regions) {
-    if (!Array.isArray(regions) || regions.length <= 1) return regions || [];
+    if (!Array.isArray(regions) || regions.length <= 1) {
+      return (regions || []).map((region) => ({
+        box_2d: [...region.box_2d],
+        translation: String(region.translation || "").trim(),
+      }));
+    }
     const items = regions.map((region) => ({
       box_2d: [...region.box_2d],
+      locked: Array.isArray(region.ids),
       translation: String(region.translation || "").trim(),
     }));
     const merged = [];
@@ -1430,15 +1542,16 @@
       if (consumed[i]) continue;
       const current = {
         box_2d: [...items[i].box_2d],
+        locked: items[i].locked,
         translation: items[i].translation,
       };
       consumed[i] = true;
 
       let changed = true;
-      while (changed) {
+      while (changed && !current.locked) {
         changed = false;
         for (let j = i + 1; j < items.length; j += 1) {
-          if (consumed[j]) continue;
+          if (consumed[j] || items[j].locked) continue;
           const candidate = items[j];
           const [curYmin, curXmin, curYmax, curXmax] = current.box_2d;
           const [nextYmin, nextXmin, nextYmax, nextXmax] = candidate.box_2d;
@@ -1479,12 +1592,15 @@
           changed = true;
         }
       }
-      merged.push(current);
+      merged.push({
+        box_2d: current.box_2d,
+        translation: current.translation,
+      });
     }
     return merged;
   }
 
-  function parseImageTranslation(content) {
+  function parseImageTranslation(content, options = {}) {
     const text = String(content || "")
       .trim()
       .replace(/^```(?:json)?\s*/i, "")
@@ -1535,7 +1651,16 @@
         EXPECTED_FORMAT,
       );
     }
-    const normalizedRegions = rawRegions.map(normalizeImageRegion);
+    const candidateList = Array.isArray(options?.candidates)
+      ? options.candidates
+      : [];
+    const candidateMap = candidateList.length
+      ? new Map(candidateList.map((item) => [item.id, item.box_2d]))
+      : null;
+    const profile = options?.profile || null;
+    const normalizedRegions = rawRegions.map((item) =>
+      normalizeImageRegion(item, candidateMap, profile),
+    );
     if (normalizedRegions.some((region) => !region)) {
       throw responseFormatError(
         "One or more image regions are invalid.",
@@ -1547,7 +1672,18 @@
     if (!pairedRegions.length) {
       return { hasText: false, regions: [], translation: "" };
     }
-    const mergedRegions = mergeDenseImageRegions(pairedRegions);
+    const targetLanguage = String(options?.targetLanguage || "").trim();
+    const translatedRegions = pairedRegions.filter(
+      (region) => !isUntranslatedImageRegion(region, targetLanguage),
+    );
+    if (!translatedRegions.length) {
+      throw responseFormatError(
+        "The AI returned untranslated source text instead of a translation.",
+        text,
+        EXPECTED_FORMAT,
+      );
+    }
+    const mergedRegions = mergeDenseImageRegions(translatedRegions);
     return {
       hasText: true,
       regions: mergedRegions,
@@ -1563,6 +1699,14 @@
     if (!base64) {
       throw new Error("Image data is required for image translation.");
     }
+    const candidates = Array.isArray(imageData?.candidates)
+      ? imageData.candidates
+      : [];
+    const candidateHint = candidates.length
+      ? `Pre-detected numbered text boxes on the image (id:[ymin,xmin,ymax,xmax]): ${candidates
+          .map((item) => `#${item.id}:[${item.box_2d.join(",")}]`)
+          .join(" ")}. `
+      : "";
     const systemPrompt = [
       translationRulesFor(settings.targetLanguage),
       "Read the whole image first to understand the scene, speakers, references, and terminology before translating each region.",
@@ -1571,14 +1715,15 @@
       `Also omit text that is already in ${settings.targetLanguage}, as well as standalone numbers, symbols, or code identifiers that do not need translation.`,
       'Return one JSON object with "has_text" (boolean) and "regions" (array of region objects in reading order, at most 99 regions).',
       'When no meaningful translatable content remains after filtering UI and noise, return {"has_text":false,"regions":[]}.',
-      'When has_text is true, each item in "regions" must be {"box_2d":[ymin,xmin,ymax,xmax],"translation":"..."} where box_2d uses integer coordinates normalized from 0 to 1000.',
-      "Predict each region's box_2d tightly around the visible text glyphs only—exclude surrounding empty card or panel whitespace, borders, and non-text artwork.",
-      "Group consecutive lines or paragraphs that belong to the same post body, speech bubble, card, list block, or section into a single region (preserving line breaks with \\n) instead of splitting them into small fragments.",
+      'When has_text is true, each item in "regions" must be {"ids":[...],"source":"...","box_2d":[ymin,xmin,ymax,xmax],"translation":"..."} where box_2d uses integer coordinates normalized from 0 to 1000.',
+      'When numbered red candidate boxes (#1, #2, ...) are marked on the image, match each meaningful text region to its corresponding candidate box ID(s) in "ids" and set "box_2d" to the tight bounding box of those IDs; if a text block has no matching candidate box, set "ids":[] and predict its tight "box_2d" around the visible text glyphs only.',
+      `First transcribe the visible original text into "source", then write its fluent ${settings.targetLanguage} translation into "translation". Never copy or repeat the untranslated "source" text into "translation"—every returned region must be translated into ${settings.targetLanguage}, including titles, headings, short dialogue, and captions.`,
+      "Keep each visually distinct speech bubble, paragraph block, heading, or list item in its own tight region instead of merging distant blocks across the page.",
       "Use the image's reading order, including right-to-left manga columns when appropriate. Keep different speakers, panels, and independent columns in separate regions.",
       "Keep negation, emphasis, and speaker tone. Do not invent illegible words; mark an unreadable fragment as [illegible] only when needed inside otherwise readable content.",
       "Do not include markdown, explanations, or keys beyond this contract.",
     ].join(" ");
-    const userPrompt = `Inspect the image, ignore UI chrome, status bars, metadata, watermarks, and text already in ${settings.targetLanguage}, translate only the meaningful reading content into ${settings.targetLanguage}, and return the JSON object.`;
+    const userPrompt = `${candidateHint}Inspect the image, ignore UI chrome, status bars, metadata, watermarks, and text already in ${settings.targetLanguage}, transcribe each meaningful text region into "source" and translate it into ${settings.targetLanguage} in "translation", and return the JSON object.`;
     return sendProviderRequest(settings, {
       expectedFormat: EXPECTED_FORMAT,
       allowGenericSchemaFallback: true,
@@ -1593,7 +1738,12 @@
         },
       ],
       imageMimeType: mimeType,
-      parseResponse: parseImageTranslation,
+      parseResponse: (content) =>
+        parseImageTranslation(content, {
+          candidates,
+          profile: imageData?.profile || null,
+          targetLanguage: settings.targetLanguage,
+        }),
       schema: {
         type: "object",
         properties: {
@@ -1603,13 +1753,18 @@
             items: {
               type: "object",
               properties: {
+                ids: {
+                  type: "array",
+                  items: { type: "integer" },
+                },
+                source: { type: "string" },
                 box_2d: {
                   type: "array",
                   items: { type: "integer" },
                 },
                 translation: { type: "string" },
               },
-              required: ["box_2d", "translation"],
+              required: ["ids", "source", "box_2d", "translation"],
               additionalProperties: false,
             },
           },
@@ -2369,6 +2524,387 @@
     return "image/jpeg";
   }
 
+  function buildImageTextProfile(imageData) {
+    const width = Number(imageData?.width) || 0;
+    const height = Number(imageData?.height) || 0;
+    const data = imageData?.data;
+    if (width < 16 || height < 16 || !data || data.length < width * height * 4) {
+      return null;
+    }
+    const size = width * height;
+    const luma = new Uint8Array(size);
+    for (let i = 0, p = 0; i < size; i += 1, p += 4) {
+      luma[i] =
+        data[p + 3] < 32
+          ? 255
+          : (data[p] * 77 + data[p + 1] * 150 + data[p + 2] * 29) >> 8;
+    }
+    // Bit 1 marks horizontal contrast (vertical stroke edges); bit 2 marks vertical contrast (horizontal stroke edges).
+    const edge = new Uint8Array(size);
+    for (let y = 1; y < height - 1; y += 1) {
+      const row = y * width;
+      for (let x = 1; x < width - 1; x += 1) {
+        const idx = row + x;
+        const cur = luma[idx];
+        const gx = Math.max(
+          Math.abs(cur - luma[idx - 1]),
+          Math.abs(luma[idx + 1] - cur),
+        );
+        const gy = Math.max(
+          Math.abs(cur - luma[idx - width]),
+          Math.abs(luma[idx + width] - cur),
+        );
+        if (gx >= 30 || gy >= 30) {
+          edge[idx] = (gx >= 30 ? 1 : 0) | (gy >= 30 ? 2 : 0);
+        }
+      }
+    }
+    return { edge, height, luma, width };
+  }
+
+  function snapBoxToInk(box_2d, profile) {
+    if (!Array.isArray(box_2d) || box_2d.length !== 4) return null;
+    const coords = box_2d.map((item) => Math.round(Number(item)));
+    if (coords.some((item) => !Number.isFinite(item))) return null;
+    const [ymin, xmin, ymax, xmax] = coords;
+    if (ymin < 0 || xmin < 0 || ymax > 1000 || xmax > 1000 || ymin >= ymax || xmin >= xmax) {
+      return null;
+    }
+    if (!profile?.edge || !(profile.width >= 16) || !(profile.height >= 16)) {
+      return [ymin, xmin, ymax, xmax];
+    }
+    const { edge, width, height } = profile;
+    const x0 = clampNumber(Math.floor((xmin / 1000) * width), 0, width - 1);
+    const y0 = clampNumber(Math.floor((ymin / 1000) * height), 0, height - 1);
+    const x1 = clampNumber(Math.ceil((xmax / 1000) * width) - 1, x0, width - 1);
+    const y1 = clampNumber(Math.ceil((ymax / 1000) * height) - 1, y0, height - 1);
+
+    // Require vertical-stroke transitions on rows and horizontal-stroke transitions on columns so straight borders are skipped.
+    const rowHasInk = (y, left, right) => {
+      if (y < 0 || y >= height) return false;
+      const base = y * width;
+      let gx = 0;
+      let gy = 0;
+      for (let x = left; x <= right; x += 1) {
+        const val = edge[base + x];
+        if (val & 1) gx += 1;
+        if (val & 2) gy += 1;
+      }
+      return gx >= 2 && gx + gy >= 3;
+    };
+
+    const colHasInk = (x, top, bottom) => {
+      if (x < 0 || x >= width) return false;
+      let gx = 0;
+      let gy = 0;
+      for (let y = top; y <= bottom; y += 1) {
+        const val = edge[y * width + x];
+        if (val & 1) gx += 1;
+        if (val & 2) gy += 1;
+      }
+      return gy >= 2 && gx + gy >= 3;
+    };
+
+    let top = y0;
+    while (top <= y1 && !rowHasInk(top, x0, x1)) top += 1;
+    if (top > y1) return [ymin, xmin, ymax, xmax];
+    let bottom = y1;
+    while (bottom >= top && !rowHasInk(bottom, x0, x1)) bottom -= 1;
+
+    let left = x0;
+    while (left <= x1 && !colHasInk(left, top, bottom)) left += 1;
+    if (left > x1) return [ymin, xmin, ymax, xmax];
+    let right = x1;
+    while (right >= left && !colHasInk(right, top, bottom)) right -= 1;
+
+    while (top < bottom && !rowHasInk(top, left, right)) top += 1;
+    while (bottom > top && !rowHasInk(bottom, left, right)) bottom -= 1;
+
+    const maxExpandY = Math.max(3, Math.round(height * 0.02));
+    const maxExpandX = Math.max(4, Math.round(width * 0.025));
+    for (let step = 0; step < maxExpandY && top > 0; step += 1) {
+      if (rowHasInk(top - 1, left, right)) top -= 1;
+      else if (top > 1 && rowHasInk(top - 2, left, right)) top -= 2;
+      else break;
+    }
+    for (let step = 0; step < maxExpandY && bottom < height - 1; step += 1) {
+      if (rowHasInk(bottom + 1, left, right)) bottom += 1;
+      else if (bottom < height - 2 && rowHasInk(bottom + 2, left, right)) bottom += 2;
+      else break;
+    }
+    for (let step = 0; step < maxExpandX && left > 0; step += 1) {
+      if (colHasInk(left - 1, top, bottom)) left -= 1;
+      else if (left > 1 && colHasInk(left - 2, top, bottom)) left -= 2;
+      else break;
+    }
+    for (let step = 0; step < maxExpandX && right < width - 1; step += 1) {
+      if (colHasInk(right + 1, top, bottom)) right += 1;
+      else if (right < width - 2 && colHasInk(right + 2, top, bottom)) right += 2;
+      else break;
+    }
+
+    const padX = Math.min(2, Math.floor(width * 0.003) + 1);
+    const padY = Math.min(2, Math.floor(height * 0.003) + 1);
+    const sYmin = clampNumber(Math.floor(((top - padY) / height) * 1000), 0, 992);
+    const sXmin = clampNumber(Math.floor(((left - padX) / width) * 1000), 0, 992);
+    const sYmax = clampNumber(Math.ceil(((bottom + 1 + padY) / height) * 1000), sYmin + 8, 1000);
+    const sXmax = clampNumber(Math.ceil(((right + 1 + padX) / width) * 1000), sXmin + 8, 1000);
+    return [sYmin, sXmin, sYmax, sXmax];
+  }
+
+  function detectImageTextBoxes(profile) {
+    if (!profile?.edge || !(profile.width >= 16) || !(profile.height >= 16)) {
+      return [];
+    }
+    const { edge, width, height } = profile;
+    const cellSize = clampNumber(Math.round(Math.max(width, height) / 240), 3, 6);
+    const gridW = Math.ceil(width / cellSize);
+    const gridH = Math.ceil(height / cellSize);
+    const gridSize = gridW * gridH;
+    const cellGx = new Uint8Array(gridSize);
+    const cellGy = new Uint8Array(gridSize);
+
+    for (let cy = 0; cy < gridH; cy += 1) {
+      const yStart = cy * cellSize;
+      const yEnd = Math.min(height, yStart + cellSize);
+      for (let cx = 0; cx < gridW; cx += 1) {
+        const xStart = cx * cellSize;
+        const xEnd = Math.min(width, xStart + cellSize);
+        let gx = 0;
+        let gy = 0;
+        for (let y = yStart; y < yEnd; y += 1) {
+          const row = y * width;
+          for (let x = xStart; x < xEnd; x += 1) {
+            const val = edge[row + x];
+            if (val & 1) gx += 1;
+            if (val & 2) gy += 1;
+          }
+        }
+        const idx = cy * gridW + cx;
+        cellGx[idx] = Math.min(255, gx);
+        cellGy[idx] = Math.min(255, gy);
+      }
+    }
+
+    const active = new Uint8Array(gridSize);
+    for (let cy = 0; cy < gridH; cy += 1) {
+      for (let cx = 0; cx < gridW; cx += 1) {
+        const idx = cy * gridW + cx;
+        if (cellGx[idx] + cellGy[idx] < 2) continue;
+        let sumGx = 0;
+        let sumGy = 0;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const ny = cy + dy;
+          if (ny < 0 || ny >= gridH) continue;
+          for (let dx = -1; dx <= 1; dx += 1) {
+            const nx = cx + dx;
+            if (nx < 0 || nx >= gridW) continue;
+            const nIdx = ny * gridW + nx;
+            sumGx += cellGx[nIdx];
+            sumGy += cellGy[nIdx];
+          }
+        }
+        if (sumGx >= 3 && sumGy >= 3 && sumGx * 8 >= sumGy && sumGy * 8 >= sumGx) {
+          active[idx] = 1;
+        }
+      }
+    }
+
+    const dilated = new Uint8Array(gridSize);
+    for (let cy = 0; cy < gridH; cy += 1) {
+      for (let cx = 0; cx < gridW; cx += 1) {
+        if (!active[cy * gridW + cx]) continue;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const ny = cy + dy;
+          if (ny < 0 || ny >= gridH) continue;
+          for (let dx = -2; dx <= 2; dx += 1) {
+            const nx = cx + dx;
+            if (nx >= 0 && nx < gridW) dilated[ny * gridW + nx] = 1;
+          }
+        }
+      }
+    }
+
+    const visited = new Uint8Array(gridSize);
+    const queue = new Int32Array(gridSize);
+    const rawItems = [];
+
+    for (let start = 0; start < gridSize; start += 1) {
+      if (!dilated[start] || visited[start]) continue;
+      let head = 0;
+      let tail = 0;
+      queue[tail++] = start;
+      visited[start] = 1;
+      let minCx = gridW;
+      let minCy = gridH;
+      let maxCx = 0;
+      let maxCy = 0;
+      let activeCount = 0;
+      let energy = 0;
+
+      while (head < tail) {
+        const cur = queue[head++];
+        const cy = Math.floor(cur / gridW);
+        const cx = cur - cy * gridW;
+        if (active[cur]) {
+          activeCount += 1;
+          energy += cellGx[cur] + cellGy[cur];
+          if (cx < minCx) minCx = cx;
+          if (cy < minCy) minCy = cy;
+          if (cx > maxCx) maxCx = cx;
+          if (cy > maxCy) maxCy = cy;
+        }
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const ny = cy + dy;
+          if (ny < 0 || ny >= gridH) continue;
+          for (let dx = -1; dx <= 1; dx += 1) {
+            const nx = cx + dx;
+            if (nx < 0 || nx >= gridW) continue;
+            const next = ny * gridW + nx;
+            if (dilated[next] && !visited[next]) {
+              visited[next] = 1;
+              queue[tail++] = next;
+            }
+          }
+        }
+      }
+
+      if (activeCount < 2 || energy < 8) continue;
+      const cellSpan = (maxCx - minCx + 1) * (maxCy - minCy + 1);
+      const rawBox = [
+        clampNumber(Math.floor(((minCy * cellSize) / height) * 1000), 0, 992),
+        clampNumber(Math.floor(((minCx * cellSize) / width) * 1000), 0, 992),
+        clampNumber(Math.ceil((((maxCy + 1) * cellSize) / height) * 1000), 8, 1000),
+        clampNumber(Math.ceil((((maxCx + 1) * cellSize) / width) * 1000), 8, 1000),
+      ];
+      const snapped = snapBoxToInk(rawBox, profile);
+      if (!snapped) continue;
+      const [ymin, xmin, ymax, xmax] = snapped;
+      const boxW = xmax - xmin;
+      const boxH = ymax - ymin;
+      if (boxW < 8 || boxH < 8) continue;
+      if ((boxW / 1000) * width < 7 || (boxH / 1000) * height < 7) continue;
+      if (boxW > 900 && boxH > 900 && activeCount / Math.max(1, cellSpan) < 0.08) continue;
+      rawItems.push({ box_2d: snapped, energy });
+    }
+
+    if (!rawItems.length) return [];
+
+    // Merge consecutive lines in the same paragraph or vertical columns in the same speech bubble.
+    const consumed = new Array(rawItems.length).fill(false);
+    const merged = [];
+    for (let i = 0; i < rawItems.length; i += 1) {
+      if (consumed[i]) continue;
+      const cur = { box_2d: [...rawItems[i].box_2d], energy: rawItems[i].energy };
+      consumed[i] = true;
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (let j = i + 1; j < rawItems.length; j += 1) {
+          if (consumed[j]) continue;
+          const next = rawItems[j];
+          const [ay0, ax0, ay1, ax1] = cur.box_2d;
+          const [by0, bx0, by1, bx1] = next.box_2d;
+          const aW = Math.max(1, ax1 - ax0);
+          const aH = Math.max(1, ay1 - ay0);
+          const bW = Math.max(1, bx1 - bx0);
+          const bH = Math.max(1, by1 - by0);
+          const vGap = Math.max(ay0, by0) - Math.min(ay1, by1);
+          const hGap = Math.max(ax0, bx0) - Math.min(ax1, bx1);
+          const overlapX = Math.min(ax1, bx1) - Math.max(ax0, bx0);
+          const overlapY = Math.min(ay1, by1) - Math.max(ay0, by0);
+
+          const isHorizontalPair =
+            vGap >= -6 &&
+            vGap <= Math.min(18, Math.min(aH, bH) * 0.55) &&
+            Math.max(aH, bH) <= 75 &&
+            Math.max(ay1, by1) - Math.min(ay0, by0) <= 260 &&
+            Math.abs(ax0 - bx0) <= 22 &&
+            overlapX / Math.max(aW, bW) >= 0.7;
+
+          const isVerticalPair =
+            aH >= aW * 1.4 &&
+            bH >= bW * 1.4 &&
+            Math.max(aW, bW) <= 85 &&
+            hGap >= -6 &&
+            hGap <= Math.min(22, Math.min(aW, bW) * 0.9) &&
+            Math.max(ax1, bx1) - Math.min(ax0, bx0) <= 260 &&
+            Math.abs(ay0 - by0) <= 35 &&
+            overlapY / Math.min(aH, bH) >= 0.6;
+
+          if (!isHorizontalPair && !isVerticalPair) continue;
+          const unionBox = [
+            Math.min(ay0, by0),
+            Math.min(ax0, bx0),
+            Math.max(ay1, by1),
+            Math.max(ax1, bx1),
+          ];
+          cur.box_2d = snapBoxToInk(unionBox, profile) || unionBox;
+          cur.energy += next.energy;
+          consumed[j] = true;
+          changed = true;
+        }
+      }
+      merged.push(cur);
+    }
+
+    const capped =
+      merged.length > 48
+        ? merged
+            .sort((a, b) => b.energy - a.energy)
+            .slice(0, 48)
+        : merged;
+
+    capped.sort((a, b) => {
+      const bandA = Math.floor(a.box_2d[0] / 35);
+      const bandB = Math.floor(b.box_2d[0] / 35);
+      return bandA !== bandB ? bandA - bandB : a.box_2d[1] - b.box_2d[1];
+    });
+
+    return capped.map((item, index) => ({
+      box_2d: item.box_2d,
+      id: index + 1,
+    }));
+  }
+
+  function drawCandidateBoxesOnCanvas(ctx, width, height, candidates) {
+    if (!ctx || !Array.isArray(candidates) || !candidates.length) return;
+    ctx.save?.();
+    const fontSize = clampNumber(Math.round(Math.min(width, height) / 64), 10, 14);
+    const badgeH = fontSize + 4;
+    ctx.font = `700 ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    for (const candidate of candidates) {
+      const [ymin, xmin, ymax, xmax] = candidate.box_2d;
+      const x = clampNumber(Math.round((xmin / 1000) * width) - 2, 0, width - 1);
+      const y = clampNumber(Math.round((ymin / 1000) * height) - 2, 0, height - 1);
+      const w = clampNumber(Math.round(((xmax - xmin) / 1000) * width) + 4, 2, width - x);
+      const h = clampNumber(Math.round(((ymax - ymin) / 1000) * height) + 4, 2, height - y);
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(225, 29, 72, 0.85)";
+      ctx.strokeRect?.(x, y, w, h);
+
+      const label = String(candidate.id);
+      const badgeW = Math.max(badgeH, Math.round(fontSize * (0.7 + label.length * 0.58)));
+      const bx = x >= badgeW + 2 ? x - badgeW - 1 : clampNumber(x, 0, Math.max(0, width - badgeW));
+      const by =
+        x >= badgeW + 2
+          ? clampNumber(y, 0, Math.max(0, height - badgeH))
+          : y >= badgeH + 2
+            ? y - badgeH - 1
+            : clampNumber(y, 0, Math.max(0, height - badgeH));
+      ctx.fillStyle = "rgba(225, 29, 72, 0.94)";
+      ctx.fillRect?.(bx, by, badgeW, badgeH);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1;
+      ctx.strokeRect?.(bx, by, badgeW, badgeH);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText?.(label, bx + badgeW / 2, by + badgeH / 2 + 0.5);
+    }
+    ctx.restore?.();
+  }
+
   function rasterizeDrawableToBase64(drawable, width, height) {
     try {
       const dims = normalizedImageDimensions(width, height);
@@ -2380,12 +2916,30 @@
       const ctx = canvas.getContext("2d");
       if (!ctx || typeof ctx.drawImage !== "function") return null;
       ctx.drawImage(drawable, 0, 0, dims.width, dims.height);
+      let profile = null;
+      let candidates = [];
+      if (typeof ctx.getImageData === "function") {
+        try {
+          const pixels = ctx.getImageData(0, 0, dims.width, dims.height);
+          profile = buildImageTextProfile(pixels);
+          if (profile) {
+            candidates = detectImageTextBoxes(profile);
+            if (candidates.length) {
+              drawCandidateBoxesOnCanvas(ctx, dims.width, dims.height, candidates);
+            }
+          }
+        } catch {
+          // Canvas pixel read may fail if tainted; proceed with raw rasterization.
+        }
+      }
       const dataUrl = canvas.toDataURL("image/png");
       const parsed = parseDataUrlImage(dataUrl);
       if (!parsed) return null;
       return {
         ...parsed,
+        candidates,
         height: dims.height,
+        profile,
         width: dims.width,
       };
     } catch {
@@ -2710,18 +3264,49 @@
 
     let renderedWidth = 0;
     let renderedHeight = 0;
+    let renderedLeft = 0;
+    let renderedTop = 0;
     const syncRegions = () => {
       if (!dialog.isConnected || !viewerImg.complete || !viewerImg.naturalWidth) return;
       const rect = viewerImg.getBoundingClientRect?.();
       const transformScale = Math.round(scale * 1000) / 1000;
-      const width = rect?.width / transformScale || 0;
-      const height = rect?.height / transformScale || 0;
-      if (!width || !height || (width === renderedWidth && height === renderedHeight)) return;
+      const rawWidth = rect?.width / transformScale || 0;
+      const rawHeight = rect?.height / transformScale || 0;
+      if (!rawWidth || !rawHeight) return;
+      const imageStyle = getComputedStyle(viewerImg);
+      const box = imageContentBox(
+        viewerImg.naturalWidth,
+        viewerImg.naturalHeight,
+        rawWidth,
+        rawHeight,
+        imageStyle?.objectFit || "contain",
+        imageStyle?.objectPosition || "50% 50%",
+      );
+      const width = box.width || rawWidth;
+      const height = box.height || rawHeight;
+      const left = Math.round((box.left || 0) * 100) / 100;
+      const top = Math.round((box.top || 0) * 100) / 100;
+      if (
+        width === renderedWidth &&
+        height === renderedHeight &&
+        left === renderedLeft &&
+        top === renderedTop
+      ) {
+        return;
+      }
       renderedWidth = width;
       renderedHeight = height;
+      renderedLeft = left;
+      renderedTop = top;
       svg?.remove();
       svg = buildSpotlightSvgElement(img, width, height, regions, state?.activeRegion || "");
-      if (svg) canvas.append(svg);
+      if (svg) {
+        svg.style?.setProperty?.("left", `${left}px`, "important");
+        svg.style?.setProperty?.("top", `${top}px`, "important");
+        svg.style?.setProperty?.("width", `${Math.round(width * 100) / 100}px`, "important");
+        svg.style?.setProperty?.("height", `${Math.round(height * 100) / 100}px`, "important");
+        canvas.append(svg);
+      }
       syncPinScale();
     };
     viewerImg.addEventListener?.("load", syncRegions);
@@ -3652,17 +4237,21 @@
         position: relative !important;
         display: inline-block !important;
         max-width: 96vw !important;
-        max-height: 66dvh !important;
+        max-height: 54dvh !important;
         transform-origin: center center !important;
       }
       .${IMAGE_VIEWER_IMG_CLASS} {
         display: block !important;
         max-width: 96vw !important;
-        max-height: 66dvh !important;
+        max-height: 54dvh !important;
         width: auto !important;
         height: auto !important;
         object-fit: contain !important;
         pointer-events: none !important;
+      }
+      .${IMAGE_VIEWER_CLASS}[data-expanded="true"] .${IMAGE_VIEWER_CANVAS_CLASS},
+      .${IMAGE_VIEWER_CLASS}[data-expanded="true"] .${IMAGE_VIEWER_IMG_CLASS} {
+        max-height: 30dvh !important;
       }
       .${IMAGE_REGIONS_CLASS} {
         position: absolute !important;
@@ -3790,9 +4379,11 @@
 
   if (globalThis.__TOUCH_IMAGE_TRANSLATE_TEST__) {
     Object.assign(globalThis.__TOUCH_IMAGE_TRANSLATE_TEST__, {
+      buildImageTextProfile,
       cancelImageJob,
       cleanSettings,
       configureSettings,
+      detectImageTextBoxes,
       generationConfigFor,
       loadCache,
       saveCache,
@@ -3828,6 +4419,7 @@
       resolveTargetImage,
       retryDelayFor,
       setActiveImageRegion,
+      snapBoxToInk,
       structuredOutputUnsupported,
       swipeIntent,
       swipeShouldCommit,
