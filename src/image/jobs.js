@@ -49,8 +49,9 @@
       }
 
       const src = String(img.currentSrc || img.src || "").trim();
+      const ocr = loadOcrSettings();
       const cache = loadCache();
-      const cacheKey = src ? hashImageCacheKey(src, settings) : "";
+      const cacheKey = src ? hashImageCacheKey(src, settings, ocr.provider) : "";
       const cached = cacheKey ? cache[cacheKey] : null;
       if (typeof cached?.translation === "string" && cached.translation) {
         state.job = null;
@@ -64,7 +65,18 @@
       syncImageOverlay(img);
       if (job.cancelled || state.job !== job) return null;
 
-      const request = requestImageTranslation(imageData, settings);
+      let ocrUnits = null;
+      if (ocr.provider !== "none") {
+        const ocrRequest = requestOcr(imageData, ocr);
+        job.abort = ocrRequest.abort;
+        ocrUnits = await ocrRequest.promise;
+        syncImageOverlay(img);
+        if (job.cancelled || state.job !== job) return null;
+      }
+
+      const request = ocrUnits && !ocrUnits.length
+        ? { promise: Promise.resolve({ hasText: false, regions: [], translation: "" }) }
+        : requestImageTranslation(imageData, settings, ocrUnits);
       job.abort = request.abort;
       const result = await request.promise;
       syncImageOverlay(img);

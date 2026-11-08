@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Image Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.2.2
+// @version      0.2.4
 // @description  Two-finger swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
 // @author       HAKU
 // @match        *://*/*
@@ -38,6 +38,8 @@
   const IMAGE_MAX_REGIONS = 99;
   const EXPECTED_FORMAT =
     '{"has_text":true,"regions":[{"box_2d":[ymin,xmin,ymax,xmax],"translation":"<translated text>"}]}';
+  const OCR_EXPECTED_FORMAT =
+    '{"has_text":true,"regions":[{"ids":[1,2],"translation":"<translated text>"}]}';
 
   const IMAGE_OVERLAY_CLASS = "touch-image-translate__overlay";
   const IMAGE_BUTTON_CLASS = "touch-image-translate__button";
@@ -1375,8 +1377,54 @@
 
   // Source: src/image/translation.js
 
-  function hashImageCacheKey(imageHash, settings) {
-    return translationCacheKey(imageHash, settings, "image-prompt-v10");
+  function hashImageCacheKey(imageHash, settings, ocrProvider = "none") {
+    const version = ocrProvider && ocrProvider !== "none"
+      ? `image-ocr-v1-${ocrProvider}`
+      : "image-prompt-v10";
+    return translationCacheKey(imageHash, settings, version);
+  }
+
+  function comparableText(value) {
+    return String(value || "").replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+  }
+
+  // OCR mode: boxes and source text come from OCR units; the model only groups ids and translates.
+  function parseOcrImageTranslation(content, units) {
+    const regions = readImageRegions(content, OCR_EXPECTED_FORMAT);
+    if (!regions) return { hasText: false, regions: [], translation: "" };
+    const byId = new Map(units.map((unit) => [unit.id, unit]));
+    const used = new Set();
+    const result = [];
+    for (const region of regions) {
+      const ids = (Array.isArray(region?.ids) ? region.ids : [])
+        .map(Number)
+        .filter((id) => byId.has(id) && !used.has(id));
+      const translation =
+        typeof region?.translation === "string" ? region.translation.trim() : "";
+      if (!ids.length || !translation) continue;
+      const matched = ids.map((id) => byId.get(id));
+      const source = matched.map((unit) => unit.text).join("\n");
+      // Identical output means the model echoed the source (names, logos, or a failed translation).
+      if (comparableText(source) === comparableText(translation)) continue;
+      ids.forEach((id) => used.add(id));
+      result.push({
+        box_2d: [
+          Math.min(...matched.map((unit) => unit.box_2d[0])),
+          Math.min(...matched.map((unit) => unit.box_2d[1])),
+          Math.max(...matched.map((unit) => unit.box_2d[2])),
+          Math.max(...matched.map((unit) => unit.box_2d[3])),
+        ],
+        source,
+        translation,
+      });
+    }
+    return {
+      hasText: result.length > 0,
+      regions: result,
+      translation: result
+        .map((region, index) => `[${index + 1}] ${region.translation}`)
+        .join("\n\n"),
+    };
   }
 
   function normalizeImageRegion(value) {
@@ -1484,45 +1532,32 @@
     return merged;
   }
 
-  function parseImageTranslation(content) {
+  // Returns the raw regions array, or null when the model reports no text.
+  function readImageRegions(content, expected) {
     const text = String(content || "")
       .trim()
       .replace(/^```(?:json)?\s*/i, "")
       .replace(/\s*```$/, "");
     if (!text) {
-      throw responseFormatError(
-        "The AI output was empty.",
-        text,
-        EXPECTED_FORMAT,
-      );
+      throw responseFormatError("The AI output was empty.", text, expected);
     }
     let parsed;
     try {
       parsed = JSON.parse(text);
     } catch (error) {
-      throw responseFormatError(
-        `JSON error: ${error.message}`,
-        text,
-        EXPECTED_FORMAT,
-      );
+      throw responseFormatError(`JSON error: ${error.message}`, text, expected);
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw responseFormatError(
-        "The response is not a JSON object.",
-        text,
-        EXPECTED_FORMAT,
-      );
+      throw responseFormatError("The response is not a JSON object.", text, expected);
     }
     if (typeof parsed.has_text !== "boolean") {
       throw responseFormatError(
         'The response is missing a boolean "has_text" field.',
         text,
-        EXPECTED_FORMAT,
+        expected,
       );
     }
-    if (!parsed.has_text) {
-      return { hasText: false, regions: [], translation: "" };
-    }
+    if (!parsed.has_text) return null;
     const rawRegions = parsed.regions;
     if (
       !Array.isArray(rawRegions) ||
@@ -1532,14 +1567,22 @@
       throw responseFormatError(
         'The response is missing a valid "regions" array.',
         text,
-        EXPECTED_FORMAT,
+        expected,
       );
+    }
+    return rawRegions;
+  }
+
+  function parseImageTranslation(content) {
+    const rawRegions = readImageRegions(content, EXPECTED_FORMAT);
+    if (!rawRegions) {
+      return { hasText: false, regions: [], translation: "" };
     }
     const normalizedRegions = rawRegions.map(normalizeImageRegion);
     if (normalizedRegions.some((region) => !region)) {
       throw responseFormatError(
         "One or more image regions are invalid.",
-        text,
+        JSON.stringify(rawRegions),
         EXPECTED_FORMAT,
       );
     }
@@ -1557,30 +1600,67 @@
     };
   }
 
-  function requestImageTranslation(imageData, settings) {
+  function requestImageTranslation(imageData, settings, ocrUnits = null) {
     const base64 = String(imageData?.base64 || "").trim();
     const mimeType = String(imageData?.mimeType || "image/jpeg").trim();
     if (!base64) {
       throw new Error("Image data is required for image translation.");
     }
+    const ocr = Array.isArray(ocrUnits) && ocrUnits.length > 0;
+    const contract = ocr
+      ? [
+          'OCR has already extracted the image text into numbered units, given in the user message as JSON. Use the image only as visual context for speakers, layout, and meaning; never predict coordinates.',
+          'Return one JSON object with "has_text" (boolean) and "regions" (array in reading order, at most 99 regions).',
+          'Each region must be {"ids":[...],"translation":"..."}: "ids" lists the OCR unit ids that form one speech bubble, paragraph, caption, or heading, and "translation" is the full translation of those units joined together.',
+          "Group units that belong to the same bubble or paragraph into one region. Keep different speakers, panels, and independent columns in separate regions. Use each id at most once.",
+          `Omit ids that are UI noise or already in ${settings.targetLanguage}. "translation" must always be written in ${settings.targetLanguage}; never copy the OCR text unchanged. Fix obvious OCR misreads using the image.`,
+          'When no meaningful translatable units remain, return {"has_text":false,"regions":[]}.',
+        ]
+      : [
+          'Return one JSON object with "has_text" (boolean) and "regions" (array of region objects in reading order, at most 99 regions).',
+          'When no meaningful translatable content remains after filtering UI and noise, return {"has_text":false,"regions":[]}.',
+          'When has_text is true, each item in "regions" must be {"box_2d":[ymin,xmin,ymax,xmax],"translation":"..."} where box_2d uses integer coordinates normalized from 0 to 1000.',
+          "Predict each region's box_2d tightly around the visible text glyphs only—exclude surrounding empty card or panel whitespace, borders, and non-text artwork.",
+          "Group consecutive lines or paragraphs that belong to the same post body, speech bubble, card, list block, or section into a single region (preserving line breaks with \\n) instead of splitting them into small fragments.",
+          "Use the image's reading order, including right-to-left manga columns when appropriate. Keep different speakers, panels, and independent columns in separate regions.",
+        ];
     const systemPrompt = [
       translationRulesFor(settings.targetLanguage),
       "Read the whole image first to understand the scene, speakers, references, and terminology before translating each region.",
       "Focus strictly on core content that a reader wants to understand: article or post body text, comic/manga dialogue and narration, captions, memes, and main presentation or chart explanations.",
       "Ignore and omit peripheral UI and non-content noise: OS or phone status bars (clock, battery, signal, carrier), browser or app navigation bars, tabs, menus, interactive buttons (e.g. Back, Follow, Reply, Repost, Like, Share, Subscribe, Search), on-screen keyboards, social media metadata (@handles, standalone timestamps, view/like/repost counts, standalone URLs), page numbers, watermarks, logos, and blurry background text.",
       `Also omit text that is already in ${settings.targetLanguage}, as well as standalone numbers, symbols, or code identifiers that do not need translation.`,
-      'Return one JSON object with "has_text" (boolean) and "regions" (array of region objects in reading order, at most 99 regions).',
-      'When no meaningful translatable content remains after filtering UI and noise, return {"has_text":false,"regions":[]}.',
-      'When has_text is true, each item in "regions" must be {"box_2d":[ymin,xmin,ymax,xmax],"translation":"..."} where box_2d uses integer coordinates normalized from 0 to 1000.',
-      "Predict each region's box_2d tightly around the visible text glyphs only—exclude surrounding empty card or panel whitespace, borders, and non-text artwork.",
-      "Group consecutive lines or paragraphs that belong to the same post body, speech bubble, card, list block, or section into a single region (preserving line breaks with \\n) instead of splitting them into small fragments.",
-      "Use the image's reading order, including right-to-left manga columns when appropriate. Keep different speakers, panels, and independent columns in separate regions.",
+      ...contract,
       "Keep negation, emphasis, and speaker tone. Do not invent illegible words; mark an unreadable fragment as [illegible] only when needed inside otherwise readable content.",
       "Do not include markdown, explanations, or keys beyond this contract.",
     ].join(" ");
-    const userPrompt = `Inspect the image, ignore UI chrome, status bars, metadata, watermarks, and text already in ${settings.targetLanguage}, translate only the meaningful reading content into ${settings.targetLanguage}, and return the JSON object.`;
+    const userPrompt = ocr
+      ? `OCR units:\n${JSON.stringify(ocrUnits.map(({ id, text }) => ({ id, text })))}\n\nGroup and translate the meaningful units into ${settings.targetLanguage}, and return the JSON object.`
+      : `Inspect the image, ignore UI chrome, status bars, metadata, watermarks, and text already in ${settings.targetLanguage}, translate only the meaningful reading content into ${settings.targetLanguage}, and return the JSON object.`;
+    const regionSchema = ocr
+      ? {
+          type: "object",
+          properties: {
+            ids: { type: "array", items: { type: "integer" } },
+            translation: { type: "string" },
+          },
+          required: ["ids", "translation"],
+          additionalProperties: false,
+        }
+      : {
+          type: "object",
+          properties: {
+            box_2d: {
+              type: "array",
+              items: { type: "integer" },
+            },
+            translation: { type: "string" },
+          },
+          required: ["box_2d", "translation"],
+          additionalProperties: false,
+        };
     return sendProviderRequest(settings, {
-      expectedFormat: EXPECTED_FORMAT,
+      expectedFormat: ocr ? OCR_EXPECTED_FORMAT : EXPECTED_FORMAT,
       allowGenericSchemaFallback: true,
       retryInvalidOutput: true,
       geminiParts: [
@@ -1593,31 +1673,22 @@
         },
       ],
       imageMimeType: mimeType,
-      parseResponse: parseImageTranslation,
+      parseResponse: ocr
+        ? (content) => parseOcrImageTranslation(content, ocrUnits)
+        : parseImageTranslation,
       schema: {
         type: "object",
         properties: {
           has_text: { type: "boolean" },
           regions: {
             type: "array",
-            items: {
-              type: "object",
-              properties: {
-                box_2d: {
-                  type: "array",
-                  items: { type: "integer" },
-                },
-                translation: { type: "string" },
-              },
-              required: ["box_2d", "translation"],
-              additionalProperties: false,
-            },
+            items: regionSchema,
           },
         },
         required: ["has_text", "regions"],
         additionalProperties: false,
       },
-      schemaName: "babel_lens_translation",
+      schemaName: ocr ? "babel_lens_ocr_translation" : "babel_lens_translation",
       systemPrompt,
       userContent: [
         { type: "text", text: userPrompt },
@@ -1629,6 +1700,269 @@
         },
       ],
     });
+  }
+
+  // Source: src/image/ocr.js
+
+  const OCR_SETTINGS_KEY = "ocr-settings-v1";
+  const OCR_PROVIDERS = ["none", "google", "azure"];
+  let ocrSettingsPrompt;
+
+  function cleanOcrSettings(input = {}, fallback = {}) {
+    const provider = String(input.provider ?? fallback.provider ?? "none");
+    if (!OCR_PROVIDERS.includes(provider)) {
+      throw new Error("OCR provider must be None, Google Cloud Vision, or Azure AI Vision.");
+    }
+    const value = {
+      provider,
+      apiKey: String(input.apiKey ?? fallback.apiKey ?? "").trim(),
+      endpoint: String(input.endpoint ?? fallback.endpoint ?? "").trim(),
+    };
+    if (provider === "none") return value;
+    if (!value.apiKey) throw new Error("Enter the OCR API key.");
+    if (provider === "azure") {
+      let url;
+      try {
+        url = new URL(value.endpoint);
+      } catch {
+        throw new Error("Enter the Azure endpoint, such as https://<name>.cognitiveservices.azure.com.");
+      }
+      if (url.protocol !== "https:") throw new Error("The Azure endpoint must use HTTPS.");
+      value.endpoint = url.origin;
+    }
+    return value;
+  }
+
+  function loadOcrSettings() {
+    try {
+      return cleanOcrSettings(GM_getValue(OCR_SETTINGS_KEY, {}));
+    } catch {
+      return { provider: "none", apiKey: "", endpoint: "" };
+    }
+  }
+
+  function configureOcrSettings() {
+    ocrSettingsPrompt ||= showOcrSettingsDialog().finally(() => {
+      ocrSettingsPrompt = null;
+    });
+    return ocrSettingsPrompt;
+  }
+
+  function showOcrSettingsDialog() {
+    const current = loadOcrSettings();
+    const dialog = document.createElement("dialog");
+    dialog.className = SETTINGS_DIALOG_CLASS;
+    dialog.dataset.touchTranslateUi = "";
+    dialog.setAttribute("aria-labelledby", `${SCRIPT_PREFIX}-ocr-title`);
+    const form = document.createElement("form");
+    const title = document.createElement("h2");
+    title.id = `${SCRIPT_PREFIX}-ocr-title`;
+    title.textContent = `${SCRIPT_NAME} OCR settings`;
+
+    const field = (labelText, name, type) => {
+      const label = document.createElement("label");
+      const input = document.createElement(type === "select" ? "select" : "input");
+      input.id = `${SCRIPT_PREFIX}-ocr-${name}`;
+      input.name = name;
+      if (type !== "select") input.type = type;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.setAttribute("autocapitalize", "none");
+      label.htmlFor = input.id;
+      label.textContent = labelText;
+      label.append(input);
+      return { input, label };
+    };
+    const provider = field("OCR provider", "provider", "select");
+    for (const [value, text] of [
+      ["none", "None (model predicts boxes)"],
+      ["google", "Google Cloud Vision"],
+      ["azure", "Azure AI Vision"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      provider.input.append(option);
+    }
+    provider.input.value = current.provider;
+    const endpoint = field("Azure endpoint", "endpoint", "url");
+    endpoint.input.value = current.endpoint;
+    endpoint.input.placeholder = "https://<name>.cognitiveservices.azure.com";
+    const apiKey = field("OCR API key", "apiKey", "password");
+    if (current.apiKey) apiKey.input.placeholder = "Leave blank to keep current key";
+    const syncFields = () => {
+      endpoint.label.hidden = provider.input.value !== "azure";
+      apiKey.label.hidden = provider.input.value === "none";
+    };
+    provider.input.addEventListener("change", syncFields);
+    syncFields();
+
+    const error = document.createElement("p");
+    error.dataset.error = "";
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    const actions = document.createElement("div");
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    const save = document.createElement("button");
+    save.type = "submit";
+    save.dataset.action = "save";
+    save.textContent = "Save";
+    actions.append(cancel, save);
+    form.append(title, provider.label, endpoint.label, apiKey.label, error, actions);
+    dialog.append(form);
+    (document.body || document.documentElement).append(dialog);
+
+    return new Promise((resolve) => {
+      let result = null;
+      const finish = () => {
+        dialog.remove();
+        resolve(result);
+      };
+      const closeDialog = () => {
+        if (typeof dialog.close === "function") dialog.close();
+        else finish();
+      };
+      cancel.addEventListener("click", closeDialog);
+      dialog.addEventListener("close", finish, { once: true });
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        try {
+          const sameProvider = provider.input.value === current.provider;
+          result = cleanOcrSettings({
+            provider: provider.input.value,
+            endpoint: endpoint.input.value,
+            // A stored key belongs to its provider; switching providers needs a new key.
+            apiKey: apiKey.input.value || (sameProvider ? current.apiKey : ""),
+          });
+          GM_setValue(OCR_SETTINGS_KEY, result);
+          closeDialog();
+          toast("OCR settings saved");
+        } catch (settingsError) {
+          error.textContent = errorMessageFor(settingsError);
+          error.hidden = false;
+        }
+      });
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+      provider.input.focus();
+    });
+  }
+
+  function polygonToBox(points, width, height) {
+    const xs = points.map((point) => Number(point?.x) || 0);
+    const ys = points.map((point) => Number(point?.y) || 0);
+    const scale = (value, size) => clampNumber(Math.round((value / size) * 1000), 0, 1000);
+    const box = [
+      scale(Math.min(...ys), height),
+      scale(Math.min(...xs), width),
+      scale(Math.max(...ys), height),
+      scale(Math.max(...xs), width),
+    ];
+    return box[0] < box[2] && box[1] < box[3] ? box : null;
+  }
+
+  // Google returns paragraphs; Azure returns lines. Both become numbered units with 0-1000 boxes.
+  function parseOcrResponse(provider, body, fallbackSize = {}) {
+    const units = [];
+    const push = (text, points, width, height) => {
+      const clean = String(text || "").trim();
+      if (!clean || !Array.isArray(points) || !points.length || !(width > 0) || !(height > 0)) return;
+      const box = polygonToBox(points, width, height);
+      if (box) units.push({ id: units.length + 1, text: clean, box_2d: box });
+    };
+    if (provider === "google") {
+      const response = body?.responses?.[0];
+      if (response?.error?.message) throw new Error(`Google Cloud Vision error: ${response.error.message}`);
+      const breaks = { SPACE: " ", SURE_SPACE: " ", EOL_SURE_SPACE: "\n", LINE_BREAK: "\n" };
+      for (const page of response?.fullTextAnnotation?.pages || []) {
+        const width = Number(page.width) || fallbackSize.width;
+        const height = Number(page.height) || fallbackSize.height;
+        for (const block of page.blocks || []) {
+          for (const paragraph of block.paragraphs || []) {
+            const text = (paragraph.words || [])
+              .flatMap((word) => word.symbols || [])
+              .map((symbol) => `${symbol.text || ""}${breaks[symbol.property?.detectedBreak?.type] || ""}`)
+              .join("");
+            push(text, paragraph.boundingBox?.vertices, width, height);
+          }
+        }
+      }
+    } else if (provider === "azure") {
+      if (body?.error?.message) throw new Error(`Azure AI Vision error: ${body.error.message}`);
+      const width = Number(body?.metadata?.width) || fallbackSize.width;
+      const height = Number(body?.metadata?.height) || fallbackSize.height;
+      for (const block of body?.readResult?.blocks || []) {
+        for (const line of block.lines || []) push(line.text, line.boundingPolygon, width, height);
+      }
+    }
+    return units;
+  }
+
+  function requestOcr(imageData, ocr) {
+    const base64 = String(imageData?.base64 || "");
+    let options;
+    if (ocr.provider === "google") {
+      options = {
+        url: "https://vision.googleapis.com/v1/images:annotate",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": ocr.apiKey },
+        data: JSON.stringify({
+          requests: [{ image: { content: base64 }, features: [{ type: "DOCUMENT_TEXT_DETECTION" }] }],
+        }),
+      };
+    } else if (ocr.provider === "azure") {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      options = {
+        url: `${ocr.endpoint}/computervision/imageanalysis:analyze?api-version=2024-02-01&features=read`,
+        headers: { "Content-Type": "application/octet-stream", "Ocp-Apim-Subscription-Key": ocr.apiKey },
+        data: typeof Blob === "function" ? new Blob([bytes], { type: "application/octet-stream" }) : bytes.buffer,
+      };
+    } else {
+      throw new Error("No OCR provider is configured.");
+    }
+    let request;
+    let rejectPromise;
+    const promise = new Promise((resolve, reject) => {
+      rejectPromise = reject;
+      const fail = (message) => reject(new Error(redactProviderDiagnostic(message, ocr.apiKey)));
+      request = GM_xmlhttpRequest({
+        method: "POST",
+        anonymous: true,
+        timeout: REQUEST_TIMEOUT_MS,
+        ...options,
+        onload(response) {
+          let body;
+          try {
+            body = JSON.parse(response.responseText || "{}");
+          } catch {
+            body = null;
+          }
+          const status = Number(response.status) || 0;
+          if (status < 200 || status >= 300) {
+            fail(`OCR request failed (HTTP ${status}).\n${extractErrorMessage(response.responseText)}`);
+            return;
+          }
+          try {
+            resolve(parseOcrResponse(ocr.provider, body, imageData));
+          } catch (error) {
+            fail(errorMessageFor(error));
+          }
+        },
+        onerror: () => fail("Could not connect to the OCR API."),
+        ontimeout: () => fail("The OCR API timed out."),
+        onabort: () => reject(cancelledError()),
+      });
+    });
+    return {
+      promise,
+      abort() {
+        rejectPromise?.(cancelledError());
+        try { request?.abort?.(); } catch { /* Already settled. */ }
+      },
+    };
   }
 
   // Source: src/image/content.js
@@ -3002,8 +3336,9 @@
       }
 
       const src = String(img.currentSrc || img.src || "").trim();
+      const ocr = loadOcrSettings();
       const cache = loadCache();
-      const cacheKey = src ? hashImageCacheKey(src, settings) : "";
+      const cacheKey = src ? hashImageCacheKey(src, settings, ocr.provider) : "";
       const cached = cacheKey ? cache[cacheKey] : null;
       if (typeof cached?.translation === "string" && cached.translation) {
         state.job = null;
@@ -3017,7 +3352,18 @@
       syncImageOverlay(img);
       if (job.cancelled || state.job !== job) return null;
 
-      const request = requestImageTranslation(imageData, settings);
+      let ocrUnits = null;
+      if (ocr.provider !== "none") {
+        const ocrRequest = requestOcr(imageData, ocr);
+        job.abort = ocrRequest.abort;
+        ocrUnits = await ocrRequest.promise;
+        syncImageOverlay(img);
+        if (job.cancelled || state.job !== job) return null;
+      }
+
+      const request = ocrUnits && !ocrUnits.length
+        ? { promise: Promise.resolve({ hasText: false, regions: [], translation: "" }) }
+        : requestImageTranslation(imageData, settings, ocrUnits);
       job.abort = request.abort;
       const result = await request.promise;
       syncImageOverlay(img);
@@ -3793,6 +4139,8 @@
       cancelImageJob,
       cleanSettings,
       configureSettings,
+      configureOcrSettings,
+      cleanOcrSettings,
       generationConfigFor,
       loadCache,
       saveCache,
@@ -3819,6 +4167,9 @@
       onTouchStart,
       openImageViewer,
       parseImageTranslation,
+      parseOcrImageTranslation,
+      parseOcrResponse,
+      requestOcr,
       parseImportedSettings,
       pointFor,
       projectedSwipeX,
@@ -3845,4 +4196,5 @@
   initImageTranslation();
 
   registerCommonMenus();
+  GM_registerMenuCommand(`${SCRIPT_NAME}: Configure OCR`, configureOcrSettings);
 })();

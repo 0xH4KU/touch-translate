@@ -13,6 +13,7 @@ export async function buildUserscript(kind) {
     ...shared.filter((name) => kind !== "youtube" || name !== "gestures").map((name) => `shared/${name}`),
     ...(kind === "youtube" ? [`${kind}/bridge`] : []),
     `${kind}/translation`,
+    ...(kind === "image" ? [`${kind}/ocr`] : []),
     `${kind}/content`,
     ...(kind === "image" ? [`${kind}/viewer`] : []),
     `${kind}/jobs`,

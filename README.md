@@ -31,6 +31,15 @@ YouTube comment text is recognized on both desktop and mobile pages, including m
 
 Region pins keep a readable size and a 44px touch area while zooming, and follow the displayed image when the screen rotates.
 
+### Optional OCR for precise boxes
+
+By default the vision model predicts each region's box, which can drift. For exact boxes, open the Tampermonkey **Configure OCR** menu and pick a provider:
+
+- **Google Cloud Vision**: an API key with the Cloud Vision API enabled. Uses `DOCUMENT_TEXT_DETECTION` and returns paragraphs.
+- **Azure AI Vision**: your resource endpoint (`https://<name>.cognitiveservices.azure.com`) and key. Uses Image Analysis 4.0 `read` and returns lines.
+
+With OCR on, the image goes to the OCR API first. OCR supplies the boxes and source text, and the translation model only groups OCR unit ids and translates them, using the image as context. It never predicts coordinates. Results whose translation equals the OCR text are dropped. OCR settings are stored separately from the API settings and are not included in settings export.
+
 When multiple images are loading, only the most recent image action can open the viewer automatically. Other completed results remain available from their image badges. Gestures inside either plugin's controls are excluded from page translation gestures.
 
 ## YouTube Subtitles (`touch-youtube-translate.user.js`)

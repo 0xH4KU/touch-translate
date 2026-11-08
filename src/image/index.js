@@ -13,6 +13,8 @@
       cancelImageJob,
       cleanSettings,
       configureSettings,
+      configureOcrSettings,
+      cleanOcrSettings,
       generationConfigFor,
       loadCache,
       saveCache,
@@ -39,6 +41,9 @@
       onTouchStart,
       openImageViewer,
       parseImageTranslation,
+      parseOcrImageTranslation,
+      parseOcrResponse,
+      requestOcr,
       parseImportedSettings,
       pointFor,
       projectedSwipeX,
@@ -65,3 +70,4 @@
   initImageTranslation();
 
   registerCommonMenus();
+  GM_registerMenuCommand(`${SCRIPT_NAME}: Configure OCR`, configureOcrSettings);

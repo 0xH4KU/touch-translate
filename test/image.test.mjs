@@ -201,6 +201,98 @@ assert.equal(noTextImage.hasText, false);
 assert.equal(noTextImage.translation, "");
 assert.equal(noTextImage.regions.length, 0);
 
+// OCR settings validation
+assert.equal(imageApi.cleanOcrSettings({}).provider, "none");
+assert.throws(() => imageApi.cleanOcrSettings({ provider: "google" }), /API key/);
+assert.throws(() => imageApi.cleanOcrSettings({ provider: "azure", apiKey: "k" }), /Azure endpoint/);
+assert.throws(
+  () => imageApi.cleanOcrSettings({ provider: "azure", apiKey: "k", endpoint: "http://x.azure.com" }),
+  /HTTPS/,
+);
+assert.equal(
+  imageApi.cleanOcrSettings({ provider: "azure", apiKey: "k", endpoint: "https://x.cognitiveservices.azure.com/path/" }).endpoint,
+  "https://x.cognitiveservices.azure.com",
+);
+assert.throws(() => imageApi.cleanOcrSettings({ provider: "tesseract", apiKey: "k" }), /OCR provider/);
+
+// OCR responses become numbered units with 0-1000 boxes
+const googleUnits = imageApi.parseOcrResponse("google", {
+  responses: [{
+    fullTextAnnotation: {
+      pages: [{
+        width: 400,
+        height: 200,
+        blocks: [{
+          paragraphs: [
+            {
+              boundingBox: { vertices: [{ x: 40, y: 20 }, { x: 200, y: 20 }, { x: 200, y: 60 }, { y: 60 }] },
+              words: [
+                { symbols: [{ text: "H" }, { text: "i", property: { detectedBreak: { type: "SPACE" } } }] },
+                { symbols: [{ text: "there", property: { detectedBreak: { type: "LINE_BREAK" } } }] },
+              ],
+            },
+            {
+              boundingBox: { vertices: [{ x: 40, y: 100 }, { x: 360, y: 100 }, { x: 360, y: 140 }, { x: 40, y: 140 }] },
+              words: [{ symbols: [{ text: "Bye" }] }],
+            },
+          ],
+        }],
+      }],
+    },
+  }],
+});
+assert.equal(googleUnits.length, 2);
+assert.deepEqual({ ...googleUnits[0], box_2d: [...googleUnits[0].box_2d] }, { id: 1, text: "Hi there", box_2d: [100, 0, 300, 500] });
+assert.deepEqual([...googleUnits[1].box_2d], [500, 100, 700, 900]);
+assert.throws(
+  () => imageApi.parseOcrResponse("google", { responses: [{ error: { message: "API key not valid" } }] }),
+  /API key not valid/,
+);
+assert.equal(imageApi.parseOcrResponse("google", { responses: [{}] }).length, 0);
+
+const azureUnits = imageApi.parseOcrResponse("azure", {
+  metadata: { width: 1000, height: 500 },
+  readResult: {
+    blocks: [{
+      lines: [
+        { text: "おはよう", boundingPolygon: [{ x: 100, y: 50 }, { x: 300, y: 50 }, { x: 300, y: 100 }, { x: 100, y: 100 }] },
+        { text: "ございます", boundingPolygon: [{ x: 100, y: 110 }, { x: 320, y: 110 }, { x: 320, y: 160 }, { x: 100, y: 160 }] },
+        { text: "SONY", boundingPolygon: [{ x: 800, y: 400 }, { x: 900, y: 400 }, { x: 900, y: 450 }, { x: 800, y: 450 }] },
+      ],
+    }],
+  },
+});
+assert.equal(azureUnits.length, 3);
+assert.deepEqual([...azureUnits[0].box_2d], [100, 100, 200, 300]);
+
+// The model only groups ids and translates; boxes are the union of OCR boxes and echoes are dropped
+const ocrResult = imageApi.parseOcrImageTranslation(
+  JSON.stringify({
+    has_text: true,
+    regions: [
+      { ids: [1, 2], translation: "早安" },
+      { ids: [3], translation: "SONY" },
+      { ids: [99], translation: "幻覺編號" },
+      { ids: [1], translation: "重複使用的編號" },
+    ],
+  }),
+  azureUnits,
+);
+assert.equal(ocrResult.hasText, true);
+assert.equal(ocrResult.regions.length, 1);
+assert.deepEqual([...ocrResult.regions[0].box_2d], [100, 100, 320, 320]);
+assert.equal(ocrResult.regions[0].source, "おはよう\nございます");
+assert.equal(ocrResult.translation, "[1] 早安");
+assert.equal(
+  imageApi.parseOcrImageTranslation('{"has_text":false,"regions":[]}', azureUnits).hasText,
+  false,
+);
+assert.throws(() => imageApi.parseOcrImageTranslation("nope", azureUnits), /Response format mismatch/);
+assert.equal(
+  imageApi.hashImageCacheKey("src", cacheSettings) === imageApi.hashImageCacheKey("src", cacheSettings, "google"),
+  false,
+);
+
 assert.throws(() => imageApi.parseImageTranslation(""), /The AI output was empty/);
 assert.throws(() => imageApi.parseImageTranslation("not json"), /Response format mismatch/);
 
@@ -360,6 +452,46 @@ for (const native of [false, true]) {
   assert.equal(res.regions[0].translation, "圖片翻譯測試");
   assert.deepEqual([...res.regions[0].box_2d], shortLineBox);
 }
+
+// OCR request transport: Google sends JSON with the key in a header; Azure sends binary.
+context.atob = (b64) => Buffer.from(b64, "base64").toString("binary");
+const googleOcr = imageApi.requestOcr(sampleImageData, { provider: "google", apiKey: "g-key" });
+assert.equal(transport.options.url, "https://vision.googleapis.com/v1/images:annotate");
+assert.equal(transport.options.headers["x-goog-api-key"], "g-key");
+assert.equal(JSON.parse(transport.options.data).requests[0].image.content, "aGVsbG8=");
+transport.options.onload({ status: 403, responseText: JSON.stringify({ error: { message: "Denied for g-key" } }) });
+await assert.rejects(googleOcr.promise, (error) => {
+  assert.match(error.message, /HTTP 403/);
+  assert.doesNotMatch(error.message, /g-key/);
+  return true;
+});
+const azureOcr = imageApi.requestOcr(
+  { ...sampleImageData, width: 10, height: 10 },
+  { provider: "azure", apiKey: "a-key", endpoint: "https://x.cognitiveservices.azure.com" },
+);
+assert.equal(
+  transport.options.url,
+  "https://x.cognitiveservices.azure.com/computervision/imageanalysis:analyze?api-version=2024-02-01&features=read",
+);
+assert.equal(transport.options.headers["Ocp-Apim-Subscription-Key"], "a-key");
+assert.equal(transport.options.headers["Content-Type"], "application/octet-stream");
+transport.options.onload({
+  status: 200,
+  responseText: JSON.stringify({ readResult: { blocks: [{ lines: [{ text: "Hi", boundingPolygon: [{ x: 1, y: 1 }, { x: 5, y: 1 }, { x: 5, y: 5 }, { x: 1, y: 5 }] }] }] } }),
+});
+assert.deepEqual([...(await azureOcr.promise)[0].box_2d], [100, 100, 500, 500]);
+
+// OCR-mode translation request sends units and an ids-only schema
+const ocrTranslation = imageApi.requestImageTranslation(sampleImageData, { ...cacheSettings, apiKey: "test" }, azureUnits);
+const ocrBody = JSON.parse(transport.options.data);
+assert.deepEqual(ocrBody.response_format.json_schema.schema.properties.regions.items.required, ["ids", "translation"]);
+assert.match(ocrBody.messages[1].content[0].text, /おはよう/);
+assert.doesNotMatch(ocrBody.messages[1].content[0].text, /box_2d/);
+transport.options.onload({
+  status: 200,
+  responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ has_text: true, regions: [{ ids: [1, 2], translation: "早安" }] }) } }] }),
+});
+assert.equal((await ocrTranslation.promise).regions[0].translation, "早安");
 
 // Gemini can reject an image schema with only a generic INVALID_ARGUMENT error.
 const visionSettings = {

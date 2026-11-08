@@ -50,7 +50,7 @@ export async function runBrowserChecks(textSource, imageSource, youtubeSource) {
   };
 
   await check("All three complete userscripts initialize with separate storage", async () => {
-    assert(menus.length === 17, "All scripts must register their menus");
+    assert(menus.length === 18, "All scripts must register their menus");
     assert(document.querySelectorAll("style[data-touch-translate], style[data-touch-image-translate], style[data-touch-youtube-translate]").length === 3, "All stylesheets must load");
     assert(!document.querySelector(".touch-image-translate__overlay"), "Idle images should not create overlays");
   });
