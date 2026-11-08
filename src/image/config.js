@@ -13,7 +13,7 @@
   const IMAGE_MAX_PIXELS = 4096 * 4096;
   const IMAGE_MAX_REGIONS = 99;
   const EXPECTED_FORMAT =
-    '{"has_text":true,"regions":[{"ids":[1],"source":"<original text>","box_2d":[ymin,xmin,ymax,xmax],"translation":"<translated text>"}]}';
+    '{"has_text":true,"regions":[{"box_2d":[ymin,xmin,ymax,xmax],"translation":"<translated text>"}]}';
 
   const IMAGE_OVERLAY_CLASS = "touch-image-translate__overlay";
   const IMAGE_BUTTON_CLASS = "touch-image-translate__button";

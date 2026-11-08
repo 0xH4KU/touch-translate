@@ -10,11 +10,9 @@
 
   if (globalThis.__TOUCH_IMAGE_TRANSLATE_TEST__) {
     Object.assign(globalThis.__TOUCH_IMAGE_TRANSLATE_TEST__, {
-      buildImageTextProfile,
       cancelImageJob,
       cleanSettings,
       configureSettings,
-      detectImageTextBoxes,
       generationConfigFor,
       loadCache,
       saveCache,
@@ -50,7 +48,6 @@
       resolveTargetImage,
       retryDelayFor,
       setActiveImageRegion,
-      snapBoxToInk,
       structuredOutputUnsupported,
       swipeIntent,
       swipeShouldCommit,

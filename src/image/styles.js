@@ -209,21 +209,17 @@
         position: relative !important;
         display: inline-block !important;
         max-width: 96vw !important;
-        max-height: 54dvh !important;
+        max-height: 66dvh !important;
         transform-origin: center center !important;
       }
       .${IMAGE_VIEWER_IMG_CLASS} {
         display: block !important;
         max-width: 96vw !important;
-        max-height: 54dvh !important;
+        max-height: 66dvh !important;
         width: auto !important;
         height: auto !important;
         object-fit: contain !important;
         pointer-events: none !important;
-      }
-      .${IMAGE_VIEWER_CLASS}[data-expanded="true"] .${IMAGE_VIEWER_CANVAS_CLASS},
-      .${IMAGE_VIEWER_CLASS}[data-expanded="true"] .${IMAGE_VIEWER_IMG_CLASS} {
-        max-height: 30dvh !important;
       }
       .${IMAGE_REGIONS_CLASS} {
         position: absolute !important;

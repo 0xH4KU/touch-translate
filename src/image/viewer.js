@@ -187,49 +187,18 @@
 
     let renderedWidth = 0;
     let renderedHeight = 0;
-    let renderedLeft = 0;
-    let renderedTop = 0;
     const syncRegions = () => {
       if (!dialog.isConnected || !viewerImg.complete || !viewerImg.naturalWidth) return;
       const rect = viewerImg.getBoundingClientRect?.();
       const transformScale = Math.round(scale * 1000) / 1000;
-      const rawWidth = rect?.width / transformScale || 0;
-      const rawHeight = rect?.height / transformScale || 0;
-      if (!rawWidth || !rawHeight) return;
-      const imageStyle = getComputedStyle(viewerImg);
-      const box = imageContentBox(
-        viewerImg.naturalWidth,
-        viewerImg.naturalHeight,
-        rawWidth,
-        rawHeight,
-        imageStyle?.objectFit || "contain",
-        imageStyle?.objectPosition || "50% 50%",
-      );
-      const width = box.width || rawWidth;
-      const height = box.height || rawHeight;
-      const left = Math.round((box.left || 0) * 100) / 100;
-      const top = Math.round((box.top || 0) * 100) / 100;
-      if (
-        width === renderedWidth &&
-        height === renderedHeight &&
-        left === renderedLeft &&
-        top === renderedTop
-      ) {
-        return;
-      }
+      const width = rect?.width / transformScale || 0;
+      const height = rect?.height / transformScale || 0;
+      if (!width || !height || (width === renderedWidth && height === renderedHeight)) return;
       renderedWidth = width;
       renderedHeight = height;
-      renderedLeft = left;
-      renderedTop = top;
       svg?.remove();
       svg = buildSpotlightSvgElement(img, width, height, regions, state?.activeRegion || "");
-      if (svg) {
-        svg.style?.setProperty?.("left", `${left}px`, "important");
-        svg.style?.setProperty?.("top", `${top}px`, "important");
-        svg.style?.setProperty?.("width", `${Math.round(width * 100) / 100}px`, "important");
-        svg.style?.setProperty?.("height", `${Math.round(height * 100) / 100}px`, "important");
-        canvas.append(svg);
-      }
+      if (svg) canvas.append(svg);
       syncPinScale();
     };
     viewerImg.addEventListener?.("load", syncRegions);

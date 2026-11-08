@@ -201,122 +201,6 @@ assert.equal(noTextImage.hasText, false);
 assert.equal(noTextImage.translation, "");
 assert.equal(noTextImage.regions.length, 0);
 
-// Set-of-Mark candidate box resolution, pixel snap-to-ink, and untranslated source rejection
-const syntheticW = 200;
-const syntheticH = 100;
-const syntheticRgba = new Uint8ClampedArray(syntheticW * syntheticH * 4).fill(255);
-// Draw a simulated glyph block in pixel range x: 40..120 (200..600), y: 20..36 (200..360) with checkerboard stroke contrast
-for (let y = 20; y < 36; y += 1) {
-  for (let x = 40; x < 120; x += 1) {
-    if ((x + y) % 2 === 0) {
-      const p = (y * syntheticW + x) * 4;
-      syntheticRgba[p] = 0;
-      syntheticRgba[p + 1] = 0;
-      syntheticRgba[p + 2] = 0;
-    }
-  }
-}
-const textProfile = imageApi.buildImageTextProfile({
-  data: syntheticRgba,
-  width: syntheticW,
-  height: syntheticH,
-});
-assert.ok(textProfile);
-const snappedTight = imageApi.snapBoxToInk([100, 100, 600, 800], textProfile);
-assert.ok(snappedTight[0] >= 170 && snappedTight[0] <= 210);
-assert.ok(snappedTight[1] >= 180 && snappedTight[1] <= 210);
-assert.ok(snappedTight[2] >= 350 && snappedTight[2] <= 400);
-assert.ok(snappedTight[3] >= 590 && snappedTight[3] <= 630);
-
-const detectedCandidates = imageApi.detectImageTextBoxes(textProfile);
-assert.equal(detectedCandidates.length, 1);
-assert.equal(detectedCandidates[0].id, 1);
-assert.deepEqual([...detectedCandidates[0].box_2d], [...snappedTight]);
-
-// Model returns inaccurate box_2d, but Set-of-Mark candidate id=1 overrides it with exact pixel box
-const somResolved = imageApi.parseImageTranslation(
-  JSON.stringify({
-    has_text: true,
-    regions: [
-      {
-        ids: [1],
-        source: "Hello World",
-        box_2d: [50, 50, 750, 900],
-        translation: "你好世界",
-      },
-    ],
-  }),
-  {
-    candidates: detectedCandidates,
-    profile: textProfile,
-    targetLanguage: "zh-TW",
-  },
-);
-assert.equal(somResolved.regions.length, 1);
-assert.deepEqual([...somResolved.regions[0].box_2d], [...detectedCandidates[0].box_2d]);
-assert.equal(somResolved.regions[0].translation, "你好世界");
-
-// Untranslated source text (source === translation or untranslated Kana for zh-TW) is rejected
-assert.throws(
-  () =>
-    imageApi.parseImageTranslation(
-      JSON.stringify({
-        has_text: true,
-        regions: [
-          {
-            ids: [1],
-            source: "Hello World",
-            box_2d: [200, 200, 360, 600],
-            translation: "Hello World",
-          },
-        ],
-      }),
-      { targetLanguage: "zh-TW" },
-    ),
-  /untranslated source text/i,
-);
-assert.throws(
-  () =>
-    imageApi.parseImageTranslation(
-      JSON.stringify({
-        has_text: true,
-        regions: [
-          {
-            ids: [1],
-            source: "今日はいい天気ですね",
-            box_2d: [200, 200, 360, 600],
-            translation: "今日はいい天気ですね",
-          },
-        ],
-      }),
-      { targetLanguage: "zh-TW" },
-    ),
-  /untranslated source text/i,
-);
-// When one region is translated and another is untranslated noise, only the translated region is kept
-const partialUntranslated = imageApi.parseImageTranslation(
-  JSON.stringify({
-    has_text: true,
-    regions: [
-      {
-        ids: [1],
-        source: "Breaking News",
-        box_2d: [100, 100, 200, 500],
-        translation: "突發新聞",
-      },
-      {
-        ids: [2],
-        source: "SONY",
-        box_2d: [800, 800, 850, 920],
-        translation: "SONY",
-      },
-    ],
-  }),
-  { targetLanguage: "zh-TW" },
-);
-assert.equal(partialUntranslated.regions.length, 1);
-assert.equal(partialUntranslated.regions[0].translation, "突發新聞");
-
 assert.throws(() => imageApi.parseImageTranslation(""), /The AI output was empty/);
 assert.throws(() => imageApi.parseImageTranslation("not json"), /Response format mismatch/);
 
@@ -439,7 +323,7 @@ for (const native of [false, true]) {
     );
     assert.deepEqual(
       sentBody.generationConfig.responseJsonSchema.properties.regions.items.required,
-      ["ids", "source", "box_2d", "translation"],
+      ["box_2d", "translation"],
     );
     assert.equal(sentBody.contents[0].parts[1].inlineData.mimeType, "image/jpeg");
     assert.equal(sentBody.contents[0].parts[1].inlineData.data, "aGVsbG8=");
@@ -451,7 +335,7 @@ for (const native of [false, true]) {
     );
     assert.deepEqual(
       sentBody.response_format.json_schema.schema.properties.regions.items.required,
-      ["ids", "source", "box_2d", "translation"],
+      ["box_2d", "translation"],
     );
     assert.equal(
       sentBody.messages[1].content[1].image_url.url,
