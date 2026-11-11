@@ -169,12 +169,17 @@
         backdrop-filter: blur(12px) !important;
       }
       .${IMAGE_VIEWER_BAR_CLASS} > [data-viewer-counter] {
+        min-width: 0 !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
         font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, sans-serif !important;
         color: rgba(255, 255, 255, 0.88) !important;
       }
       .${IMAGE_VIEWER_BAR_CLASS} > div {
         display: flex !important;
         align-items: center !important;
+        flex-shrink: 0 !important;
         gap: 6px !important;
       }
       .${IMAGE_VIEWER_BAR_CLASS} button,
@@ -188,8 +193,27 @@
         background: rgba(255, 255, 255, 0.1) !important;
         color: #f5f5f7 !important;
         font: 600 12px/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        white-space: nowrap !important;
         cursor: pointer !important;
         touch-action: manipulation !important;
+      }
+      .${IMAGE_VIEWER_BAR_CLASS} button[data-action="clear"] {
+        color: rgba(255, 180, 171, 0.95) !important;
+      }
+      .${IMAGE_VIEWER_BAR_CLASS} button[data-action="close"] {
+        background: rgba(255, 255, 255, 0.22) !important;
+        border-color: rgba(255, 255, 255, 0.34) !important;
+      }
+      @media (max-width: 400px) {
+        .${IMAGE_VIEWER_BAR_CLASS} {
+          padding-inline: 10px !important;
+        }
+        .${IMAGE_VIEWER_BAR_CLASS} > div {
+          gap: 4px !important;
+        }
+        .${IMAGE_VIEWER_BAR_CLASS} button {
+          padding: 0 8px !important;
+        }
       }
       .${IMAGE_VIEWER_BAR_CLASS} button[hidden],
       .${IMAGE_VIEWER_SHEET_CLASS} [hidden] {

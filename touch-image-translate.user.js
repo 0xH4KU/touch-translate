@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Image Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.2.5
+// @version      0.2.6
 // @description  Two-finger swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
 // @author       HAKU
 // @match        *://*/*
@@ -2048,7 +2048,8 @@
     );
     const labelHeight = 28;
     const roundCoord = (value) => Math.round(value * 100) / 100;
-    return regions.map((region, index) => {
+    const items = [];
+    regions.forEach((region, index) => {
       const label = String(index + 1);
       const [ymin, xmin, ymax, xmax] = region.box_2d;
       const x = clampNumber(roundCoord((xmin / 1000) * width), 0, width - 1);
@@ -2068,22 +2069,44 @@
         Math.round(labelHeight * (0.72 + label.length * 0.42)),
       );
       const hasLeftSpace = x >= labelWidth + 3;
-      const labelX = clampNumber(
+      let labelX = clampNumber(
         roundCoord(hasLeftSpace ? x - labelWidth : x),
         1,
         Math.max(1, width - labelWidth - 1),
       );
-      const labelY = roundCoord(
+      let labelY = roundCoord(
         hasLeftSpace
           ? y
           : y >= labelHeight + 3
             ? y - labelHeight
             : y,
       );
+      const maxLabelY = Math.max(1, height - labelHeight - 1);
+      let nudged = false;
+      for (let pass = 0; pass < 6; pass += 1) {
+        const hit = items.find(
+          (placed) =>
+            Math.abs(labelX - placed.labelX) < (labelWidth + placed.labelWidth) / 2 + 2 &&
+            Math.abs(labelY - placed.labelY) < labelHeight + 2,
+        );
+        if (!hit) break;
+        nudged = true;
+        const nextY = roundCoord(hit.labelY + labelHeight + 2);
+        if (nextY <= maxLabelY) {
+          labelY = nextY;
+        } else {
+          labelX = clampNumber(
+            roundCoord(hit.labelX + hit.labelWidth + 2),
+            1,
+            Math.max(1, width - labelWidth - 1),
+          );
+          labelY = clampNumber(y, 1, maxLabelY);
+        }
+      }
       const fontSize = Math.round(
         labelHeight * (label.length > 1 ? 0.46 : 0.56),
       );
-      return {
+      items.push({
         boxHeight,
         boxWidth,
         fontSize,
@@ -2093,11 +2116,13 @@
         labelWidth,
         labelX,
         labelY,
+        nudged,
         strokeWidth,
         x,
         y,
-      };
+      });
     });
+    return items;
   }
 
   function clampNumber(value, min, max) {
@@ -2462,8 +2487,8 @@
         y: item.labelY + (item.labelHeight - 44) / 2,
       });
       const pin = createSvgElement("g", {
-        "data-pin-x": item.x,
-        "data-pin-y": item.y,
+        "data-pin-x": item.nudged ? item.labelX : item.x,
+        "data-pin-y": item.nudged ? item.labelY : item.y,
       });
       pin.append?.(labelRect, text, hitRect);
       group.append?.(boxRect, pin);
@@ -3054,6 +3079,7 @@
       item.addEventListener?.("click", (event) => {
         event.stopPropagation?.();
         setActiveImageRegion(img, label, { toggle: true });
+        if (state?.activeRegion) panToRegion(region);
       });
       return item;
     });
@@ -3118,32 +3144,95 @@
     if (resizeObserver) resizeObserver.observe(viewerImg);
     else globalThis.addEventListener?.("resize", syncRegions);
 
-    const setZoom = (nextScale, focalX = 0, focalY = 0) => {
+    const stageMetrics = () => {
+      const rect = stage.getBoundingClientRect?.();
+      const width = Number(rect?.width) || 0;
+      const height = Number(rect?.height) || 0;
+      return {
+        height,
+        width,
+        x: (Number(rect?.left) || 0) + width / 2,
+        y: (Number(rect?.top) || 0) + height / 2,
+      };
+    };
+
+    const clampPan = (nextX, nextY, nextScale = scale) => {
+      if (nextScale <= 1.01) return { x: 0, y: 0 };
+      const { width: stageW, height: stageH } = stageMetrics();
+      const baseW = renderedWidth || stageW;
+      const baseH = renderedHeight || stageH;
+      if (!baseW || !baseH) return { x: nextX, y: nextY };
+      const maxX =
+        Math.max(0, (baseW * nextScale - Math.min(stageW || baseW, baseW)) / 2) + 24;
+      const maxY =
+        Math.max(0, (baseH * nextScale - Math.min(stageH || baseH, baseH)) / 2) + 24;
+      return {
+        x: clampNumber(nextX, -maxX, maxX),
+        y: clampNumber(nextY, -maxY, maxY),
+      };
+    };
+
+    const setZoom = (nextScale, clientX, clientY) => {
       const clamped = clampNumber(nextScale, 1, 5);
       if (clamped <= 1.01) {
         scale = 1;
         panX = 0;
         panY = 0;
       } else {
+        const center = stageMetrics();
+        const fx = Number.isFinite(clientX) ? clientX - center.x : 0;
+        const fy = Number.isFinite(clientY) ? clientY - center.y : 0;
         const ratio = clamped / scale;
-        panX = focalX - (focalX - panX) * ratio;
-        panY = focalY - (focalY - panY) * ratio;
+        const next = clampPan(
+          fx - (fx - panX) * ratio,
+          fy - (fy - panY) * ratio,
+          clamped,
+        );
+        panX = next.x;
+        panY = next.y;
         scale = clamped;
       }
       updateTransform();
     };
 
+    const panToRegion = (region) => {
+      if (scale <= 1.01 || !Array.isArray(region?.box_2d)) return;
+      const { width: stageW, height: stageH } = stageMetrics();
+      const baseW = renderedWidth || stageW;
+      const baseH = renderedHeight || stageH;
+      if (!baseW || !baseH) return;
+      const [ymin, xmin, ymax, xmax] = region.box_2d;
+      const u = ((xmin + xmax) / 2000 - 0.5) * baseW;
+      const v = ((ymin + ymax) / 2000 - 0.5) * baseH;
+      const viewW = stageW || baseW;
+      const viewH = stageH || baseH;
+      if (
+        Math.abs(panX + u * scale) > viewW * 0.36 ||
+        Math.abs(panY + v * scale) > viewH * 0.36
+      ) {
+        const next = clampPan(-u * scale, -v * scale, scale);
+        panX = next.x;
+        panY = next.y;
+        updateTransform();
+      }
+    };
+
     const syncActiveRegion = (activeLabel) => {
       const label = String(activeLabel || "");
       applySpotlightToSvg(svg, label);
+      let activeItem = null;
       for (const item of listItems) {
         const itemRegion =
           item.dataset?.region || item.getAttribute?.("data-region");
         if (label && itemRegion === label) {
           item.setAttribute?.("data-active", "true");
+          activeItem = item;
         } else {
           item.removeAttribute?.("data-active");
         }
+      }
+      if (expanded && activeItem) {
+        activeItem.scrollIntoView?.({ block: "nearest" });
       }
       const activeIndex = label
         ? clampNumber(Number(label) - 1, 0, regions.length - 1)
@@ -3166,6 +3255,7 @@
       const nextNum =
         ((currentNum - 1 + delta + regions.length) % regions.length) + 1;
       setActiveImageRegion(img, String(nextNum), { toggle: false });
+      panToRegion(regions[nextNum - 1]);
     };
 
     prevBtn.addEventListener?.("click", () => stepRegion(-1));
@@ -3204,9 +3294,49 @@
       closeImageViewer();
     });
 
-    // Touch pinch-to-zoom, 1-finger pan, and double-tap zoom on stage
+    dialog.addEventListener?.("keydown", (event) => {
+      if (event.key === "ArrowLeft" && regions.length > 1) {
+        event.preventDefault?.();
+        stepRegion(-1);
+      } else if (event.key === "ArrowRight" && regions.length > 1) {
+        event.preventDefault?.();
+        stepRegion(1);
+      } else if (event.key === "0" && scale > 1.01) {
+        event.preventDefault?.();
+        setZoom(1);
+      }
+    });
+
+    if (regions.length > 1) {
+      let cardSwipe = null;
+      activeCard.addEventListener?.(
+        "touchstart",
+        (event) => {
+          const t = event.touches?.length === 1 ? event.touches[0] : null;
+          cardSwipe = t ? { x: t.clientX, y: t.clientY } : null;
+        },
+        { passive: true },
+      );
+      activeCard.addEventListener?.(
+        "touchend",
+        (event) => {
+          const t = cardSwipe && !event.touches?.length ? event.changedTouches?.[0] : null;
+          const start = cardSwipe;
+          cardSwipe = null;
+          if (!t || globalThis.getSelection?.()?.toString?.()) return;
+          const dx = t.clientX - start.x;
+          const dy = t.clientY - start.y;
+          if (Math.abs(dx) >= 48 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+            stepRegion(dx < 0 ? 1 : -1);
+          }
+        },
+        { passive: true },
+      );
+    }
+
+    // Touch pinch-to-zoom, 1-finger pan, pull-down close, and focal double-tap zoom on stage
     let gestureState = null;
-    let lastTapAt = 0;
+    let lastTap = null;
 
     stage.addEventListener?.(
       "touchstart",
@@ -3217,20 +3347,24 @@
             t2.clientX - t1.clientX,
             t2.clientY - t1.clientY,
           );
+          const center = stageMetrics();
           gestureState = {
             mode: "pinch",
             startDist: Math.max(10, dist),
+            startFx: (t1.clientX + t2.clientX) / 2 - center.x,
+            startFy: (t1.clientY + t2.clientY) / 2 - center.y,
             startPanX: panX,
             startPanY: panY,
             startScale: scale,
-            midX: (t1.clientX + t2.clientX) / 2,
-            midY: (t1.clientY + t2.clientY) / 2,
           };
         } else if (event.touches?.length === 1) {
           const t = event.touches[0];
           gestureState = {
+            lastX: t.clientX,
+            lastY: t.clientY,
             mode: "pan",
             moved: false,
+            onPin: Boolean(event.target?.closest?.(`.${IMAGE_REGION_CLASS}`)),
             startPanX: panX,
             startPanY: panY,
             startX: t.clientX,
@@ -3257,24 +3391,38 @@
             1,
             5,
           );
-          const midX = (t1.clientX + t2.clientX) / 2;
-          const midY = (t1.clientY + t2.clientY) / 2;
+          const center = stageMetrics();
+          const curFx = (t1.clientX + t2.clientX) / 2 - center.x;
+          const curFy = (t1.clientY + t2.clientY) / 2 - center.y;
+          const ratio = nextScale / gestureState.startScale;
+          const next = clampPan(
+            curFx - (gestureState.startFx - gestureState.startPanX) * ratio,
+            curFy - (gestureState.startFy - gestureState.startPanY) * ratio,
+            nextScale,
+          );
           scale = nextScale;
-          panX = gestureState.startPanX + (midX - gestureState.midX);
-          panY = gestureState.startPanY + (midY - gestureState.midY);
+          panX = next.x;
+          panY = next.y;
           updateTransform();
         } else if (
           gestureState.mode === "pan" &&
           event.touches?.length === 1
         ) {
           const t = event.touches[0];
+          gestureState.lastX = t.clientX;
+          gestureState.lastY = t.clientY;
           const dx = t.clientX - gestureState.startX;
           const dy = t.clientY - gestureState.startY;
           if (Math.hypot(dx, dy) > 6) gestureState.moved = true;
           if (scale > 1.01) {
             if (event.cancelable) event.preventDefault();
-            panX = gestureState.startPanX + dx;
-            panY = gestureState.startPanY + dy;
+            const next = clampPan(
+              gestureState.startPanX + dx,
+              gestureState.startPanY + dy,
+              scale,
+            );
+            panX = next.x;
+            panY = next.y;
             updateTransform();
           }
         }
@@ -3285,17 +3433,49 @@
     stage.addEventListener?.(
       "touchend",
       (event) => {
-        if (
-          gestureState?.mode === "pan" &&
-          !gestureState.moved &&
-          event.touches?.length === 0
-        ) {
-          const now = Date.now();
-          if (now - lastTapAt < 280) {
-            setZoom(scale > 1.2 ? 1 : 2.4);
-            lastTapAt = 0;
-          } else {
-            lastTapAt = now;
+        if (event.touches?.length === 1 && gestureState?.mode === "pinch") {
+          const remaining = event.touches[0];
+          gestureState = {
+            lastX: remaining.clientX,
+            lastY: remaining.clientY,
+            mode: "pan",
+            moved: true,
+            onPin: true,
+            startPanX: panX,
+            startPanY: panY,
+            startX: remaining.clientX,
+            startY: remaining.clientY,
+          };
+          return;
+        }
+        if (gestureState?.mode === "pan" && !event.touches?.length) {
+          const endTouch = event.changedTouches?.[0];
+          const tapX = Number.isFinite(endTouch?.clientX)
+            ? endTouch.clientX
+            : gestureState.lastX;
+          const tapY = Number.isFinite(endTouch?.clientY)
+            ? endTouch.clientY
+            : gestureState.lastY;
+          if (!gestureState.moved && !gestureState.onPin) {
+            const now = Date.now();
+            if (
+              lastTap &&
+              now - lastTap.at < 280 &&
+              Math.hypot(tapX - lastTap.x, tapY - lastTap.y) < 28
+            ) {
+              setZoom(scale > 1.2 ? 1 : 2.4, tapX, tapY);
+              lastTap = null;
+            } else {
+              lastTap = { at: now, x: tapX, y: tapY };
+            }
+          } else if (scale <= 1.01 && !gestureState.onPin) {
+            const dx = tapX - gestureState.startX;
+            const dy = tapY - gestureState.startY;
+            if (dy >= 80 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+              gestureState = null;
+              closeImageViewer();
+              return;
+            }
           }
         }
         if (!event.touches?.length) {
@@ -3310,7 +3490,7 @@
       (event) => {
         if (event.cancelable) event.preventDefault();
         const factor = event.deltaY < 0 ? 1.18 : 0.85;
-        setZoom(scale * factor);
+        setZoom(scale * factor, event.clientX, event.clientY);
       },
       { passive: false },
     );
@@ -4011,12 +4191,17 @@
         backdrop-filter: blur(12px) !important;
       }
       .${IMAGE_VIEWER_BAR_CLASS} > [data-viewer-counter] {
+        min-width: 0 !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
         font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, sans-serif !important;
         color: rgba(255, 255, 255, 0.88) !important;
       }
       .${IMAGE_VIEWER_BAR_CLASS} > div {
         display: flex !important;
         align-items: center !important;
+        flex-shrink: 0 !important;
         gap: 6px !important;
       }
       .${IMAGE_VIEWER_BAR_CLASS} button,
@@ -4030,8 +4215,27 @@
         background: rgba(255, 255, 255, 0.1) !important;
         color: #f5f5f7 !important;
         font: 600 12px/1 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        white-space: nowrap !important;
         cursor: pointer !important;
         touch-action: manipulation !important;
+      }
+      .${IMAGE_VIEWER_BAR_CLASS} button[data-action="clear"] {
+        color: rgba(255, 180, 171, 0.95) !important;
+      }
+      .${IMAGE_VIEWER_BAR_CLASS} button[data-action="close"] {
+        background: rgba(255, 255, 255, 0.22) !important;
+        border-color: rgba(255, 255, 255, 0.34) !important;
+      }
+      @media (max-width: 400px) {
+        .${IMAGE_VIEWER_BAR_CLASS} {
+          padding-inline: 10px !important;
+        }
+        .${IMAGE_VIEWER_BAR_CLASS} > div {
+          gap: 4px !important;
+        }
+        .${IMAGE_VIEWER_BAR_CLASS} button {
+          padding: 0 8px !important;
+        }
       }
       .${IMAGE_VIEWER_BAR_CLASS} button[hidden],
       .${IMAGE_VIEWER_SHEET_CLASS} [hidden] {

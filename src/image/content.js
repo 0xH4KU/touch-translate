@@ -76,7 +76,8 @@
     );
     const labelHeight = 28;
     const roundCoord = (value) => Math.round(value * 100) / 100;
-    return regions.map((region, index) => {
+    const items = [];
+    regions.forEach((region, index) => {
       const label = String(index + 1);
       const [ymin, xmin, ymax, xmax] = region.box_2d;
       const x = clampNumber(roundCoord((xmin / 1000) * width), 0, width - 1);
@@ -96,22 +97,44 @@
         Math.round(labelHeight * (0.72 + label.length * 0.42)),
       );
       const hasLeftSpace = x >= labelWidth + 3;
-      const labelX = clampNumber(
+      let labelX = clampNumber(
         roundCoord(hasLeftSpace ? x - labelWidth : x),
         1,
         Math.max(1, width - labelWidth - 1),
       );
-      const labelY = roundCoord(
+      let labelY = roundCoord(
         hasLeftSpace
           ? y
           : y >= labelHeight + 3
             ? y - labelHeight
             : y,
       );
+      const maxLabelY = Math.max(1, height - labelHeight - 1);
+      let nudged = false;
+      for (let pass = 0; pass < 6; pass += 1) {
+        const hit = items.find(
+          (placed) =>
+            Math.abs(labelX - placed.labelX) < (labelWidth + placed.labelWidth) / 2 + 2 &&
+            Math.abs(labelY - placed.labelY) < labelHeight + 2,
+        );
+        if (!hit) break;
+        nudged = true;
+        const nextY = roundCoord(hit.labelY + labelHeight + 2);
+        if (nextY <= maxLabelY) {
+          labelY = nextY;
+        } else {
+          labelX = clampNumber(
+            roundCoord(hit.labelX + hit.labelWidth + 2),
+            1,
+            Math.max(1, width - labelWidth - 1),
+          );
+          labelY = clampNumber(y, 1, maxLabelY);
+        }
+      }
       const fontSize = Math.round(
         labelHeight * (label.length > 1 ? 0.46 : 0.56),
       );
-      return {
+      items.push({
         boxHeight,
         boxWidth,
         fontSize,
@@ -121,11 +144,13 @@
         labelWidth,
         labelX,
         labelY,
+        nudged,
         strokeWidth,
         x,
         y,
-      };
+      });
     });
+    return items;
   }
 
   function clampNumber(value, min, max) {
@@ -490,8 +515,8 @@
         y: item.labelY + (item.labelHeight - 44) / 2,
       });
       const pin = createSvgElement("g", {
-        "data-pin-x": item.x,
-        "data-pin-y": item.y,
+        "data-pin-x": item.nudged ? item.labelX : item.x,
+        "data-pin-y": item.nudged ? item.labelY : item.y,
       });
       pin.append?.(labelRect, text, hitRect);
       group.append?.(boxRect, pin);

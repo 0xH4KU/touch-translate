@@ -340,6 +340,11 @@ const subpixelItem = imageApi.computeRegionBoxLayout(333, 250, [
 ])[0];
 assert.equal(subpixelItem.x, 40.96);
 assert.equal(subpixelItem.y, 31.25);
+const stackedItems = imageApi.computeRegionBoxLayout(400, 300, [
+  { box_2d: [100, 200, 180, 450] },
+  { box_2d: [110, 205, 190, 460] },
+]);
+assert.ok(stackedItems[1].labelY >= stackedItems[0].labelY + stackedItems[0].labelHeight);
 
 // Image eligibility & anchor resolution
 const eligibleImg = {
@@ -930,14 +935,56 @@ assert.equal(Number(pinRects[1].getAttribute("height")), 28);
 assert.equal(Number(pinRects[2].getAttribute("width")), 44);
 assert.equal(Number(pinRects[2].getAttribute("height")), 44);
 const zoomStage = viewerDialog.querySelector(".touch-image-translate__viewer-stage");
+const viewerCanvas = viewerDialog.querySelector(".touch-image-translate__viewer-canvas");
 for (let tap = 0; tap < 2; tap += 1) {
-  zoomStage.dispatch("touchstart", { touches: [{ clientX: 100, clientY: 100 }] });
+  zoomStage.dispatch("touchstart", { touches: [{ clientX: 60, clientY: 50 }] });
   zoomStage.dispatch("touchend", { touches: [] });
 }
 const pinGroup = regionGroups[0].querySelector("[data-pin-x]");
 assert.ok(pinGroup.getAttribute("transform").includes(`scale(${1 / 2.4})`));
+// Off-center double-tap anchors zoom toward the tapped corner instead of staying at (0, 0)
+assert.doesNotMatch(viewerCanvas.style.props.get("transform"), /^translate3d\(0px, 0px/);
+// Stepping regions while zoomed auto-pans and clamping prevents flying off-screen
+zoomStage.dispatch("touchstart", { touches: [{ clientX: 100, clientY: 100 }] });
+zoomStage.dispatch("touchmove", { cancelable: true, preventDefault() {}, touches: [{ clientX: 5000, clientY: 5000 }] });
+zoomStage.dispatch("touchend", { touches: [] });
+const clampedMatch = /translate3d\((-?\d+)px, (-?\d+)px/.exec(viewerCanvas.style.props.get("transform"));
+assert.ok(Number(clampedMatch[1]) < 300 && Number(clampedMatch[2]) < 300);
+// Pinch-to-zoom transitions smoothly to 1-finger pan when lifting one finger
+zoomStage.dispatch("touchstart", {
+  touches: [{ clientX: 120, clientY: 100 }, { clientX: 200, clientY: 100 }],
+});
+zoomStage.dispatch("touchmove", {
+  cancelable: true,
+  preventDefault() {},
+  touches: [{ clientX: 100, clientY: 100 }, { clientX: 220, clientY: 100 }],
+});
+zoomStage.dispatch("touchend", { touches: [{ clientX: 100, clientY: 100 }] });
+const beforeHandoffTransform = viewerCanvas.style.props.get("transform");
+zoomStage.dispatch("touchmove", {
+  cancelable: true,
+  preventDefault() {},
+  touches: [{ clientX: 60, clientY: 80 }],
+});
+assert.notEqual(viewerCanvas.style.props.get("transform"), beforeHandoffTransform);
+zoomStage.dispatch("touchend", { touches: [] });
 viewerDialog.querySelector('[data-action="reset-zoom"]').dispatchClick();
 assert.match(pinGroup.getAttribute("transform"), /scale\(1\)/);
+
+// Distant quick taps must not misfire double-tap zoom
+zoomStage.dispatch("touchstart", { touches: [{ clientX: 40, clientY: 40 }] });
+zoomStage.dispatch("touchend", { touches: [] });
+zoomStage.dispatch("touchstart", { touches: [{ clientX: 200, clientY: 180 }] });
+zoomStage.dispatch("touchend", { touches: [] });
+assert.match(pinGroup.getAttribute("transform"), /scale\(1\)/);
+
+// Bottom active card supports horizontal swipe to step regions
+const activeViewerCard = viewerDialog.querySelector(".touch-image-translate__viewer-active");
+activeViewerCard.dispatch("touchstart", { touches: [{ clientX: 220, clientY: 40 }] });
+activeViewerCard.dispatch("touchend", { touches: [], changedTouches: [{ clientX: 140, clientY: 44 }] });
+assert.equal(regionGroups[1].getAttribute("data-active"), "true");
+viewerDialog.dispatch("keydown", { key: "ArrowLeft", preventDefault() {} });
+assert.equal(regionGroups[0].getAttribute("data-active"), "true");
 
 // Region 1 is active by default in Spotlight Mode
 assert.equal(regionGroups[0].getAttribute("data-active"), "true");
@@ -979,8 +1026,10 @@ assert.equal(viewerList.hidden, true);
 expandBtn.dispatchClick();
 assert.equal(viewerList.hidden, false);
 
-// Closing viewer keeps state="done" so a two-finger right-swipe (or tapping the done badge) re-opens the viewer immediately
-imageApi.closeImageViewer();
+// Pull-down gesture at 1x zoom closes the viewer; state="done" remains for instant reopen
+zoomStage.dispatch("touchstart", { touches: [{ clientX: 160, clientY: 60 }] });
+zoomStage.dispatch("touchmove", { cancelable: true, preventDefault() {}, touches: [{ clientX: 162, clientY: 165 }] });
+zoomStage.dispatch("touchend", { touches: [], changedTouches: [{ clientX: 162, clientY: 165 }] });
 assert.equal(viewerDialog.isConnected, false);
 assert.equal(resizeDisconnects, 1);
 assert.equal(overlayState.button.dataset.state, "done");
