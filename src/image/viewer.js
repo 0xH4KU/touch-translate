@@ -106,23 +106,40 @@
     nextBtn.textContent = "Next";
     navGroup.append(prevBtn, nextBtn);
 
+    const hasSource = regions.some((region) => normalizeText(region?.source));
+    const sheetActions = document.createElement("div");
+
+    const sourceBtn = document.createElement("button");
+    sourceBtn.type = "button";
+    sourceBtn.dataset.action = "toggle-source";
+    sourceBtn.textContent = "Original";
+    sourceBtn.hidden = !hasSource;
+
     const expandBtn = document.createElement("button");
     expandBtn.type = "button";
     expandBtn.dataset.action = "toggle-expand";
     expandBtn.textContent = `All (${regions.length})`;
 
     if (regions.length <= 1) {
-      sheetHeader.hidden = true;
+      navGroup.hidden = true;
+      expandBtn.hidden = true;
+      if (!hasSource) sheetHeader.hidden = true;
     }
-    sheetHeader.append(navGroup, expandBtn);
+    sheetActions.append(sourceBtn, expandBtn);
+    sheetHeader.append(navGroup, sheetActions);
 
     const activeCard = document.createElement("div");
     activeCard.className = IMAGE_VIEWER_ACTIVE_CLASS;
     const activeBadge = document.createElement("span");
     activeBadge.className = IMAGE_BADGE_CLASS;
+    const activeBody = document.createElement("div");
+    const activeSource = document.createElement("div");
+    activeSource.className = IMAGE_SOURCE_CLASS;
+    activeSource.hidden = true;
     const activeText = document.createElement("div");
     activeText.className = IMAGE_TEXT_CLASS;
-    activeCard.append(activeBadge, activeText);
+    activeBody.append(activeSource, activeText);
+    activeCard.append(activeBadge, activeBody);
 
     const listContainer = document.createElement("div");
     listContainer.className = IMAGE_VIEWER_LIST_CLASS;
@@ -137,10 +154,18 @@
       const badge = document.createElement("span");
       badge.className = IMAGE_BADGE_CLASS;
       badge.textContent = label;
-      const textSpan = document.createElement("span");
+      const bodyWrap = document.createElement("div");
+      if (normalizeText(region.source)) {
+        const sourceDiv = document.createElement("div");
+        sourceDiv.className = IMAGE_SOURCE_CLASS;
+        assembleTranslatedContent(sourceDiv, region.source);
+        bodyWrap.append(sourceDiv);
+      }
+      const textSpan = document.createElement("div");
       textSpan.className = IMAGE_TEXT_CLASS;
       assembleTranslatedContent(textSpan, region.translation || "");
-      item.append(badge, textSpan);
+      bodyWrap.append(textSpan);
+      item.append(badge, bodyWrap);
       item.addEventListener?.("click", (event) => {
         event.stopPropagation?.();
         setActiveImageRegion(img, label, { toggle: true });
@@ -160,6 +185,7 @@
     let panY = 0;
     let expanded = false;
     let pinsHidden = false;
+    let showSource = false;
 
     // Keep pins and touch targets at screen size while the image zooms.
     const syncPinScale = () => {
@@ -312,6 +338,9 @@
         activeCard.removeAttribute?.("data-active");
         counter.textContent = `${regions.length} regions (tap a pin)`;
       }
+      const sourceValue = shownRegion?.source || "";
+      activeSource.hidden = !showSource || !normalizeText(sourceValue);
+      assembleTranslatedContent(activeSource, sourceValue);
       assembleTranslatedContent(activeText, shownRegion?.translation || "");
     };
 
@@ -325,6 +354,14 @@
 
     prevBtn.addEventListener?.("click", () => stepRegion(-1));
     nextBtn.addEventListener?.("click", () => stepRegion(1));
+
+    sourceBtn.addEventListener?.("click", () => {
+      showSource = !showSource;
+      if (showSource) dialog.setAttribute?.("data-show-source", "true");
+      else dialog.removeAttribute?.("data-show-source");
+      sourceBtn.textContent = showSource ? "Hide original" : "Original";
+      syncActiveRegion(state?.activeRegion || "1");
+    });
 
     expandBtn.addEventListener?.("click", () => {
       expanded = !expanded;

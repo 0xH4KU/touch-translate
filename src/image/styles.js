@@ -341,6 +341,21 @@
       .${IMAGE_ITEM_CLASS}[data-active="true"] > .${IMAGE_BADGE_CLASS} {
         background: #f59e0b !important;
       }
+      .${IMAGE_VIEWER_ACTIVE_CLASS} > div,
+      .${IMAGE_ITEM_CLASS} > div {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+      }
+      .${IMAGE_SOURCE_CLASS} {
+        display: none !important;
+        margin-bottom: 4px !important;
+        color: rgba(245, 245, 247, 0.64) !important;
+        font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        overflow-wrap: anywhere !important;
+      }
+      .${IMAGE_VIEWER_CLASS}[data-show-source="true"] .${IMAGE_SOURCE_CLASS}:not([hidden]) {
+        display: block !important;
+      }
       .${IMAGE_TEXT_CLASS} {
         flex: 1 1 auto !important;
         min-width: 0 !important;

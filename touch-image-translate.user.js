@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Image Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.2.6
+// @version      0.2.7
 // @description  Two-finger swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
 // @author       HAKU
 // @match        *://*/*
@@ -50,6 +50,7 @@
   const IMAGE_REGION_CLASS = "touch-image-translate__region";
   const IMAGE_ITEM_CLASS = "touch-image-translate__item";
   const IMAGE_BADGE_CLASS = "touch-image-translate__badge";
+  const IMAGE_SOURCE_CLASS = "touch-image-translate__source";
   const IMAGE_TEXT_CLASS = "touch-image-translate__text";
   const IMAGE_VIEWER_CLASS = "touch-image-translate__viewer";
   const IMAGE_VIEWER_BAR_CLASS = "touch-image-translate__viewer-bar";
@@ -1382,7 +1383,7 @@
 
   function hashImageCacheKey(imageHash, settings, ocrProvider = "none") {
     const version = ocrProvider && ocrProvider !== "none"
-      ? `image-ocr-v1-${ocrProvider}`
+      ? `image-ocr-v2-${ocrProvider}`
       : "image-prompt-v10";
     return translationCacheKey(imageHash, settings, version);
   }
@@ -1409,8 +1410,7 @@
       const source = matched.map((unit) => unit.text).join("\n");
       // Identical output means the model echoed the source (names, logos, or a failed translation).
       if (comparableText(source) === comparableText(translation)) continue;
-      ids.forEach((id) => used.add(id));
-      result.push({
+      const candidate = {
         box_2d: [
           Math.min(...matched.map((unit) => unit.box_2d[0])),
           Math.min(...matched.map((unit) => unit.box_2d[1])),
@@ -1419,7 +1419,10 @@
         ],
         source,
         translation,
-      });
+      };
+      ids.forEach((id) => used.add(id));
+      if (!isUsefulImageRegion(candidate)) continue;
+      result.push(candidate);
     }
     return {
       hasText: result.length > 0,
@@ -1612,10 +1615,10 @@
     const ocr = Array.isArray(ocrUnits) && ocrUnits.length > 0;
     const contract = ocr
       ? [
-          'OCR has already extracted the image text into numbered units, given in the user message as JSON. Use the image only as visual context for speakers, layout, and meaning; never predict coordinates.',
+          'OCR has already extracted the image text into numbered units with {"id","box","text"} ("box" is [ymin,xmin,ymax,xmax] in 0-1000), given in the user message as JSON. Use "box" proximity and the image as visual context for speakers, layout, and meaning; never predict coordinates.',
           'Return one JSON object with "has_text" (boolean) and "regions" (array in reading order, at most 99 regions).',
           'Each region must be {"ids":[...],"translation":"..."}: "ids" lists the OCR unit ids that form one speech bubble, paragraph, caption, or heading, and "translation" is the full translation of those units joined together.',
-          "Group units that belong to the same bubble or paragraph into one region. Keep different speakers, panels, and independent columns in separate regions. Use each id at most once.",
+          "Group spatially adjacent units that belong to the same bubble or paragraph into one region. Keep different speakers, panels, and independent columns in separate regions—never merge distant boxes across panels. Use each id at most once.",
           `Omit ids that are UI noise or already in ${settings.targetLanguage}. "translation" must always be written in ${settings.targetLanguage}; never copy the OCR text unchanged. Fix obvious OCR misreads using the image.`,
           'When no meaningful translatable units remain, return {"has_text":false,"regions":[]}.',
         ]
@@ -1638,7 +1641,7 @@
       "Do not include markdown, explanations, or keys beyond this contract.",
     ].join(" ");
     const userPrompt = ocr
-      ? `OCR units:\n${JSON.stringify(ocrUnits.map(({ id, text }) => ({ id, text })))}\n\nGroup and translate the meaningful units into ${settings.targetLanguage}, and return the JSON object.`
+      ? `OCR units:\n${JSON.stringify(ocrUnits.map(({ id, box_2d, text }) => ({ id, box: box_2d, text })))}\n\nGroup and translate the meaningful units into ${settings.targetLanguage}, and return the JSON object.`
       : `Inspect the image, ignore UI chrome, status bars, metadata, watermarks, and text already in ${settings.targetLanguage}, translate only the meaningful reading content into ${settings.targetLanguage}, and return the JSON object.`;
     const regionSchema = ocr
       ? {
@@ -1926,44 +1929,83 @@
     } else {
       throw new Error("No OCR provider is configured.");
     }
-    let request;
+    let currentRequest;
+    let retryTimer;
+    let settled = false;
     let rejectPromise;
+    let attempt = 0;
     const promise = new Promise((resolve, reject) => {
       rejectPromise = reject;
-      const fail = (message) => reject(new Error(redactProviderDiagnostic(message, ocr.apiKey)));
-      request = GM_xmlhttpRequest({
-        method: "POST",
-        anonymous: true,
-        timeout: REQUEST_TIMEOUT_MS,
-        ...options,
-        onload(response) {
-          let body;
-          try {
-            body = JSON.parse(response.responseText || "{}");
-          } catch {
-            body = null;
-          }
-          const status = Number(response.status) || 0;
-          if (status < 200 || status >= 300) {
-            fail(`OCR request failed (HTTP ${status}).\n${extractErrorMessage(response.responseText)}`);
-            return;
-          }
-          try {
-            resolve(parseOcrResponse(ocr.provider, body, imageData));
-          } catch (error) {
-            fail(errorMessageFor(error));
-          }
-        },
-        onerror: () => fail("Could not connect to the OCR API."),
-        ontimeout: () => fail("The OCR API timed out."),
-        onabort: () => reject(cancelledError()),
-      });
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(retryTimer);
+        callback(value);
+      };
+      const fail = (message) =>
+        finish(reject, new Error(redactProviderDiagnostic(message, ocr.apiKey)));
+      const retry = (response) => {
+        if (attempt >= MAX_RETRIES || settled) return false;
+        const delay = retryDelayFor(response, attempt++);
+        retryTimer = setTimeout(send, delay);
+        return true;
+      };
+      const send = () => {
+        if (settled) return;
+        currentRequest = GM_xmlhttpRequest({
+          method: "POST",
+          anonymous: true,
+          timeout: REQUEST_TIMEOUT_MS,
+          ...options,
+          onload(response) {
+            currentRequest = null;
+            if (settled) return;
+            let body;
+            try {
+              body = JSON.parse(response.responseText || "{}");
+            } catch {
+              body = null;
+            }
+            const status = Number(response.status) || 0;
+            if (status < 200 || status >= 300) {
+              const detail = extractErrorMessage(response.responseText);
+              if (
+                (status === 429 || (status >= 500 && status < 600)) &&
+                !/quota|insufficient_quota|billing/i.test(detail) &&
+                retry(response)
+              ) {
+                return;
+              }
+              fail(`OCR request failed (HTTP ${status}).\n${detail}`);
+              return;
+            }
+            try {
+              finish(resolve, parseOcrResponse(ocr.provider, body, imageData));
+            } catch (error) {
+              fail(errorMessageFor(error));
+            }
+          },
+          onerror() {
+            currentRequest = null;
+            if (!retry()) fail("Could not connect to the OCR API.");
+          },
+          ontimeout() {
+            currentRequest = null;
+            if (!retry()) fail("The OCR API timed out.");
+          },
+          onabort: () => finish(reject, cancelledError()),
+        });
+      };
+      send();
     });
     return {
       promise,
       abort() {
+        if (settled) return;
+        settled = true;
+        clearTimeout(retryTimer);
         rejectPromise?.(cancelledError());
-        try { request?.abort?.(); } catch { /* Already settled. */ }
+        try { currentRequest?.abort?.(); } catch { /* Already settled. */ }
       },
     };
   }
@@ -3041,23 +3083,40 @@
     nextBtn.textContent = "Next";
     navGroup.append(prevBtn, nextBtn);
 
+    const hasSource = regions.some((region) => normalizeText(region?.source));
+    const sheetActions = document.createElement("div");
+
+    const sourceBtn = document.createElement("button");
+    sourceBtn.type = "button";
+    sourceBtn.dataset.action = "toggle-source";
+    sourceBtn.textContent = "Original";
+    sourceBtn.hidden = !hasSource;
+
     const expandBtn = document.createElement("button");
     expandBtn.type = "button";
     expandBtn.dataset.action = "toggle-expand";
     expandBtn.textContent = `All (${regions.length})`;
 
     if (regions.length <= 1) {
-      sheetHeader.hidden = true;
+      navGroup.hidden = true;
+      expandBtn.hidden = true;
+      if (!hasSource) sheetHeader.hidden = true;
     }
-    sheetHeader.append(navGroup, expandBtn);
+    sheetActions.append(sourceBtn, expandBtn);
+    sheetHeader.append(navGroup, sheetActions);
 
     const activeCard = document.createElement("div");
     activeCard.className = IMAGE_VIEWER_ACTIVE_CLASS;
     const activeBadge = document.createElement("span");
     activeBadge.className = IMAGE_BADGE_CLASS;
+    const activeBody = document.createElement("div");
+    const activeSource = document.createElement("div");
+    activeSource.className = IMAGE_SOURCE_CLASS;
+    activeSource.hidden = true;
     const activeText = document.createElement("div");
     activeText.className = IMAGE_TEXT_CLASS;
-    activeCard.append(activeBadge, activeText);
+    activeBody.append(activeSource, activeText);
+    activeCard.append(activeBadge, activeBody);
 
     const listContainer = document.createElement("div");
     listContainer.className = IMAGE_VIEWER_LIST_CLASS;
@@ -3072,10 +3131,18 @@
       const badge = document.createElement("span");
       badge.className = IMAGE_BADGE_CLASS;
       badge.textContent = label;
-      const textSpan = document.createElement("span");
+      const bodyWrap = document.createElement("div");
+      if (normalizeText(region.source)) {
+        const sourceDiv = document.createElement("div");
+        sourceDiv.className = IMAGE_SOURCE_CLASS;
+        assembleTranslatedContent(sourceDiv, region.source);
+        bodyWrap.append(sourceDiv);
+      }
+      const textSpan = document.createElement("div");
       textSpan.className = IMAGE_TEXT_CLASS;
       assembleTranslatedContent(textSpan, region.translation || "");
-      item.append(badge, textSpan);
+      bodyWrap.append(textSpan);
+      item.append(badge, bodyWrap);
       item.addEventListener?.("click", (event) => {
         event.stopPropagation?.();
         setActiveImageRegion(img, label, { toggle: true });
@@ -3095,6 +3162,7 @@
     let panY = 0;
     let expanded = false;
     let pinsHidden = false;
+    let showSource = false;
 
     // Keep pins and touch targets at screen size while the image zooms.
     const syncPinScale = () => {
@@ -3247,6 +3315,9 @@
         activeCard.removeAttribute?.("data-active");
         counter.textContent = `${regions.length} regions (tap a pin)`;
       }
+      const sourceValue = shownRegion?.source || "";
+      activeSource.hidden = !showSource || !normalizeText(sourceValue);
+      assembleTranslatedContent(activeSource, sourceValue);
       assembleTranslatedContent(activeText, shownRegion?.translation || "");
     };
 
@@ -3260,6 +3331,14 @@
 
     prevBtn.addEventListener?.("click", () => stepRegion(-1));
     nextBtn.addEventListener?.("click", () => stepRegion(1));
+
+    sourceBtn.addEventListener?.("click", () => {
+      showSource = !showSource;
+      if (showSource) dialog.setAttribute?.("data-show-source", "true");
+      else dialog.removeAttribute?.("data-show-source");
+      sourceBtn.textContent = showSource ? "Hide original" : "Original";
+      syncActiveRegion(state?.activeRegion || "1");
+    });
 
     expandBtn.addEventListener?.("click", () => {
       expanded = !expanded;
@@ -4362,6 +4441,21 @@
       }
       .${IMAGE_ITEM_CLASS}[data-active="true"] > .${IMAGE_BADGE_CLASS} {
         background: #f59e0b !important;
+      }
+      .${IMAGE_VIEWER_ACTIVE_CLASS} > div,
+      .${IMAGE_ITEM_CLASS} > div {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+      }
+      .${IMAGE_SOURCE_CLASS} {
+        display: none !important;
+        margin-bottom: 4px !important;
+        color: rgba(245, 245, 247, 0.64) !important;
+        font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif !important;
+        overflow-wrap: anywhere !important;
+      }
+      .${IMAGE_VIEWER_CLASS}[data-show-source="true"] .${IMAGE_SOURCE_CLASS}:not([hidden]) {
+        display: block !important;
       }
       .${IMAGE_TEXT_CLASS} {
         flex: 1 1 auto !important;

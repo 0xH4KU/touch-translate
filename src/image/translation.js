@@ -1,6 +1,6 @@
   function hashImageCacheKey(imageHash, settings, ocrProvider = "none") {
     const version = ocrProvider && ocrProvider !== "none"
-      ? `image-ocr-v1-${ocrProvider}`
+      ? `image-ocr-v2-${ocrProvider}`
       : "image-prompt-v10";
     return translationCacheKey(imageHash, settings, version);
   }
@@ -27,8 +27,7 @@
       const source = matched.map((unit) => unit.text).join("\n");
       // Identical output means the model echoed the source (names, logos, or a failed translation).
       if (comparableText(source) === comparableText(translation)) continue;
-      ids.forEach((id) => used.add(id));
-      result.push({
+      const candidate = {
         box_2d: [
           Math.min(...matched.map((unit) => unit.box_2d[0])),
           Math.min(...matched.map((unit) => unit.box_2d[1])),
@@ -37,7 +36,10 @@
         ],
         source,
         translation,
-      });
+      };
+      ids.forEach((id) => used.add(id));
+      if (!isUsefulImageRegion(candidate)) continue;
+      result.push(candidate);
     }
     return {
       hasText: result.length > 0,
@@ -230,10 +232,10 @@
     const ocr = Array.isArray(ocrUnits) && ocrUnits.length > 0;
     const contract = ocr
       ? [
-          'OCR has already extracted the image text into numbered units, given in the user message as JSON. Use the image only as visual context for speakers, layout, and meaning; never predict coordinates.',
+          'OCR has already extracted the image text into numbered units with {"id","box","text"} ("box" is [ymin,xmin,ymax,xmax] in 0-1000), given in the user message as JSON. Use "box" proximity and the image as visual context for speakers, layout, and meaning; never predict coordinates.',
           'Return one JSON object with "has_text" (boolean) and "regions" (array in reading order, at most 99 regions).',
           'Each region must be {"ids":[...],"translation":"..."}: "ids" lists the OCR unit ids that form one speech bubble, paragraph, caption, or heading, and "translation" is the full translation of those units joined together.',
-          "Group units that belong to the same bubble or paragraph into one region. Keep different speakers, panels, and independent columns in separate regions. Use each id at most once.",
+          "Group spatially adjacent units that belong to the same bubble or paragraph into one region. Keep different speakers, panels, and independent columns in separate regions—never merge distant boxes across panels. Use each id at most once.",
           `Omit ids that are UI noise or already in ${settings.targetLanguage}. "translation" must always be written in ${settings.targetLanguage}; never copy the OCR text unchanged. Fix obvious OCR misreads using the image.`,
           'When no meaningful translatable units remain, return {"has_text":false,"regions":[]}.',
         ]
@@ -256,7 +258,7 @@
       "Do not include markdown, explanations, or keys beyond this contract.",
     ].join(" ");
     const userPrompt = ocr
-      ? `OCR units:\n${JSON.stringify(ocrUnits.map(({ id, text }) => ({ id, text })))}\n\nGroup and translate the meaningful units into ${settings.targetLanguage}, and return the JSON object.`
+      ? `OCR units:\n${JSON.stringify(ocrUnits.map(({ id, box_2d, text }) => ({ id, box: box_2d, text })))}\n\nGroup and translate the meaningful units into ${settings.targetLanguage}, and return the JSON object.`
       : `Inspect the image, ignore UI chrome, status bars, metadata, watermarks, and text already in ${settings.targetLanguage}, translate only the meaningful reading content into ${settings.targetLanguage}, and return the JSON object.`;
     const regionSchema = ocr
       ? {

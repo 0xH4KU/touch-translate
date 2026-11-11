@@ -217,44 +217,83 @@
     } else {
       throw new Error("No OCR provider is configured.");
     }
-    let request;
+    let currentRequest;
+    let retryTimer;
+    let settled = false;
     let rejectPromise;
+    let attempt = 0;
     const promise = new Promise((resolve, reject) => {
       rejectPromise = reject;
-      const fail = (message) => reject(new Error(redactProviderDiagnostic(message, ocr.apiKey)));
-      request = GM_xmlhttpRequest({
-        method: "POST",
-        anonymous: true,
-        timeout: REQUEST_TIMEOUT_MS,
-        ...options,
-        onload(response) {
-          let body;
-          try {
-            body = JSON.parse(response.responseText || "{}");
-          } catch {
-            body = null;
-          }
-          const status = Number(response.status) || 0;
-          if (status < 200 || status >= 300) {
-            fail(`OCR request failed (HTTP ${status}).\n${extractErrorMessage(response.responseText)}`);
-            return;
-          }
-          try {
-            resolve(parseOcrResponse(ocr.provider, body, imageData));
-          } catch (error) {
-            fail(errorMessageFor(error));
-          }
-        },
-        onerror: () => fail("Could not connect to the OCR API."),
-        ontimeout: () => fail("The OCR API timed out."),
-        onabort: () => reject(cancelledError()),
-      });
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(retryTimer);
+        callback(value);
+      };
+      const fail = (message) =>
+        finish(reject, new Error(redactProviderDiagnostic(message, ocr.apiKey)));
+      const retry = (response) => {
+        if (attempt >= MAX_RETRIES || settled) return false;
+        const delay = retryDelayFor(response, attempt++);
+        retryTimer = setTimeout(send, delay);
+        return true;
+      };
+      const send = () => {
+        if (settled) return;
+        currentRequest = GM_xmlhttpRequest({
+          method: "POST",
+          anonymous: true,
+          timeout: REQUEST_TIMEOUT_MS,
+          ...options,
+          onload(response) {
+            currentRequest = null;
+            if (settled) return;
+            let body;
+            try {
+              body = JSON.parse(response.responseText || "{}");
+            } catch {
+              body = null;
+            }
+            const status = Number(response.status) || 0;
+            if (status < 200 || status >= 300) {
+              const detail = extractErrorMessage(response.responseText);
+              if (
+                (status === 429 || (status >= 500 && status < 600)) &&
+                !/quota|insufficient_quota|billing/i.test(detail) &&
+                retry(response)
+              ) {
+                return;
+              }
+              fail(`OCR request failed (HTTP ${status}).\n${detail}`);
+              return;
+            }
+            try {
+              finish(resolve, parseOcrResponse(ocr.provider, body, imageData));
+            } catch (error) {
+              fail(errorMessageFor(error));
+            }
+          },
+          onerror() {
+            currentRequest = null;
+            if (!retry()) fail("Could not connect to the OCR API.");
+          },
+          ontimeout() {
+            currentRequest = null;
+            if (!retry()) fail("The OCR API timed out.");
+          },
+          onabort: () => finish(reject, cancelledError()),
+        });
+      };
+      send();
     });
     return {
       promise,
       abort() {
+        if (settled) return;
+        settled = true;
+        clearTimeout(retryTimer);
         rejectPromise?.(cancelledError());
-        try { request?.abort?.(); } catch { /* Already settled. */ }
+        try { currentRequest?.abort?.(); } catch { /* Already settled. */ }
       },
     };
   }

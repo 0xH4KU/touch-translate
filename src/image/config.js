@@ -26,6 +26,7 @@
   const IMAGE_REGION_CLASS = "touch-image-translate__region";
   const IMAGE_ITEM_CLASS = "touch-image-translate__item";
   const IMAGE_BADGE_CLASS = "touch-image-translate__badge";
+  const IMAGE_SOURCE_CLASS = "touch-image-translate__source";
   const IMAGE_TEXT_CLASS = "touch-image-translate__text";
   const IMAGE_VIEWER_CLASS = "touch-image-translate__viewer";
   const IMAGE_VIEWER_BAR_CLASS = "touch-image-translate__viewer-bar";

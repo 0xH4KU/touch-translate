@@ -265,18 +265,25 @@ const azureUnits = imageApi.parseOcrResponse("azure", {
 assert.equal(azureUnits.length, 3);
 assert.deepEqual([...azureUnits[0].box_2d], [100, 100, 200, 300]);
 
-// The model only groups ids and translates; boxes are the union of OCR boxes and echoes are dropped
+// The model only groups ids and translates; boxes are the union of OCR boxes, echoes and UI noise are dropped
+const noisyOcrUnits = [
+  ...azureUnits,
+  { id: 4, text: "user_name", box_2d: [10, 10, 40, 120] },
+  { id: 5, text: "tiny", box_2d: [990, 990, 995, 996] },
+];
 const ocrResult = imageApi.parseOcrImageTranslation(
   JSON.stringify({
     has_text: true,
     regions: [
       { ids: [1, 2], translation: "早安" },
       { ids: [3], translation: "SONY" },
+      { ids: [4], translation: "@user_name" },
+      { ids: [5], translation: "微小碎點" },
       { ids: [99], translation: "幻覺編號" },
       { ids: [1], translation: "重複使用的編號" },
     ],
   }),
-  azureUnits,
+  noisyOcrUnits,
 );
 assert.equal(ocrResult.hasText, true);
 assert.equal(ocrResult.regions.length, 1);
@@ -486,11 +493,25 @@ transport.options.onload({
 });
 assert.deepEqual([...(await azureOcr.promise)[0].box_2d], [100, 100, 500, 500]);
 
-// OCR-mode translation request sends units and an ids-only schema
+// OCR transport retries transient HTTP 429 respecting Retry-After
+const retriedOcr = imageApi.requestOcr(sampleImageData, { provider: "google", apiKey: "g-key" });
+const ocrBeforeRetryCount = transport.history.length;
+transport.options.onload({
+  status: 429,
+  responseHeaders: "Retry-After: 0",
+  responseText: JSON.stringify({ error: { message: "Rate limit exceeded" } }),
+});
+await new Promise((resolve) => setTimeout(resolve, 15));
+assert.equal(transport.history.length, ocrBeforeRetryCount + 1);
+transport.options.onload({ status: 200, responseText: JSON.stringify({ responses: [{}] }) });
+assert.equal((await retriedOcr.promise).length, 0);
+
+// OCR-mode translation request sends units with spatial box hints and an ids-only schema
 const ocrTranslation = imageApi.requestImageTranslation(sampleImageData, { ...cacheSettings, apiKey: "test" }, azureUnits);
 const ocrBody = JSON.parse(transport.options.data);
 assert.deepEqual(ocrBody.response_format.json_schema.schema.properties.regions.items.required, ["ids", "translation"]);
 assert.match(ocrBody.messages[1].content[0].text, /おはよう/);
+assert.match(ocrBody.messages[1].content[0].text, /"box":\[100,100,200,300\]/);
 assert.doesNotMatch(ocrBody.messages[1].content[0].text, /box_2d/);
 transport.options.onload({
   status: 200,
@@ -1019,6 +1040,9 @@ assert.equal(viewerDialog.getAttribute("data-hide-pins"), "true");
 togglePinsBtn.dispatchClick();
 assert.equal(viewerDialog.getAttribute("data-hide-pins"), null);
 
+// Non-OCR viewer hides the Original toggle; OCR viewer exposes it to inspect extracted source text
+assert.equal(viewerDialog.querySelector('[data-action="toggle-source"]').hidden, true);
+
 // Expand button reveals full region list
 const expandBtn = viewerDialog.querySelector('[data-action="toggle-expand"]');
 const viewerList = viewerDialog.querySelector(".touch-image-translate__viewer-list");
@@ -1033,6 +1057,20 @@ zoomStage.dispatch("touchend", { touches: [], changedTouches: [{ clientX: 162, c
 assert.equal(viewerDialog.isConnected, false);
 assert.equal(resizeDisconnects, 1);
 assert.equal(overlayState.button.dataset.state, "done");
+
+// OCR result in viewer enables Original source text toggle even for a single region
+const ocrViewerDialog = imageApi.openImageViewer(mockImg, ocrResult);
+const sourceToggleBtn = ocrViewerDialog.querySelector('[data-action="toggle-source"]');
+const activeSourceEl = ocrViewerDialog
+  .querySelector(".touch-image-translate__viewer-active")
+  .querySelector(".touch-image-translate__source");
+assert.equal(sourceToggleBtn.hidden, false);
+assert.equal(activeSourceEl.hidden, true);
+sourceToggleBtn.dispatchClick();
+assert.equal(ocrViewerDialog.getAttribute("data-show-source"), "true");
+assert.equal(activeSourceEl.hidden, false);
+imageApi.closeImageViewer();
+assert.equal(resizeDisconnects, 2);
 
 // Single-finger right-swipe is ignored so social media image carousels never conflict
 let prevented = false;
@@ -1122,7 +1160,7 @@ imageApi.onTouchEnd({
 });
 
 imageApi.closeImageViewer();
-assert.equal(resizeDisconnects, 2);
+assert.equal(resizeDisconnects, 3);
 
 // Source changes clear completed results, close any open viewer, and hide the idle button again
 const reopenedDialog = imageApi.handleImageSwipe(mockImg);
@@ -1134,7 +1172,7 @@ assert.equal(overlayState.button.dataset.state, "idle");
 assert.equal(overlayState.button.hidden, true);
 assert.equal(overlayState.overlay.hidden, true);
 assert.equal(overlayState.result, null);
-assert.equal(resizeDisconnects, 3);
+assert.equal(resizeDisconnects, 4);
 delete context.ResizeObserver;
 
 // Ignore an old response even if it arrives before the source-change observer runs.
