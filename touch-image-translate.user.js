@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Image Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.2.4
+// @version      0.2.5
 // @description  Two-finger swipe right on an image to translate with a Babel Lens full-screen zoomable spotlight viewer
 // @author       HAKU
 // @match        *://*/*
@@ -33,7 +33,10 @@
   const IMAGE_MIN_WIDTH = 120;
   const IMAGE_MIN_HEIGHT = 90;
   const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
-  const IMAGE_MAX_EDGE = 1600;
+  const IMAGE_PASSTHROUGH_BYTES = 512 * 1024;
+  const IMAGE_MAX_EDGE = 3200;
+  const IMAGE_MAX_AREA = 1600 * 1600;
+  const IMAGE_JPEG_QUALITY = 0.86;
   const IMAGE_MAX_PIXELS = 4096 * 4096;
   const IMAGE_MAX_REGIONS = 99;
   const EXPECTED_FORMAT =
@@ -2614,15 +2617,23 @@
 
   // Image extraction & normalization
 
-  function normalizedImageDimensions(width, height, maxEdge = IMAGE_MAX_EDGE) {
+  function normalizedImageDimensions(
+    width,
+    height,
+    maxEdge = IMAGE_MAX_EDGE,
+    maxArea = IMAGE_MAX_AREA,
+  ) {
     const w = Number(width) || 0;
     const h = Number(height) || 0;
     if (w <= 0 || h <= 0) return { height: 0, width: 0 };
-    const longest = Math.max(w, h);
-    if (longest <= maxEdge) {
+    const scale = Math.min(
+      1,
+      maxEdge / Math.max(w, h),
+      Math.sqrt(maxArea / (w * h)),
+    );
+    if (scale >= 1) {
       return { height: Math.round(h), width: Math.round(w) };
     }
-    const scale = maxEdge / longest;
     return {
       height: Math.max(1, Math.round(h * scale)),
       width: Math.max(1, Math.round(w * scale)),
@@ -2703,7 +2714,16 @@
     return "image/jpeg";
   }
 
-  function rasterizeDrawableToBase64(drawable, width, height) {
+  function canvasHasTransparency(ctx, width, height) {
+    if (typeof ctx?.getImageData !== "function") return true;
+    const { data } = ctx.getImageData(0, 0, width, height);
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) return true;
+    }
+    return false;
+  }
+
+  function rasterizeDrawableToBase64(drawable, width, height, opaque = false) {
     try {
       const dims = normalizedImageDimensions(width, height);
       if (!dims.width || !dims.height) return null;
@@ -2714,7 +2734,11 @@
       const ctx = canvas.getContext("2d");
       if (!ctx || typeof ctx.drawImage !== "function") return null;
       ctx.drawImage(drawable, 0, 0, dims.width, dims.height);
-      const dataUrl = canvas.toDataURL("image/png");
+      const usePng =
+        !opaque && canvasHasTransparency(ctx, dims.width, dims.height);
+      const dataUrl = usePng
+        ? canvas.toDataURL("image/png")
+        : canvas.toDataURL("image/jpeg", IMAGE_JPEG_QUALITY);
       const parsed = parseDataUrlImage(dataUrl);
       if (!parsed) return null;
       return {
@@ -2736,10 +2760,22 @@
         throw new Error("Image is too large to translate (limit: 10 MB).");
       }
       if (img?.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+        const dims = normalizedImageDimensions(
+          img.naturalWidth,
+          img.naturalHeight,
+        );
+        if (
+          dims.width === img.naturalWidth &&
+          dims.height === img.naturalHeight &&
+          parsedDataUrl.byteLength <= IMAGE_PASSTHROUGH_BYTES
+        ) {
+          return { ...parsedDataUrl, height: dims.height, width: dims.width };
+        }
         const rasterized = rasterizeDrawableToBase64(
           img,
           img.naturalWidth,
           img.naturalHeight,
+          parsedDataUrl.mimeType === "image/jpeg",
         );
         if (rasterized) return rasterized;
       }
@@ -2751,6 +2787,7 @@
         img,
         img.naturalWidth,
         img.naturalHeight,
+        /\.jpe?g(?:$|[?#])/i.test(src),
       );
       if (rasterized && rasterized.byteLength <= IMAGE_MAX_BYTES) {
         return rasterized;
@@ -2831,10 +2868,26 @@
           if (bitmap.width * bitmap.height > IMAGE_MAX_PIXELS * 4) {
             throw new Error("Image dimensions are too large to translate.");
           }
+          const dims = normalizedImageDimensions(bitmap.width, bitmap.height);
+          if (
+            dims.width === bitmap.width &&
+            dims.height === bitmap.height &&
+            rawBytes.byteLength <= IMAGE_PASSTHROUGH_BYTES &&
+            /^image\/(?:jpeg|png|webp)$/.test(mimeType)
+          ) {
+            return {
+              base64: bytesToBase64(rawBytes),
+              byteLength: rawBytes.byteLength,
+              height: bitmap.height,
+              mimeType,
+              width: bitmap.width,
+            };
+          }
           const rasterized = rasterizeDrawableToBase64(
             bitmap,
             bitmap.width,
             bitmap.height,
+            mimeType === "image/jpeg",
           );
           if (rasterized) return rasterized;
         } finally {
@@ -4160,6 +4213,7 @@
       isTranslatableImage,
       mergeDenseImageRegions,
       normalizeImageRegion,
+      normalizedImageDimensions,
       normalizeText,
       onGesture,
       onTouchEnd,

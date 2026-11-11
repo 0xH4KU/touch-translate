@@ -1127,7 +1127,15 @@ for (const observeBeforeReply of [false, true]) {
   assert.equal(mockImg.getAttribute("aria-busy"), null);
 }
 
-// extractNormalizedImage: data URL, binary ArrayBuffer, and PNG transparency preservation
+// extractNormalizedImage: pixel-budget scaling, JPEG compression for opaque images, and PNG transparency preservation
+assert.deepEqual(
+  { ...imageApi.normalizedImageDimensions(4000, 3000) },
+  { width: 1848, height: 1386 },
+);
+assert.deepEqual(
+  { ...imageApi.normalizedImageDimensions(1080, 5400) },
+  { width: 640, height: 3200 },
+);
 context.btoa = (bin) => Buffer.from(bin, "binary").toString("base64");
 const dataUrlExtracted = await imageApi.extractNormalizedImage({
   currentSrc: "data:image/png;base64,iVBORw0KGgo=",
@@ -1137,10 +1145,14 @@ assert.equal(dataUrlExtracted.base64, "iVBORw0KGgo=");
 
 const createElementBeforeCanvas = document.createElement;
 let encodedImageType;
+let mockCanvasAlpha = 0;
 document.createElement = (tag) =>
   tag === "canvas"
     ? {
-        getContext: () => ({ drawImage() {} }),
+        getContext: () => ({
+          drawImage() {},
+          getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, mockCanvasAlpha]) }),
+        }),
         toDataURL(type) {
           encodedImageType = type;
           return `data:${type};base64,iVBORw0KGgo=`;
@@ -1150,12 +1162,23 @@ document.createElement = (tag) =>
 const resizedImage = await imageApi.extractNormalizedImage({
   currentSrc: "data:image/png;base64,iVBORw0KGgo=",
   complete: true,
-  naturalWidth: 2000,
-  naturalHeight: 500,
+  naturalWidth: 4000,
+  naturalHeight: 1000,
 });
 assert.equal(encodedImageType, "image/png");
-assert.equal(resizedImage.width, 1600);
-assert.equal(resizedImage.height, 400);
+assert.equal(resizedImage.width, 3200);
+assert.equal(resizedImage.height, 800);
+mockCanvasAlpha = 255;
+const compressedOpaque = await imageApi.extractNormalizedImage({
+  currentSrc: "https://example.com/screenshot.png",
+  complete: true,
+  naturalWidth: 2000,
+  naturalHeight: 2000,
+});
+assert.equal(encodedImageType, "image/jpeg");
+assert.equal(compressedOpaque.mimeType, "image/jpeg");
+assert.equal(compressedOpaque.width, 1600);
+assert.equal(compressedOpaque.height, 1600);
 document.createElement = createElementBeforeCanvas;
 
 // Frontend DOM assembly in insertTranslation preserves safe links, colors, and target word order

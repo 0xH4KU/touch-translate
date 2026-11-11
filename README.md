@@ -68,7 +68,7 @@ For Chat Completions, use a Base URL such as `https://api.openai.com/v1`. The sc
 
 The scripts prefer strict JSON Schema output and automatically retry with exponential backoff on HTTP 429 rate limits and 5xx server errors, respecting `Retry-After` when provided. Quota and billing errors stop immediately. Thinking level defaults to `low` (configurable between `minimal`, `low`, `medium`, and `high`) and is sent as `reasoning_effort` in Chat Completions and `thinkingConfig.thinkingLevel` in Gemini (native).
 
-Image translation requires a model that accepts image input. Images are resized to a maximum edge of 1,600 pixels and normalized to PNG to preserve transparency. Changing an image's source cancels its pending request and clears its previous translation.
+Image translation requires a model that accepts image input. Images are scaled within a 2.56 MP pixel budget (up to a 3,200-pixel long edge so tall screenshots and webtoons stay readable) and encoded as JPEG when opaque or PNG when transparency is present. Changing an image's source cancels its pending request and clears its previous translation.
 
 For Gemini native image requests, `touch-image-translate.user.js` uses a small output schema and validates region bounds locally. If the API returns HTTP 400 `INVALID_ARGUMENT`, it retries once in JSON mode without the output schema.
 

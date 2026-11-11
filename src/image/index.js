@@ -34,6 +34,7 @@
       isTranslatableImage,
       mergeDenseImageRegions,
       normalizeImageRegion,
+      normalizedImageDimensions,
       normalizeText,
       onGesture,
       onTouchEnd,
