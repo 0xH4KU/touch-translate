@@ -207,6 +207,18 @@
   }
 
 
+  function isSheerBackgroundColor(color) {
+    const value = String(color || "transparent").trim();
+    if (!value || value === "transparent") return true;
+    const alphaMatch =
+      /^rgba\([^)]*,\s*([+-]?(?:\d*\.)?\d+%?)\s*\)$/i.exec(value) ||
+      /\/\s*([+-]?(?:\d*\.)?\d+%?)\s*\)$/.exec(value);
+    if (!alphaMatch) return false;
+    const raw = alphaMatch[1];
+    const alpha = raw.endsWith("%") ? parseFloat(raw) / 100 : parseFloat(raw);
+    return Number.isFinite(alpha) && alpha <= 0.12;
+  }
+
   function resolveTargetImage(target, touch) {
     if (isSuiteUi(target)) return null;
     if (
@@ -248,14 +260,19 @@
         const style = getComputedStyle(element);
         if (Number(style?.opacity) === 0) continue;
         if (/^(?:img|svg|canvas|video|iframe|object|embed)$/i.test(element.tagName || "")) return false;
+        const backdrop =
+          style?.backdropFilter || style?.webkitBackdropFilter || "none";
+        if (/blur\(/i.test(backdrop)) return false;
         const background = style?.backgroundImage || "none";
         const src = String(img.currentSrc || img.src || "");
         if (src && background.includes(src)) continue;
-        const color = style?.backgroundColor || "transparent";
-        const transparent = color === "transparent" ||
-          /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/i.test(color) ||
-          /\/\s*0(?:\.0+)?%?\s*\)$/.test(color);
-        if (!transparent || background !== "none") return false;
+        const sheerBgImage =
+          background === "none" ||
+          (!/url\(/i.test(background) &&
+            /(?:linear|radial|conic)-gradient\(/i.test(background));
+        if (!isSheerBackgroundColor(style?.backgroundColor) || !sheerBgImage) {
+          return false;
+        }
         if (normalizeText(element.innerText ?? element.textContent)) {
           if (typeof document.createRange !== "function") return false;
           const range = document.createRange();
@@ -556,11 +573,13 @@
       return false;
     }
     const anchor = imageAnchor(img);
+    let reparented = false;
     if (
       anchor?.parentElement &&
       state.overlay.nextElementSibling !== anchor
     ) {
       anchor.insertAdjacentElement("beforebegin", state.overlay);
+      reparented = true;
     }
     const isIdle =
       (state.button?.dataset?.state || "idle") === "idle" &&
@@ -588,6 +607,7 @@
     const targetY = Number(rect.top) || 0;
     const currentRect = state.overlay.getBoundingClientRect?.();
     const needsPositionUpdate =
+      reparented ||
       !currentRect ||
       !state.positioned ||
       Math.abs((Number(currentRect.left) || 0) - targetX) > 0.5 ||
@@ -598,27 +618,28 @@
       let left = targetX;
       let top = targetY;
       if (currentRect) {
-        state.overlay.style?.setProperty?.("left", "0px", "important");
-        state.overlay.style?.setProperty?.("top", "0px", "important");
-        const originRect = state.overlay.getBoundingClientRect?.() || {
-          left: 0,
-          top: 0,
-        };
-        left = targetX - (Number(originRect.left) || 0);
-        top = targetY - (Number(originRect.top) || 0);
+        if (state.positioned && !reparented) {
+          left = state.left + (targetX - (Number(currentRect.left) || 0));
+          top = state.top + (targetY - (Number(currentRect.top) || 0));
+        } else {
+          state.overlay.style?.setProperty?.("left", "0px", "important");
+          state.overlay.style?.setProperty?.("top", "0px", "important");
+          const originRect = state.overlay.getBoundingClientRect?.() || {
+            left: 0,
+            top: 0,
+          };
+          left = targetX - (Number(originRect.left) || 0);
+          top = targetY - (Number(originRect.top) || 0);
+        }
       }
+      left = Math.round(left * 100) / 100;
+      top = Math.round(top * 100) / 100;
       const width = Math.max(0, Math.round(rect.width * 100) / 100);
       const height = Math.max(0, Math.round(rect.height * 100) / 100);
-      state.overlay.style?.setProperty?.(
-        "left",
-        `${Math.round(left * 100) / 100}px`,
-        "important",
-      );
-      state.overlay.style?.setProperty?.(
-        "top",
-        `${Math.round(top * 100) / 100}px`,
-        "important",
-      );
+      state.left = left;
+      state.top = top;
+      state.overlay.style?.setProperty?.("left", `${left}px`, "important");
+      state.overlay.style?.setProperty?.("top", `${top}px`, "important");
       state.overlay.style?.setProperty?.("width", `${width}px`, "important");
       state.overlay.style?.setProperty?.("height", `${height}px`, "important");
       state.positioned = true;
@@ -628,12 +649,16 @@
       8,
       Math.round(rect.width - (box.left + box.width) + 8),
     );
-    state.button?.style?.setProperty?.("top", `${buttonTop}px`, "important");
-    state.button?.style?.setProperty?.(
-      "right",
-      `${buttonRight}px`,
-      "important",
-    );
+    if (state.buttonTop !== buttonTop || state.buttonRight !== buttonRight) {
+      state.buttonTop = buttonTop;
+      state.buttonRight = buttonRight;
+      state.button?.style?.setProperty?.("top", `${buttonTop}px`, "important");
+      state.button?.style?.setProperty?.(
+        "right",
+        `${buttonRight}px`,
+        "important",
+      );
+    }
     return true;
   }
 
@@ -654,12 +679,16 @@
       state = {
         activeRegion: "",
         button,
+        buttonRight: null,
+        buttonTop: null,
         job: null,
+        left: 0,
         overlay,
         positioned: false,
         regions: [],
         result: null,
         src: String(img.currentSrc || img.src || "").trim(),
+        top: 0,
       };
       imageStates.set(img, state);
       setImageButtonState(img, "idle");

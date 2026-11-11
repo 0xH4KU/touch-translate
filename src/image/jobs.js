@@ -53,7 +53,12 @@
       const cache = loadCache();
       const cacheKey = src ? hashImageCacheKey(src, settings, ocr.provider) : "";
       const cached = cacheKey ? cache[cacheKey] : null;
-      if (typeof cached?.translation === "string" && cached.translation) {
+      if (
+        typeof cached?.translation === "string" &&
+        cached.translation &&
+        Array.isArray(cached.regions) &&
+        cached.regions.length
+      ) {
         state.job = null;
         restoreAriaBusy(job);
         return finishImageResult(img, cached, job.viewerIntent);

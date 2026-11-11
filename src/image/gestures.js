@@ -52,6 +52,36 @@
     };
   }
 
+  function touchJustOutsideImage(img, touch, target) {
+    if (
+      !img ||
+      !Number.isFinite(touch?.clientX) ||
+      !Number.isFinite(touch?.clientY)
+    ) {
+      return false;
+    }
+    if (target?.closest?.("input, textarea, select, button, a[href]")) {
+      return false;
+    }
+    const rect = img.getBoundingClientRect?.();
+    if (!rect || !(rect.width > 0) || !(rect.height > 0)) return false;
+    const right = rect.right ?? rect.left + rect.width;
+    const bottom = rect.bottom ?? rect.top + rect.height;
+    const inside =
+      touch.clientX >= rect.left &&
+      touch.clientX <= right &&
+      touch.clientY >= rect.top &&
+      touch.clientY <= bottom;
+    if (inside) return false;
+    const margin = 28;
+    return (
+      touch.clientX >= rect.left - margin &&
+      touch.clientX <= right + margin &&
+      touch.clientY >= rect.top - margin &&
+      touch.clientY <= bottom + margin
+    );
+  }
+
   function onGesture(event) {
     if (swipe && event.cancelable) event.preventDefault?.();
   }
@@ -132,7 +162,14 @@
         : rawTarget;
     const imgA = resolveTargetImage(targetA, touchA);
     const imgB = resolveTargetImage(targetB, touchB);
-    const img = imgA && imgA === imgB ? imgA : null;
+    const img =
+      imgA && imgA === imgB
+        ? imgA
+        : imgA && !imgB && touchJustOutsideImage(imgA, touchB, targetB)
+          ? imgA
+          : imgB && !imgA && touchJustOutsideImage(imgB, touchA, targetA)
+            ? imgB
+            : null;
     const control = rawTarget?.closest?.("input, textarea, select, button");
     if (
       !img ||
@@ -220,7 +257,6 @@
       swipe.action,
       swipe.ready,
     );
-    syncImageOverlay(swipe.img);
   }
 
   function onTouchEnd(event) {
@@ -267,7 +303,7 @@
   }
 
   function scheduleImageScan() {
-    if (imageScanTimer) return;
+    if (!trackedImages.size || imageScanTimer) return;
     imageScanTimer = setTimeout(scanPageImages, 120);
   }
 

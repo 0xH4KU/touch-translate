@@ -307,6 +307,7 @@ const shortLineBox = [107, 104, 786, 855];
 
 // Image content box and Spotlight SVG region layout
 context.getComputedStyle = (element) => ({
+  backdropFilter: element?.backdropFilter || "none",
   contentVisibility: element?.contentVisibility,
   direction: element?.direction,
   display: element?.display || "block",
@@ -854,6 +855,20 @@ assert.equal(
   imageApi.resolveTargetImage(imageOverlayLink, { clientX: 80, clientY: 90 }),
   mockImg,
 );
+// Sheer click-catcher overlays (alpha <= 0.12) and decorative gradients still allow image swiping
+imageOverlayLink.backgroundColor = "rgba(0, 0, 0, 0.02)";
+imageOverlayLink.backgroundImage = "linear-gradient(to top, rgba(0, 0, 0, 0.35), transparent)";
+assert.equal(
+  imageApi.resolveTargetImage(imageOverlayLink, { clientX: 80, clientY: 90 }),
+  mockImg,
+);
+// Spoiler/NSFW backdrop-blur covers must still block hit resolution
+imageOverlayLink.backdropFilter = "blur(12px)";
+assert.equal(
+  imageApi.resolveTargetImage(imageOverlayLink, { clientX: 80, clientY: 90 }),
+  null,
+);
+delete imageOverlayLink.backdropFilter;
 delete imageOverlayLink.backgroundImage;
 delete imageOverlayLink.backgroundColor;
 
@@ -1161,6 +1176,39 @@ imageApi.onTouchEnd({
 
 imageApi.closeImageViewer();
 assert.equal(resizeDisconnects, 3);
+
+// Second finger grazing just outside a compact image's border still commits the swipe
+imageApi.onTouchStart({
+  target: mockImg,
+  touches: [
+    { identifier: 1, clientX: 50, clientY: 230, target: mockImg },
+    { identifier: 2, clientX: 55, clientY: 272, target: mockContainer },
+  ],
+});
+imageApi.onTouchMove({
+  cancelable: true,
+  preventDefault() {},
+  touches: [
+    { identifier: 1, clientX: 125, clientY: 230, target: mockImg },
+    { identifier: 2, clientX: 130, clientY: 272, target: mockContainer },
+  ],
+});
+assert.equal(overlayState.button.dataset.state, "gesture");
+imageApi.resetTouches();
+
+// Repositioning an already-placed overlay computes delta directly without resetting to 0px
+let zeroResetWrites = 0;
+const origSetProperty = overlayState.overlay.style.setProperty.bind(overlayState.overlay.style);
+overlayState.overlay.style.setProperty = (k, v) => {
+  if ((k === "left" || k === "top") && v === "0px") zeroResetWrites += 1;
+  origSetProperty(k, v);
+};
+const origImgRect = mockImg.getBoundingClientRect;
+mockImg.getBoundingClientRect = () => ({ left: 24, top: 36, width: 320, height: 240 });
+imageApi.syncImageOverlay(mockImg);
+assert.equal(zeroResetWrites, 0);
+mockImg.getBoundingClientRect = origImgRect;
+overlayState.overlay.style.setProperty = origSetProperty;
 
 // Source changes clear completed results, close any open viewer, and hide the idle button again
 const reopenedDialog = imageApi.handleImageSwipe(mockImg);
