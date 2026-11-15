@@ -2,6 +2,7 @@
 
   let swipe = null;
   let fourFinger = null;
+  let lastSwipeCommitAt = 0;
 
 
 
@@ -94,6 +95,18 @@
     return false;
   }
 
+  function isSheerBackgroundColor(color) {
+    const value = String(color || "transparent").trim();
+    if (!value || value === "transparent") return true;
+    const alphaMatch =
+      /^rgba\([^)]*,\s*([+-]?(?:\d*\.)?\d+%?)\s*\)$/i.exec(value) ||
+      /\/\s*([+-]?(?:\d*\.)?\d+%?)\s*\)$/.exec(value);
+    if (!alphaMatch) return false;
+    const raw = alphaMatch[1];
+    const alpha = raw.endsWith("%") ? parseFloat(raw) / 100 : parseFloat(raw);
+    return Number.isFinite(alpha) && alpha <= 0.12;
+  }
+
   function isOverlayLink(element) {
     if (!element || element.tagName !== "A") return false;
     if (element.matches?.(OVERLAY_LINK_SELECTOR)) return true;
@@ -110,10 +123,54 @@
     return false;
   }
 
+  function isOverlayCover(element) {
+    if (isOverlayLink(element)) return true;
+    if (
+      !element ||
+      element.matches?.(`input, textarea, select, button, ${BLOCK_SELECTOR}`) ||
+      normalizeText(element.innerText ?? element.textContent)
+    ) {
+      return false;
+    }
+    const style = getComputedStyle(element);
+    if (style?.position !== "absolute" && style?.position !== "fixed") {
+      return false;
+    }
+    const backdrop =
+      style?.backdropFilter || style?.webkitBackdropFilter || "none";
+    if (/blur\(/i.test(backdrop)) return false;
+    const background = style?.backgroundImage || "none";
+    const sheerBgImage =
+      background === "none" ||
+      (!/url\(/i.test(background) &&
+        /(?:linear|radial|conic)-gradient\(/i.test(background));
+    if (!isSheerBackgroundColor(style?.backgroundColor) || !sheerBgImage) {
+      return false;
+    }
+    const parent = element.parentElement;
+    if (
+      parent &&
+      typeof parent.getBoundingClientRect === "function" &&
+      typeof element.getBoundingClientRect === "function"
+    ) {
+      const pRect = parent.getBoundingClientRect();
+      const rect = element.getBoundingClientRect();
+      if (
+        pRect.width > 0 &&
+        pRect.height > 0 &&
+        rect.width >= pRect.width * 0.85 &&
+        rect.height >= pRect.height * 0.85
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function resolveTargetElement(target, touch) {
     if (!target) return null;
     if (
-      isOverlayLink(target) &&
+      isOverlayCover(target) &&
       typeof document.elementsFromPoint === "function" &&
       touch
     ) {
@@ -123,7 +180,7 @@
         (element) =>
           (typeof Element === "undefined" || element instanceof Element) &&
           element !== target &&
-          !isOverlayLink(element) &&
+          !isOverlayCover(element) &&
           !isPageLevelContainer(element),
       );
       if (underlying) return underlying;
@@ -274,6 +331,7 @@
           Date.now() - gesture.at <= FOUR_FINGER_MAX_MS
         ) {
           if (event.cancelable) event.preventDefault();
+          lastSwipeCommitAt = Date.now();
           startPageTranslation();
         }
       }
@@ -302,6 +360,7 @@
       swipeShouldCommit(dx, velocityX, gesture.ready)
     ) {
       if (event.cancelable) event.preventDefault();
+      lastSwipeCommitAt = now;
       handleSwipe(gesture.element);
     } else {
       restoreGestureIndicator(gesture);

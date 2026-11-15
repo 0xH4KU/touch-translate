@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
 import { createHarness, cacheSettings } from "./fixtures.mjs";
 
 const { youtubeApi: api, youtubeSource, context, transport, storage } = createHarness();
@@ -228,7 +230,11 @@ const zhCnTrack = { baseUrl: `https://www.youtube.com/api/timedtext?v=${videoId}
 const bilingualSnapshot = { videoId, tracks: [track, zhTwTrack], selected: { languageCode: "zh-TW", kind: "", vssId: ".zh-TW" }, defaultIndex: 0 };
 assert.equal(api.selectYoutubeTrack(bilingualSnapshot, "zh-TW"), track, "Source track selection must avoid picking the target language when an original track exists");
 assert.equal(api.selectTargetYoutubeTrack(bilingualSnapshot, track, "zh-TW"), zhTwTrack, "Target track selection must match an existing human subtitle track in the target language");
-assert.equal(api.selectTargetYoutubeTrack({ videoId, tracks: [track, zhCnTrack] }, track, "zh-TW"), null, "Simplified Chinese tracks must not be treated as native zh-TW tracks");
+assert.equal(api.selectTargetYoutubeTrack({ videoId, tracks: [track, zhCnTrack] }, track, "zh-TW"), zhCnTrack, "Simplified Chinese tracks must be usable as native Chinese tracks when Traditional Chinese is absent");
+assert.equal(api.selectTargetYoutubeTrack({ videoId, tracks: [track, zhCnTrack, zhTwTrack] }, track, "zh-TW"), zhTwTrack, "Traditional Chinese tracks must still be preferred over Simplified Chinese when both exist");
+assert.equal(api.selectTargetYoutubeTrack({ videoId, tracks: [track, zhCnTrack, zhTwTrack] }, track, "zh-TW", true), null, "forceAi must bypass native target-track merging");
+assert.equal(api.sameLanguage("zh-CN", "zh-TW"), true);
+assert.equal(api.sameLanguage("zh", "zh-TW"), true);
 assert.equal(
   new URL(api.youtubeCaptionUrl(track, { ...snapshot, observedUrls: [baseUrl + "&tlang=zh-Hant&pot=tlang-observed-token"] })).searchParams.get("pot"),
   "tlang-observed-token",
@@ -244,6 +250,91 @@ assert.deepEqual(plain(mergedChunks[0].groups), [
   { from: 0, to: 2, start: 1000, end: 3000, text: "When we arrived", translation: "當我們到達時，" },
   { from: 3, to: 3, start: 3000, end: 4800, text: "we sat down.", translation: "便坐了下來。" },
 ], "Native bilingual merging must align ASR words to human target cues without API calls");
+
+const cjkMerged = api.mergeBilingualCaptions(
+  [{ start: 1000, end: 2800, text: "Hello world" }],
+  [{ start: 1000, end: 1800, text: "你好" }, { start: 1800, end: 2800, text: "世界" }],
+  false,
+);
+assert.equal(cjkMerged[0].groups[0].translation, "你好世界", "Native bilingual merging must join CJK target cues without inserting ASCII spaces");
+
+assert.equal(
+  api.parseYoutubeCaptions(json3([event(1000, 2000, "- Really?\n- Yes!")]), false)[0].text,
+  "- Really?\n- Yes!",
+  "Human captions must preserve internal line breaks",
+);
+
+assert.equal(far[0].end, 11000, "Initial subtitle batch must stay within 12s for faster startup");
+assert.ok(far[1].end - far[1].start > 12000, "Subsequent subtitle batches must retain full 30s batching");
+
+const seekPrioritySession = {
+  video: { currentTime: 10, playbackRate: 1, paused: false },
+  chunks: [
+    { start: 0, end: 11000, done: false, failed: false, groups: [{ start: 0, end: 11000 }] },
+    { start: 12000, end: 42000, done: false, failed: false, groups: [{ start: 12000, end: 42000 }] },
+  ],
+};
+assert.equal(api.subtitleQueueChunk(seekPrioritySession), seekPrioritySession.chunks[1], "Near-end playing seek must prioritize the upcoming chunk");
+seekPrioritySession.video.paused = true;
+assert.equal(api.subtitleQueueChunk(seekPrioritySession), seekPrioritySession.chunks[0], "Paused near-end seek must still translate the visible chunk");
+
+const boundaryChunks = [
+  { start: 1000, end: 4000, groups: [{ start: 1000, end: 2000 }, { start: 2500, end: 4000 }] },
+  { start: 6000, end: 8000, groups: [{ start: 6000, end: 8000 }] },
+];
+assert.equal(api.nextSubtitleBoundaryMs(boundaryChunks, 500), 1000);
+assert.equal(api.nextSubtitleBoundaryMs(boundaryChunks, 1500), 2000);
+assert.equal(api.nextSubtitleBoundaryMs(boundaryChunks, 2100), 2500);
+assert.equal(api.nextSubtitleBoundaryMs(boundaryChunks, 4500), 6000);
+assert.equal(api.nextSubtitleBoundaryMs(boundaryChunks, 8000), null);
+
+// Auto-start must skip same-language Chinese videos (zh-CN source with zh-TW target) unless forceAi is enabled.
+{
+  const zhOnlyUrl = `https://www.youtube.com/api/timedtext?v=${videoId}&lang=zh-CN`;
+  const zhOnlySnapshot = { videoId, tracks: [{ baseUrl: zhOnlyUrl, languageCode: "zh-CN", kind: "", vssId: ".zh-CN" }] };
+  const autoSkipped = await new Promise((resolve) => {
+    const view = {
+      player: { classList: { add() {}, remove() {}, contains: () => false }, style: {} },
+      video: { currentTime: 0, playbackRate: 1, paused: true, addEventListener() {}, removeEventListener() {} },
+      trigger: { dataset: {} },
+      toggle: { textContent: "", setAttribute() {} },
+      status: { dataset: {} },
+      retry: {},
+      captions: {},
+      source: {},
+      translation: {},
+      host: { dataset: {} },
+      preferences: { enabled: true, smart: true, forceAi: false, translationOnly: false },
+    };
+    const priorFetch = context.fetch;
+    void priorFetch;
+    const autoCalls = [];
+    const autoSandbox = vm.runInNewContext(
+      `${readFileSync(new URL("../src/shared/utils.js", import.meta.url), "utf8")}
+      ${readFileSync(new URL("../src/youtube/config.js", import.meta.url), "utf8")}
+      ${readFileSync(new URL("../src/youtube/jobs.js", import.meta.url), "utf8")}
+      ({ startYoutubeSubtitles, getSession: () => subtitleSession, setView: (v) => { subtitleView = v; } })`,
+      {
+        AbortController, URL, clearTimeout, setTimeout,
+        GM_getValue: (_k, d) => d,
+        loadSettings: () => settings,
+        requireReadySettings: (s) => s,
+        youtubeVideoId: () => videoId,
+        captionBridgeRequest: async (action) => action === "snapshot" ? zhOnlySnapshot : null,
+        selectYoutubeTrack: api.selectYoutubeTrack,
+        selectTargetYoutubeTrack: api.selectTargetYoutubeTrack,
+        sameLanguage: api.sameLanguage,
+        setSubtitleStatus() {},
+        cancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
+        requestSubtitleTranslation: () => { autoCalls.push(1); return { promise: Promise.resolve([]), abort() {} }; },
+      },
+    );
+    autoSandbox.setView(view);
+    autoSandbox.startYoutubeSubtitles(true).then(() => resolve({ session: autoSandbox.getSession(), calls: autoCalls.length }));
+  });
+  assert.equal(autoSkipped.session, null);
+  assert.equal(autoSkipped.calls, 0, "Auto-start must not call translation API for zh-CN track when target is zh-TW");
+}
 
 api.setSession(null);
 console.log("YouTube subtitle checks passed");

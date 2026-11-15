@@ -82,7 +82,54 @@ for (const { suite, start, answer } of requests) {
   silentAbort.abort();
   await assert.rejects(silentAbort.promise, (error) => error.name === "AbortError");
   context.GM_xmlhttpRequest = priorTransport;
+
+  // Automatic fallback and memorization when a model rejects reasoning_effort / thinkingConfig.
+  const chatThinkingSettings = { ...settings, model: "no-reasoning-chat", thinkingLevel: "high" };
+  const chatThinkingReq = start(chatThinkingSettings);
+  assert.equal(JSON.parse(transport.options.data).reasoning_effort, "high");
+  transport.options.onload({
+    status: 400,
+    responseText: JSON.stringify({ error: { message: "Unsupported parameter: 'reasoning_effort'" } }),
+  });
+  assert.equal(JSON.parse(transport.options.data).reasoning_effort, undefined);
+  transport.options.onload({
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify(answer) } }] }),
+  });
+  await chatThinkingReq.promise;
+  const chatThinkingRemembered = start(chatThinkingSettings);
+  assert.equal(JSON.parse(transport.options.data).reasoning_effort, undefined);
+  transport.options.onload({
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify(answer) } }] }),
+  });
+  await chatThinkingRemembered.promise;
+
+  const nativeThinkingSettings = { ...nativeSettings, model: "no-thinking-gemini", thinkingLevel: "medium" };
+  const nativeThinkingReq = start(nativeThinkingSettings);
+  assert.equal(JSON.parse(transport.options.data).generationConfig.thinkingConfig.thinkingLevel, "medium");
+  transport.options.onload({
+    status: 400,
+    responseText: JSON.stringify({ error: { message: "thinkingConfig is not supported for this model" } }),
+  });
+  assert.equal(JSON.parse(transport.options.data).generationConfig.thinkingConfig, undefined);
+  transport.options.onload({
+    status: 200,
+    responseText: JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: JSON.stringify(answer) }] } }] }),
+  });
+  await nativeThinkingReq.promise;
+  const nativeThinkingRemembered = start(nativeThinkingSettings);
+  assert.equal(JSON.parse(transport.options.data).generationConfig.thinkingConfig, undefined);
+  transport.options.onload({
+    status: 200,
+    responseText: JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: JSON.stringify(answer) }] } }] }),
+  });
+  await nativeThinkingRemembered.promise;
 }
+
+assert.equal(api.thinkingUnsupported(400, "Unknown parameter: 'reasoning_effort'"), true);
+assert.equal(api.thinkingUnsupported(422, "thinkingConfig is not supported"), true);
+assert.equal(api.thinkingUnsupported(401, "reasoning_effort"), false);
 
 assert.equal(api.parseInlineTranslation("<0>Hallucinated wrapper</0> and stray <0> or <1/> tag.", 0).translation, "Hallucinated wrapper and stray  or  tag.");
 assert.deepEqual(

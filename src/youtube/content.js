@@ -6,12 +6,17 @@
     } catch { return null; }
   }
 
+  function chineseScript(value) {
+    const raw = String(value || "").trim();
+    if (/^(?:zh[-_](?:tw|hk|mo|hant)|traditional\s+chinese|繁體|正體)/i.test(raw)) return "hant";
+    if (/^(?:zh[-_](?:cn|sg|hans)|simplified\s+chinese|简体|簡體)/i.test(raw)) return "hans";
+    return "";
+  }
+
   function normalizeLanguageTag(value) {
     const raw = String(value || "").trim();
     if (!raw) return "";
-    if (/^(?:zh[-_](?:tw|hk|mo|hant)|traditional\s+chinese|繁體|正體)/i.test(raw)) return "zh-hant";
-    if (/^(?:zh[-_](?:cn|sg|hans)|simplified\s+chinese|简体|簡體)/i.test(raw)) return "zh-hans";
-    if (/^(?:zh|chinese|中文|漢語|汉语)$/i.test(raw)) return "zh";
+    if (isChineseLanguage(raw)) return "zh";
     const aliases = {
       english: "en", 英文: "en", 英語: "en",
       japanese: "ja", 日文: "ja", 日語: "ja", 日本語: "ja",
@@ -27,9 +32,7 @@
   function sameLanguage(a, b) {
     const tagA = normalizeLanguageTag(a);
     const tagB = normalizeLanguageTag(b);
-    if (!tagA || !tagB) return false;
-    if (tagA === tagB) return true;
-    return (tagA === "zh" && tagB.startsWith("zh")) || (tagB === "zh" && tagA.startsWith("zh"));
+    return Boolean(tagA && tagB && tagA === tagB);
   }
 
   function selectYoutubeTrack(snapshot, targetLanguage = "") {
@@ -45,13 +48,15 @@
       candidates.find((track) => track.kind !== "asr") || candidates[0] || chosen || null;
   }
 
-  function selectTargetYoutubeTrack(snapshot, sourceTrack, targetLanguage = "") {
-    if (!sourceTrack || !targetLanguage || sameLanguage(sourceTrack.languageCode, targetLanguage)) return null;
+  function selectTargetYoutubeTrack(snapshot, sourceTrack, targetLanguage = "", forceAi = false) {
+    if (forceAi || !sourceTrack || !targetLanguage || sameLanguage(sourceTrack.languageCode, targetLanguage)) return null;
     const tracks = Array.isArray(snapshot?.tracks) ? snapshot.tracks : [];
-    const exact = tracks.find((track) => track !== sourceTrack && track.kind !== "asr" &&
-      String(track.languageCode || "").toLowerCase() === String(targetLanguage).trim().toLowerCase());
-    return exact || tracks.find((track) => track !== sourceTrack && track.kind !== "asr" &&
-      sameLanguage(track.languageCode, targetLanguage)) || null;
+    const human = tracks.filter((track) => track !== sourceTrack && track.kind !== "asr");
+    const targetLower = String(targetLanguage).trim().toLowerCase();
+    const targetScript = chineseScript(targetLanguage);
+    return human.find((track) => String(track.languageCode || "").toLowerCase() === targetLower) ||
+      (targetScript && human.find((track) => chineseScript(track.languageCode) === targetScript)) ||
+      human.find((track) => sameLanguage(track.languageCode, targetLanguage)) || null;
   }
 
   function youtubeTrackKey(track) {
@@ -178,17 +183,43 @@
     view.host.dataset.idle = String(!open && !view.status.textContent);
   }
 
+  function nextSubtitleBoundaryMs(chunks, time) {
+    if (!chunks.length) return null;
+    let lo = 0, hi = chunks.length - 1;
+    while (lo <= hi) {
+      const middle = (lo + hi) >> 1;
+      const chunk = chunks[middle];
+      if (time < chunk.start) hi = middle - 1;
+      else if (time >= chunk.end) lo = middle + 1;
+      else {
+        for (const group of chunk.groups) {
+          if (group.start > time) return group.start;
+          if (group.end > time) return group.end;
+        }
+        return chunks[middle + 1]?.start ?? null;
+      }
+    }
+    return chunks[lo]?.start ?? null;
+  }
+
   function renderSubtitles(session = subtitleSession) {
     if (!subtitleView || !session || session !== subtitleSession) return;
     clearTimeout(session.renderTimer);
     const ad = session.player.classList.contains("ad-showing") || session.player.classList.contains("ad-interrupting");
-    const group = ad ? null : subtitleAtTime(session.chunks, session.video.currentTime * 1000);
+    const nowMs = session.video.currentTime * 1000;
+    const group = ad ? null : subtitleAtTime(session.chunks, nowMs);
     if (subtitleView.source.textContent !== (group?.text || "")) subtitleView.source.textContent = group?.text || "";
     if (subtitleView.translation.textContent !== (group?.translation || "")) subtitleView.translation.textContent = group?.translation || "";
     subtitleView.source.hidden = session.preferences.translationOnly && !!group?.translation;
     subtitleView.captions.hidden = !group;
+    subtitleView.host.dataset.paused = String(Boolean(session.video.paused));
     if (!ad && session.video.paused === false && !session.video.ended) {
-      session.renderTimer = setTimeout(() => renderSubtitles(session), 80);
+      const nextMs = nextSubtitleBoundaryMs(session.chunks, nowMs);
+      if (nextMs !== null) {
+        const rate = Math.max(0.25, Number(session.video.playbackRate) || 1);
+        const delay = Math.max(16, Math.min(1000, Math.ceil((nextMs - nowMs) / rate)));
+        session.renderTimer = setTimeout(() => renderSubtitles(session), delay);
+      }
     }
   }
 
@@ -197,6 +228,7 @@
     host.className = `${SCRIPT_PREFIX}__host`;
     host.dataset.touchTranslateUi = "";
     host.dataset.idle = "true";
+    host.dataset.paused = String(Boolean(video.paused));
     const toolbar = document.createElement("div");
     toolbar.className = `${SCRIPT_PREFIX}__toolbar`;
     const button = (text, action, parent = toolbar) => {
@@ -244,11 +276,13 @@
         GM_setValue(PREFERENCES_KEY, preferences);
         applySubtitlePreferences();
         if (key === "smart" && subtitleSession) resegmentYoutubeSubtitles();
+        else if (key === "forceAi" && subtitleView?.preferences.enabled) restartYoutubeSubtitles();
       });
       label.append(text, input);
       controls.append(label);
     };
     preference("Smart segmentation", "smart", "checkbox");
+    preference("Force AI translation", "forceAi", "checkbox");
     preference("Translation only", "translationOnly", "checkbox");
     preference("Text size", "fontSize", "range", 14, 36);
     preference("Bottom position", "bottom", "range", 0, 35);
@@ -282,6 +316,11 @@
         element.addEventListener(type, (event) => event.stopPropagation());
       }
     }
+    for (const type of ["click", "dblclick", "pointerdown", "pointerup", "touchstart", "touchend"]) {
+      captions.addEventListener(type, (event) => {
+        if (video.paused && event.target !== captions) event.stopPropagation();
+      });
+    }
     for (const type of ["pointermove", "input", "change", "keydown"]) {
       controls.addEventListener(type, () => schedulePreferencesHide(subtitleView), { passive: true });
     }
@@ -305,6 +344,7 @@
     const noteActivity = () => {
       syncSubtitleTriggerDock(subtitleView);
       schedulePosition();
+      host.dataset.paused = String(Boolean(video.paused));
       host.dataset.autohide = "false";
       clearTimeout(autohideTimer);
       if (video.paused === false && !video.ended) {

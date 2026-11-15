@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.6.2
+// @version      0.6.3
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -33,7 +33,7 @@
     "ytm-comment-renderer .comment-text",
   ].join(", ");
   const BLOCK_SELECTOR =
-    `p, li, blockquote, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header'], ${YOUTUBE_COMMENT_SELECTOR}`;
+    `p, li, blockquote, figcaption, dt, dd, summary, [data-testid='tweetText'], h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header'], ${YOUTUBE_COMMENT_SELECTOR}`;
   const TITLE_BLOCK_SELECTOR =
     "p, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header']";
   const OVERLAY_LINK_SELECTOR = [
@@ -119,6 +119,16 @@
     return String(value || "")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  function comparableText(value) {
+    return String(value || "").replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+  }
+
+  function isChineseLanguage(value) {
+    return /^(?:zh(?:$|[-_])|chinese(?=$|\s*\()|(?:traditional|simplified)\s+chinese|繁體|正體|简体|簡體|中文|漢語|汉语)/i.test(
+      String(value || "").trim(),
+    );
   }
 
   function errorMessageFor(error) {
@@ -626,6 +636,7 @@
   const REQUEST_TIMEOUT_MS = 60000;
   const MAX_RETRIES = 2;
   const structuredOutputFallbackModels = new Set();
+  const thinkingFallbackModels = new Set();
 
   function endpointFor(baseURL, model = "", apiFormat = "chat-completions") {
     const url = new URL(baseURL);
@@ -736,6 +747,15 @@
     );
   }
 
+  function thinkingUnsupported(status, message) {
+    return (
+      (status === 400 || status === 422) &&
+      /reasoning[_ -]?effort|thinking[_ -]?(?:config|level)|thinking\s+is\s+not\s+supported/i.test(
+        String(message || ""),
+      )
+    );
+  }
+
   function responseFormatError(reason, content, expected = EXPECTED_FORMAT) {
     const error = new Error([
       "Response format mismatch.",
@@ -798,16 +818,18 @@
     const nativeGemini = settings.apiFormat === "gemini-native";
     const url = new URL(endpointFor(settings.baseURL, settings.model, settings.apiFormat));
     const modelKey = `${nativeGemini}\u0000${settings.baseURL}\u0000${settings.model}\u0000${schemaName}`;
+    const thinkingKey = `${nativeGemini}\u0000${settings.baseURL}\u0000${settings.model}\u0000${thinkingLevelFor(settings)}`;
     const headers = { "Content-Type": "application/json" };
     if (!nativeGemini) headers.Authorization = `Bearer ${settings.apiKey}`;
     else if (/^(?:\/v1\/[^/]+\/[^/]+)?\/google-ai-studio\//.test(url.pathname)) {
       headers["cf-aig-authorization"] = `Bearer ${settings.apiKey}`;
     } else headers["x-goog-api-key"] = settings.apiKey;
 
-    const buildPayload = (useSchema) => {
+    const buildPayload = (useSchema, useThinking = true) => {
       if (nativeGemini) {
         const generationConfig = generationConfigFor(settings);
         if (useSchema) generationConfig.responseJsonSchema = schema;
+        if (!useThinking) delete generationConfig.thinkingConfig;
         return {
           systemInstruction: { parts: [{ text: systemPrompt }] },
           contents: [{ role: "user", parts: geminiParts }],
@@ -822,8 +844,8 @@
       const payload = {
         model: settings.model,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userContent }],
-        reasoning_effort: thinkingLevelFor(settings),
       };
+      if (useThinking) payload.reasoning_effort = thinkingLevelFor(settings);
       if (useSchema) {
         payload.response_format = {
           type: "json_schema",
@@ -839,6 +861,7 @@
     let rejectPromise;
     let attempt = 0;
     let schemaFallbackTried = false;
+    let thinkingFallbackTried = false;
     const promise = new Promise((resolve, reject) => {
       rejectPromise = reject;
       const finish = (callback, value) => {
@@ -872,23 +895,24 @@
         if (imageMimeType) lines.push(`Image MIME type: ${imageMimeType}`);
         return new Error(lines.join("\n"));
       };
-      const retry = (disableSchema, response) => {
+      const retry = (disableSchema, disableThinking, response) => {
         if (attempt >= MAX_RETRIES || settled) return false;
         const delay = retryDelayFor(response, attempt++);
-        retryTimer = setTimeout(() => send(disableSchema), delay);
+        retryTimer = setTimeout(() => send(disableSchema, disableThinking), delay);
         return true;
       };
-      const send = (disableSchema = false) => {
+      const send = (disableSchema = false, disableThinking = false) => {
         if (settled) return;
         const useSchema = !disableSchema && !structuredOutputFallbackModels.has(modelKey);
+        const useThinking = !disableThinking && !thinkingFallbackModels.has(thinkingKey);
         const fallback = () => {
           schemaFallbackTried = true;
-          send(true);
+          send(true, disableThinking);
         };
         try {
           currentRequest = GM_xmlhttpRequest({
             method: "POST", url: url.href, headers,
-            data: JSON.stringify(buildPayload(useSchema)),
+            data: JSON.stringify(buildPayload(useSchema, useThinking)),
             anonymous: true, timeout: REQUEST_TIMEOUT_MS,
             onload(response) {
               currentRequest = null;
@@ -898,6 +922,11 @@
                 const responseText = String(response.responseText || "");
                 if (status < 200 || status >= 300) {
                   const detail = extractErrorMessage(responseText);
+                  if (useThinking && !thinkingFallbackTried && thinkingUnsupported(status, detail)) {
+                    thinkingFallbackTried = true;
+                    send(disableSchema, true);
+                    return;
+                  }
                   if (useSchema && !schemaFallbackTried && (
                     structuredOutputUnsupported(status, detail) ||
                     (nativeGemini && allowGenericSchemaFallback && status === 400)
@@ -906,7 +935,7 @@
                     return;
                   }
                   if ((status === 429 || (status >= 500 && status < 600)) &&
-                    !/quota|insufficient_quota|billing/i.test(detail) && retry(disableSchema, response)) return;
+                    !/quota|insufficient_quota|billing/i.test(detail) && retry(disableSchema, disableThinking, response)) return;
                   throw httpFailure(response, useSchema);
                 }
                 let body;
@@ -924,16 +953,17 @@
                   throw error;
                 }
                 if (schemaFallbackTried && disableSchema) structuredOutputFallbackModels.add(modelKey);
+                if (thinkingFallbackTried && disableThinking) thinkingFallbackModels.add(thinkingKey);
                 finish(resolve, result);
               } catch (error) { finish(reject, error); }
             },
             onerror() {
               currentRequest = null;
-              if (!retry(disableSchema)) finish(reject, new Error(`Could not connect to the translation API (${url.href}).`));
+              if (!retry(disableSchema, disableThinking)) finish(reject, new Error(`Could not connect to the translation API (${url.href}).`));
             },
             ontimeout() {
               currentRequest = null;
-              if (!retry(disableSchema)) finish(reject, new Error("The translation API timed out."));
+              if (!retry(disableSchema, disableThinking)) finish(reject, new Error("The translation API timed out."));
             },
             onabort() { finish(reject, cancelledError()); },
           });
@@ -944,6 +974,7 @@
       const failure = new Error(redactProviderDiagnostic(errorMessageFor(error), settings.apiKey));
       failure.name = error?.name || "Error";
       if (error?.code) failure.code = error.code;
+      if (Array.isArray(error?.partialTranslations)) failure.partialTranslations = error.partialTranslations;
       throw failure;
     });
     return {
@@ -1649,13 +1680,26 @@
       parseResponse: (content) => {
         const translations = parseTranslations(content, texts.length)
           .map((translation) => translation.replace(/\r\n?/g, "\n"));
+        const invalidIndices = [];
         translations.forEach((translation, index) => {
           const sourceBreaks = String(texts[index]).match(/\n+/g) || [];
           const translatedBreaks = translation.match(/\n+/g) || [];
           if (sourceBreaks.join("|") !== translatedBreaks.join("|")) {
-            throw responseFormatError(`Translation ${index + 1} did not preserve paragraph and line breaks.`, content);
+            invalidIndices.push(index);
           }
         });
+        if (invalidIndices.length) {
+          const error = responseFormatError(
+            `Translation ${invalidIndices[0] + 1} did not preserve paragraph and line breaks.`,
+            content,
+          );
+          if (invalidIndices.length < translations.length) {
+            error.partialTranslations = translations.map((value, index) =>
+              invalidIndices.includes(index) ? null : value,
+            );
+          }
+          throw error;
+        }
         return translations;
       },
       schema: {
@@ -2032,20 +2076,43 @@
     return nodes;
   }
 
+  let inlineStructureCache = new WeakMap();
+  let inlineStructureClearScheduled = false;
+
+  function cachedInlineStructure(element) {
+    const textContent = element.textContent;
+    const cached = inlineStructureCache.get(element);
+    if (cached && cached.textContent === textContent) return cached.structure;
+    const structure = extractInlineStructure(element);
+    inlineStructureCache.set(element, { textContent, structure });
+    if (!inlineStructureClearScheduled) {
+      inlineStructureClearScheduled = true;
+      queueMicrotask(() => {
+        inlineStructureCache = new WeakMap();
+        inlineStructureClearScheduled = false;
+      });
+    }
+    return structure;
+  }
+
   function sourceText(element) {
-    const raw = normalizeLineBreaks(element.innerText ?? element.textContent);
+    if (typeof Node === "function" && element instanceof Node) {
+      if (!String(element.textContent || "").trim()) return "";
+      return cachedInlineStructure(element).plainText;
+    }
+    const raw = normalizeLineBreaks(element?.innerText ?? element?.textContent);
     if (!raw) return "";
-    if (
-      Array.isArray(element.textNodes) ||
-      (typeof Node === "function" && element instanceof Node)
-    ) {
+    if (Array.isArray(element?.textNodes)) {
       return extractInlineStructure(element).plainText;
     }
     return raw;
   }
 
   function translationRequestFor(element, text) {
-    const { requestText, wrappers } = extractInlineStructure(element);
+    const { requestText, wrappers } =
+      typeof Node === "function" && element instanceof Node
+        ? cachedInlineStructure(element)
+        : extractInlineStructure(element);
     return {
       requestText: requestText || text,
       segmentCount: wrappers.length,
@@ -2066,9 +2133,35 @@
       : source;
   }
 
+  function shouldInsertTranslationInside(anchor) {
+    if (/^(?:TD|TH|CAPTION|SUMMARY)$/i.test(anchor?.tagName || "")) return true;
+    const parent = anchor?.parentElement;
+    if (!parent || typeof getComputedStyle !== "function") return false;
+    const style = getComputedStyle(parent);
+    const display = String(style?.display || "");
+    if (/^(?:flex|inline-flex)$/i.test(display)) {
+      return !/^column/i.test(String(style.flexDirection || ""));
+    }
+    if (/^(?:grid|inline-grid)$/i.test(display)) {
+      const cols = String(style.gridTemplateColumns || "").trim();
+      return Boolean(cols && cols !== "none" && cols.split(/\s+/).length > 1);
+    }
+    return false;
+  }
+
   function translationAfter(source) {
-    const next = translationAnchor(source).nextElementSibling;
-    return next?.classList.contains(TRANSLATION_CLASS) ? next : null;
+    const anchor = translationAnchor(source);
+    const next = anchor.nextElementSibling;
+    if (next?.classList?.contains?.(TRANSLATION_CLASS)) return next;
+    const children = anchor?.children;
+    if (children) {
+      for (let i = children.length - 1; i >= 0; i -= 1) {
+        if (children[i]?.classList?.contains?.(TRANSLATION_CLASS)) {
+          return children[i];
+        }
+      }
+    }
+    return null;
   }
 
   function indicatorFor(element) {
@@ -2184,15 +2277,25 @@
       typeof result === "string" ? result : result?.translation;
     if (!normalizeText(translation)) return;
 
-    // A custom element clone can rerender itself and erase the translation.
-    const translated = source.tagName.includes("-")
+    const anchor = translationAnchor(source);
+    const insertInside =
+      anchor === source && shouldInsertTranslationInside(anchor);
+    // A custom element clone can rerender itself and erase the translation;
+    // table cells and flex/grid items insert a clean inner div instead of adding siblings.
+    const usePlainDiv = source.tagName?.includes("-") || insertInside;
+    const translated = usePlainDiv
       ? document.createElement("div")
       : source.cloneNode(true);
-    if (source.tagName.includes("-")) {
-      translated.className = source.className;
-      translated.style.cssText = source.style.cssText;
+    if (usePlainDiv) {
+      if (!insertInside) {
+        translated.className = source.className || "";
+        translated.style.cssText = source.style?.cssText || "";
+      }
       translated.append(
-        ...Array.from(source.childNodes, (node) => node.cloneNode(true)),
+        ...Array.from(
+          source.childNodes || source.children || [],
+          (node) => node.cloneNode(true),
+        ),
       );
     }
     translated
@@ -2268,13 +2371,13 @@
     ).matches;
     if (animateIn) translated.style.setProperty("opacity", "0", "important");
 
-    const anchor = translationAnchor(source);
-    if (anchor !== source || source.tagName.includes("-")) {
+    if (!insertInside && (anchor !== source || source.tagName?.includes("-"))) {
       const style = getComputedStyle(source);
       translated.style.font = style.font;
       translated.style.color = style.color;
     }
-    anchor.insertAdjacentElement("afterend", translated);
+    if (insertInside) anchor.append(translated);
+    else anchor.insertAdjacentElement("afterend", translated);
     translations?.add(translated);
     const { container, wrappers } = extractInlineStructure(translated);
     const segments = Array.isArray(result?.segments) ? result.segments : null;
@@ -2321,11 +2424,35 @@
       : [document.body || document.documentElement];
   }
 
-  function isUsefulPageBlock(element, text) {
+  function isChineseText(value) {
+    const text = normalizeText(value);
+    if (
+      !text ||
+      /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(text)
+    ) {
+      return false;
+    }
+    const letters = text.match(/\p{L}/gu);
+    if (!letters?.length) return false;
+    const han = text.match(/\p{Script=Han}/gu) || [];
+    if (han.length < 2 || han.length / letters.length < 0.6) return false;
+    return (
+      han.length >= 12 ||
+      /[的了是在有不這这个們们為为與与對对從从給给讓让把被沒没很就還还說说會会要能可]/u.test(
+        text,
+      )
+    );
+  }
+
+  function isUsefulPageBlock(element, text, targetLanguage = "") {
     const chrome = element.matches?.(YOUTUBE_COMMENT_SELECTOR)
       ? element.parentElement?.closest(PAGE_CHROME_SELECTOR)
       : element.closest(PAGE_CHROME_SELECTOR);
-    if (!pageTextLooksUseful(text) || chrome) {
+    if (
+      !pageTextLooksUseful(text) ||
+      chrome ||
+      (isChineseLanguage(targetLanguage) && isChineseText(text))
+    ) {
       return false;
     }
     const outerChrome = element.closest("header, footer");
@@ -2347,7 +2474,7 @@
     return text.length >= 160 || linkedCharacters / text.length <= 0.8;
   }
 
-  function isTranslatablePageBlock(element, roots, text) {
+  function isTranslatablePageBlock(element, roots, text, targetLanguage = "") {
     if (
       !element?.isConnected ||
       isSuiteUi(element) ||
@@ -2360,7 +2487,7 @@
     ) {
       return false;
     }
-    return isUsefulPageBlock(element, text ?? sourceText(element));
+    return isUsefulPageBlock(element, text ?? sourceText(element), targetLanguage);
   }
 
   // Source: src/text/jobs.js
@@ -2523,6 +2650,58 @@
       toast(`Translating ${completed}/${activeTotal}`, 0);
     }
 
+    const applyResolvedPairs = (pairs) => {
+      const cacheEntries = {};
+      for (const [group, rawTranslation] of pairs) {
+        const result = parseInlineTranslation(
+          rawTranslation,
+          group.segmentCount,
+        );
+        const unchanged =
+          typeof comparableText === "function"
+            ? comparableText(result.translation) === comparableText(group.text)
+            : result.translation === group.text;
+        if (!unchanged) {
+          cacheEntries[group.key] = {
+            ...result,
+            formatKey: group.formatKey,
+            at: Date.now(),
+          };
+        }
+        for (const record of group.entries) {
+          const { element, formatKey, job } = record;
+          if (pendingJobs.get(element) !== job || job.cancelled) {
+            activeTotal -= 1;
+            continue;
+          }
+          if (!recordMatchesElement(record, settings)) {
+            settleJob(job);
+            activeTotal -= 1;
+            continue;
+          }
+          if (!unchanged || !currentTask.autoPage) {
+            insertTranslation(
+              element,
+              {
+                translation: result.translation,
+                segments:
+                  formatKey === group.formatKey ? result.segments : null,
+              },
+              currentTask.translations,
+            );
+          }
+          settleJob(job);
+          completed += 1;
+        }
+      }
+      if (Object.keys(cacheEntries).length) {
+        cache = saveCache(cacheEntries);
+      }
+      if (showProgress) {
+        toast(`Translating ${completed}/${activeTotal}`, 0);
+      }
+    };
+
     const batches = makeBatches(groupRecords(records), showProgress);
     const failedJobs = [];
     let responseError;
@@ -2597,7 +2776,28 @@
             continue;
           }
           if (!shouldSplitBatch(error)) throw error;
-          if (activeBatch.length > 1) {
+          const partial =
+            Array.isArray(error?.partialTranslations) &&
+            error.partialTranslations.length === activeBatch.length
+              ? error.partialTranslations
+              : null;
+          if (partial) {
+            const validPairs = [];
+            const failedGroups = [];
+            activeBatch.forEach((group, index) => {
+              if (typeof partial[index] === "string") {
+                validPairs.push([group, partial[index]]);
+              } else {
+                failedGroups.push(group);
+              }
+            });
+            if (validPairs.length) applyResolvedPairs(validPairs);
+            if (failedGroups.length) {
+              batches.splice(
+                batchIndex + 1, 0, ...failedGroups.map((group) => [group]),
+              );
+            }
+          } else if (activeBatch.length > 1) {
             batches.splice(
               batchIndex + 1, 0, ...activeBatch.map((group) => [group]),
             );
@@ -2618,50 +2818,12 @@
           activeRequest.jobs.clear();
         }
         if (currentTask.cancelled) return;
-        const cacheEntries = {};
-        translations.forEach((rawTranslation, index) => {
-          const group = activeBatch[index];
-          const result = parseInlineTranslation(
+        applyResolvedPairs(
+          translations.map((rawTranslation, index) => [
+            activeBatch[index],
             rawTranslation,
-            group.segmentCount,
-          );
-          if (result.translation !== group.text) {
-            cacheEntries[group.key] = {
-              ...result,
-              formatKey: group.formatKey,
-              at: Date.now(),
-            };
-          }
-          for (const record of group.entries) {
-            const { element, formatKey, job } = record;
-            if (pendingJobs.get(element) !== job || job.cancelled) {
-              activeTotal -= 1;
-              continue;
-            }
-            if (!recordMatchesElement(record, settings)) {
-              settleJob(job);
-              activeTotal -= 1;
-              continue;
-            }
-            insertTranslation(
-              element,
-              {
-                translation: result.translation,
-                segments:
-                  formatKey === group.formatKey ? result.segments : null,
-              },
-              currentTask.translations,
-            );
-            settleJob(job);
-            completed += 1;
-          }
-        });
-        if (Object.keys(cacheEntries).length) {
-          cache = saveCache(cacheEntries);
-        }
-        if (showProgress) {
-          toast(`Translating ${completed}/${activeTotal}`, 0);
-        }
+          ]),
+        );
       }
       if (responseError && !currentTask.autoPage) throw responseError;
     } catch (error) {
@@ -2737,7 +2899,12 @@
     for (const element of elements) {
       if (
         !task.observedBlocks.has(element) &&
-        isTranslatablePageBlock(element, roots)
+        isTranslatablePageBlock(
+          element,
+          roots,
+          undefined,
+          task.settings?.targetLanguage,
+        )
       ) {
         task.observedBlocks.add(element);
         task.intersectionObserver.observe(element);
@@ -2774,7 +2941,12 @@
       innerHeight || document.documentElement.clientHeight;
     const blocks = [...task.pendingBlocks]
       .filter((element) => {
-        const eligible = isTranslatablePageBlock(element, roots);
+        const eligible = isTranslatablePageBlock(
+          element,
+          roots,
+          undefined,
+          task.settings?.targetLanguage,
+        );
         if (!eligible) task.observedBlocks.delete(element);
         return eligible;
       })
@@ -2815,7 +2987,8 @@
       );
       return;
     }
-    if (!(await readySettings())) return;
+    const settings = await readySettings();
+    if (!settings) return;
     const task = {
       autoPage: true,
       cancelled: false,
@@ -2824,6 +2997,7 @@
       observedBlocks: new WeakSet(),
       pendingBlocks: new Set(),
       rerun: false,
+      settings,
       translations: new Set(),
     };
     task.schedule = () => {
@@ -2834,7 +3008,35 @@
         runPageTranslation(task, isFirst);
       }, 60);
     };
-    task.refresh = () => {
+    const isOwnNode = (node) =>
+      node?.nodeType === 1 &&
+      (isSuiteUi(node) ||
+        node.classList?.contains(TRANSLATION_CLASS) ||
+        node.classList?.contains(INDICATOR_CLASS));
+    const isOwnMutation = (record) => {
+      if (
+        isOwnNode(record.target) ||
+        record.target?.closest?.(`.${TRANSLATION_CLASS}`)
+      ) {
+        return true;
+      }
+      if (record.type === "attributes") {
+        return record.attributeName === "aria-busy";
+      }
+      if (record.type === "childList") {
+        const changed = [...record.addedNodes, ...record.removedNodes];
+        return changed.length > 0 && changed.every(isOwnNode);
+      }
+      return false;
+    };
+    task.refresh = (records) => {
+      if (
+        Array.isArray(records) &&
+        records.length &&
+        records.every(isOwnMutation)
+      ) {
+        return;
+      }
       clearTimeout(task.refreshTimer);
       task.refreshTimer = setTimeout(() => {
         if (!task.cancelled) observePageBlocks(task);
@@ -2883,6 +3085,7 @@
 
   let swipe = null;
   let fourFinger = null;
+  let lastSwipeCommitAt = 0;
 
 
 
@@ -2975,6 +3178,18 @@
     return false;
   }
 
+  function isSheerBackgroundColor(color) {
+    const value = String(color || "transparent").trim();
+    if (!value || value === "transparent") return true;
+    const alphaMatch =
+      /^rgba\([^)]*,\s*([+-]?(?:\d*\.)?\d+%?)\s*\)$/i.exec(value) ||
+      /\/\s*([+-]?(?:\d*\.)?\d+%?)\s*\)$/.exec(value);
+    if (!alphaMatch) return false;
+    const raw = alphaMatch[1];
+    const alpha = raw.endsWith("%") ? parseFloat(raw) / 100 : parseFloat(raw);
+    return Number.isFinite(alpha) && alpha <= 0.12;
+  }
+
   function isOverlayLink(element) {
     if (!element || element.tagName !== "A") return false;
     if (element.matches?.(OVERLAY_LINK_SELECTOR)) return true;
@@ -2991,10 +3206,54 @@
     return false;
   }
 
+  function isOverlayCover(element) {
+    if (isOverlayLink(element)) return true;
+    if (
+      !element ||
+      element.matches?.(`input, textarea, select, button, ${BLOCK_SELECTOR}`) ||
+      normalizeText(element.innerText ?? element.textContent)
+    ) {
+      return false;
+    }
+    const style = getComputedStyle(element);
+    if (style?.position !== "absolute" && style?.position !== "fixed") {
+      return false;
+    }
+    const backdrop =
+      style?.backdropFilter || style?.webkitBackdropFilter || "none";
+    if (/blur\(/i.test(backdrop)) return false;
+    const background = style?.backgroundImage || "none";
+    const sheerBgImage =
+      background === "none" ||
+      (!/url\(/i.test(background) &&
+        /(?:linear|radial|conic)-gradient\(/i.test(background));
+    if (!isSheerBackgroundColor(style?.backgroundColor) || !sheerBgImage) {
+      return false;
+    }
+    const parent = element.parentElement;
+    if (
+      parent &&
+      typeof parent.getBoundingClientRect === "function" &&
+      typeof element.getBoundingClientRect === "function"
+    ) {
+      const pRect = parent.getBoundingClientRect();
+      const rect = element.getBoundingClientRect();
+      if (
+        pRect.width > 0 &&
+        pRect.height > 0 &&
+        rect.width >= pRect.width * 0.85 &&
+        rect.height >= pRect.height * 0.85
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function resolveTargetElement(target, touch) {
     if (!target) return null;
     if (
-      isOverlayLink(target) &&
+      isOverlayCover(target) &&
       typeof document.elementsFromPoint === "function" &&
       touch
     ) {
@@ -3004,7 +3263,7 @@
         (element) =>
           (typeof Element === "undefined" || element instanceof Element) &&
           element !== target &&
-          !isOverlayLink(element) &&
+          !isOverlayCover(element) &&
           !isPageLevelContainer(element),
       );
       if (underlying) return underlying;
@@ -3155,6 +3414,7 @@
           Date.now() - gesture.at <= FOUR_FINGER_MAX_MS
         ) {
           if (event.cancelable) event.preventDefault();
+          lastSwipeCommitAt = Date.now();
           startPageTranslation();
         }
       }
@@ -3183,6 +3443,7 @@
       swipeShouldCommit(dx, velocityX, gesture.ready)
     ) {
       if (event.cancelable) event.preventDefault();
+      lastSwipeCommitAt = now;
       handleSwipe(gesture.element);
     } else {
       restoreGestureIndicator(gesture);
@@ -3434,11 +3695,13 @@
       canConsumeRightSwipe,
       indicatorFor,
       insertTranslation,
+      isChineseText,
       isPrivateOrLocalHost,
       isRenderedTextNode,
       isSafeHref,
       isTranslatablePageBlock,
       shouldSplitBatch,
+      thinkingUnsupported,
       makeBatches,
       movedTooFar,
       normalizeText,
@@ -3486,6 +3749,22 @@
     capture: true,
     passive: true,
   });
+  document.addEventListener(
+    "click",
+    (event) => {
+      if (
+        lastSwipeCommitAt &&
+        Date.now() - lastSwipeCommitAt < 400 &&
+        !isSuiteUi(event.target)
+      ) {
+        lastSwipeCommitAt = 0;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+      }
+    },
+    true,
+  );
 
   registerCommonMenus();
   GM_registerMenuCommand("Touch Translate: Auto-translate page", startPageTranslation);

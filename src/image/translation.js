@@ -5,10 +5,6 @@
     return translationCacheKey(imageHash, settings, version);
   }
 
-  function comparableText(value) {
-    return String(value || "").replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
-  }
-
   // OCR mode: boxes and source text come from OCR units; the model only groups ids and translates.
   function parseOcrImageTranslation(content, units) {
     const regions = readImageRegions(content, OCR_EXPECTED_FORMAT);

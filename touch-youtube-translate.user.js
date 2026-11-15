@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch YouTube Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.1.5
+// @version      0.1.6
 // @description  Private bilingual YouTube captions with smart segmentation and your own translation API.
 // @author       HAKU
 // @match        https://www.youtube.com/*
@@ -48,6 +48,8 @@
   const SUBTITLE_CLAUSE_PAUSE_MS = 400;
   const SUBTITLE_BATCH_MS = 30000;
   const SUBTITLE_BATCH_CHARS = 6000;
+  const SUBTITLE_FIRST_BATCH_MS = 12000;
+  const SUBTITLE_FIRST_BATCH_CHARS = 2000;
   const SUBTITLE_LOOKAHEAD_MS = 60000;
   const SUBTITLE_DISMISS_MS = 4000;
   const SUBTITLE_RETRY_BASE_MS = 2000;
@@ -63,6 +65,7 @@
     return {
       enabled: saved?.enabled !== false,
       smart: saved?.smart !== false,
+      forceAi: saved?.forceAi === true,
       translationOnly: saved?.translationOnly === true,
       fontSize: Math.max(14, Math.min(36, Number(saved?.fontSize) || 22)),
       bottom: Math.max(0, Math.min(35, Number.isFinite(bottom) ? bottom : 0)),
@@ -76,6 +79,16 @@
     return String(value || "")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  function comparableText(value) {
+    return String(value || "").replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+  }
+
+  function isChineseLanguage(value) {
+    return /^(?:zh(?:$|[-_])|chinese(?=$|\s*\()|(?:traditional|simplified)\s+chinese|繁體|正體|简体|簡體|中文|漢語|汉语)/i.test(
+      String(value || "").trim(),
+    );
   }
 
   function errorMessageFor(error) {
@@ -583,6 +596,7 @@
   const REQUEST_TIMEOUT_MS = 60000;
   const MAX_RETRIES = 2;
   const structuredOutputFallbackModels = new Set();
+  const thinkingFallbackModels = new Set();
 
   function endpointFor(baseURL, model = "", apiFormat = "chat-completions") {
     const url = new URL(baseURL);
@@ -693,6 +707,15 @@
     );
   }
 
+  function thinkingUnsupported(status, message) {
+    return (
+      (status === 400 || status === 422) &&
+      /reasoning[_ -]?effort|thinking[_ -]?(?:config|level)|thinking\s+is\s+not\s+supported/i.test(
+        String(message || ""),
+      )
+    );
+  }
+
   function responseFormatError(reason, content, expected = EXPECTED_FORMAT) {
     const error = new Error([
       "Response format mismatch.",
@@ -755,16 +778,18 @@
     const nativeGemini = settings.apiFormat === "gemini-native";
     const url = new URL(endpointFor(settings.baseURL, settings.model, settings.apiFormat));
     const modelKey = `${nativeGemini}\u0000${settings.baseURL}\u0000${settings.model}\u0000${schemaName}`;
+    const thinkingKey = `${nativeGemini}\u0000${settings.baseURL}\u0000${settings.model}\u0000${thinkingLevelFor(settings)}`;
     const headers = { "Content-Type": "application/json" };
     if (!nativeGemini) headers.Authorization = `Bearer ${settings.apiKey}`;
     else if (/^(?:\/v1\/[^/]+\/[^/]+)?\/google-ai-studio\//.test(url.pathname)) {
       headers["cf-aig-authorization"] = `Bearer ${settings.apiKey}`;
     } else headers["x-goog-api-key"] = settings.apiKey;
 
-    const buildPayload = (useSchema) => {
+    const buildPayload = (useSchema, useThinking = true) => {
       if (nativeGemini) {
         const generationConfig = generationConfigFor(settings);
         if (useSchema) generationConfig.responseJsonSchema = schema;
+        if (!useThinking) delete generationConfig.thinkingConfig;
         return {
           systemInstruction: { parts: [{ text: systemPrompt }] },
           contents: [{ role: "user", parts: geminiParts }],
@@ -779,8 +804,8 @@
       const payload = {
         model: settings.model,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userContent }],
-        reasoning_effort: thinkingLevelFor(settings),
       };
+      if (useThinking) payload.reasoning_effort = thinkingLevelFor(settings);
       if (useSchema) {
         payload.response_format = {
           type: "json_schema",
@@ -796,6 +821,7 @@
     let rejectPromise;
     let attempt = 0;
     let schemaFallbackTried = false;
+    let thinkingFallbackTried = false;
     const promise = new Promise((resolve, reject) => {
       rejectPromise = reject;
       const finish = (callback, value) => {
@@ -829,23 +855,24 @@
         if (imageMimeType) lines.push(`Image MIME type: ${imageMimeType}`);
         return new Error(lines.join("\n"));
       };
-      const retry = (disableSchema, response) => {
+      const retry = (disableSchema, disableThinking, response) => {
         if (attempt >= MAX_RETRIES || settled) return false;
         const delay = retryDelayFor(response, attempt++);
-        retryTimer = setTimeout(() => send(disableSchema), delay);
+        retryTimer = setTimeout(() => send(disableSchema, disableThinking), delay);
         return true;
       };
-      const send = (disableSchema = false) => {
+      const send = (disableSchema = false, disableThinking = false) => {
         if (settled) return;
         const useSchema = !disableSchema && !structuredOutputFallbackModels.has(modelKey);
+        const useThinking = !disableThinking && !thinkingFallbackModels.has(thinkingKey);
         const fallback = () => {
           schemaFallbackTried = true;
-          send(true);
+          send(true, disableThinking);
         };
         try {
           currentRequest = GM_xmlhttpRequest({
             method: "POST", url: url.href, headers,
-            data: JSON.stringify(buildPayload(useSchema)),
+            data: JSON.stringify(buildPayload(useSchema, useThinking)),
             anonymous: true, timeout: REQUEST_TIMEOUT_MS,
             onload(response) {
               currentRequest = null;
@@ -855,6 +882,11 @@
                 const responseText = String(response.responseText || "");
                 if (status < 200 || status >= 300) {
                   const detail = extractErrorMessage(responseText);
+                  if (useThinking && !thinkingFallbackTried && thinkingUnsupported(status, detail)) {
+                    thinkingFallbackTried = true;
+                    send(disableSchema, true);
+                    return;
+                  }
                   if (useSchema && !schemaFallbackTried && (
                     structuredOutputUnsupported(status, detail) ||
                     (nativeGemini && allowGenericSchemaFallback && status === 400)
@@ -863,7 +895,7 @@
                     return;
                   }
                   if ((status === 429 || (status >= 500 && status < 600)) &&
-                    !/quota|insufficient_quota|billing/i.test(detail) && retry(disableSchema, response)) return;
+                    !/quota|insufficient_quota|billing/i.test(detail) && retry(disableSchema, disableThinking, response)) return;
                   throw httpFailure(response, useSchema);
                 }
                 let body;
@@ -881,16 +913,17 @@
                   throw error;
                 }
                 if (schemaFallbackTried && disableSchema) structuredOutputFallbackModels.add(modelKey);
+                if (thinkingFallbackTried && disableThinking) thinkingFallbackModels.add(thinkingKey);
                 finish(resolve, result);
               } catch (error) { finish(reject, error); }
             },
             onerror() {
               currentRequest = null;
-              if (!retry(disableSchema)) finish(reject, new Error(`Could not connect to the translation API (${url.href}).`));
+              if (!retry(disableSchema, disableThinking)) finish(reject, new Error(`Could not connect to the translation API (${url.href}).`));
             },
             ontimeout() {
               currentRequest = null;
-              if (!retry(disableSchema)) finish(reject, new Error("The translation API timed out."));
+              if (!retry(disableSchema, disableThinking)) finish(reject, new Error("The translation API timed out."));
             },
             onabort() { finish(reject, cancelledError()); },
           });
@@ -901,6 +934,7 @@
       const failure = new Error(redactProviderDiagnostic(errorMessageFor(error), settings.apiKey));
       failure.name = error?.name || "Error";
       if (error?.code) failure.code = error.code;
+      if (Array.isArray(error?.partialTranslations)) failure.partialTranslations = error.partialTranslations;
       throw failure;
     });
     return {
@@ -1568,6 +1602,16 @@
     }, "");
   }
 
+  function normalizeCaptionText(value, automatic = true) {
+    if (automatic) return normalizeText(value);
+    return String(value || "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/[^\S\n]+/g, " ")
+      .replace(/ *\n */g, "\n")
+      .replace(/\n{2,}/g, "\n")
+      .trim();
+  }
+
   function parseYoutubeCaptions(text, automatic = true) {
     if (typeof text !== "string" || text.length > CAPTION_MAX_BYTES) throw new Error("YouTube captions are too large or invalid.");
     let data;
@@ -1595,7 +1639,7 @@
         else pieces.push({ offset, text: seg.utf8 });
       }
       pieces.forEach((piece, index) => {
-        const content = normalizeText(piece.text);
+        const content = normalizeCaptionText(piece.text, automatic);
         if (!content) return;
         const start = event.tStartMs + piece.offset;
         const end = event.tStartMs + (pieces[index + 1]?.offset ?? durationMs);
@@ -1665,8 +1709,11 @@
       const entries = fragments.slice(group.from, group.to + 1);
       const chars = entries.reduce((sum, fragment) => sum + fragment.text.length, 0);
       if (chars > SUBTITLE_BATCH_CHARS) throw new Error("A subtitle cue is too long to translate safely.");
-      if (!chunk || entries.at(-1).end - chunk.start > SUBTITLE_BATCH_MS ||
-        chunk.chars + chars > SUBTITLE_BATCH_CHARS || chunk.fragments.length + entries.length > 180) {
+      const first = !chunk ? !chunks.length : chunks.length === 1;
+      const maxMs = first ? SUBTITLE_FIRST_BATCH_MS : SUBTITLE_BATCH_MS;
+      const maxChars = first ? SUBTITLE_FIRST_BATCH_CHARS : SUBTITLE_BATCH_CHARS;
+      if (!chunk || entries.at(-1).end - chunk.start > maxMs ||
+        chunk.chars + chars > maxChars || chunk.fragments.length + entries.length > 180) {
         chunk = { start: entries[0].start, end: entries.at(-1).end, chars: 0, fragments: [], automatic, done: false, failed: false, rawFrom: group.from };
         chunks.push(chunk);
       }
@@ -1721,7 +1768,7 @@
           return overlap > 0 && (idx === targets[range.from] || idx === targets[range.to] ||
             (mid >= start && mid <= end) || overlap >= Math.min(end - start, target.end - target.start) * 0.4);
         });
-        return { ...range, translation: matched.map((t) => t.text).join(" ") };
+        return { ...range, translation: joinCaptionText(matched) };
       }), fragments);
       chunk.done = true;
       return chunk;
@@ -1820,12 +1867,17 @@
     } catch { return null; }
   }
 
+  function chineseScript(value) {
+    const raw = String(value || "").trim();
+    if (/^(?:zh[-_](?:tw|hk|mo|hant)|traditional\s+chinese|繁體|正體)/i.test(raw)) return "hant";
+    if (/^(?:zh[-_](?:cn|sg|hans)|simplified\s+chinese|简体|簡體)/i.test(raw)) return "hans";
+    return "";
+  }
+
   function normalizeLanguageTag(value) {
     const raw = String(value || "").trim();
     if (!raw) return "";
-    if (/^(?:zh[-_](?:tw|hk|mo|hant)|traditional\s+chinese|繁體|正體)/i.test(raw)) return "zh-hant";
-    if (/^(?:zh[-_](?:cn|sg|hans)|simplified\s+chinese|简体|簡體)/i.test(raw)) return "zh-hans";
-    if (/^(?:zh|chinese|中文|漢語|汉语)$/i.test(raw)) return "zh";
+    if (isChineseLanguage(raw)) return "zh";
     const aliases = {
       english: "en", 英文: "en", 英語: "en",
       japanese: "ja", 日文: "ja", 日語: "ja", 日本語: "ja",
@@ -1841,9 +1893,7 @@
   function sameLanguage(a, b) {
     const tagA = normalizeLanguageTag(a);
     const tagB = normalizeLanguageTag(b);
-    if (!tagA || !tagB) return false;
-    if (tagA === tagB) return true;
-    return (tagA === "zh" && tagB.startsWith("zh")) || (tagB === "zh" && tagA.startsWith("zh"));
+    return Boolean(tagA && tagB && tagA === tagB);
   }
 
   function selectYoutubeTrack(snapshot, targetLanguage = "") {
@@ -1859,13 +1909,15 @@
       candidates.find((track) => track.kind !== "asr") || candidates[0] || chosen || null;
   }
 
-  function selectTargetYoutubeTrack(snapshot, sourceTrack, targetLanguage = "") {
-    if (!sourceTrack || !targetLanguage || sameLanguage(sourceTrack.languageCode, targetLanguage)) return null;
+  function selectTargetYoutubeTrack(snapshot, sourceTrack, targetLanguage = "", forceAi = false) {
+    if (forceAi || !sourceTrack || !targetLanguage || sameLanguage(sourceTrack.languageCode, targetLanguage)) return null;
     const tracks = Array.isArray(snapshot?.tracks) ? snapshot.tracks : [];
-    const exact = tracks.find((track) => track !== sourceTrack && track.kind !== "asr" &&
-      String(track.languageCode || "").toLowerCase() === String(targetLanguage).trim().toLowerCase());
-    return exact || tracks.find((track) => track !== sourceTrack && track.kind !== "asr" &&
-      sameLanguage(track.languageCode, targetLanguage)) || null;
+    const human = tracks.filter((track) => track !== sourceTrack && track.kind !== "asr");
+    const targetLower = String(targetLanguage).trim().toLowerCase();
+    const targetScript = chineseScript(targetLanguage);
+    return human.find((track) => String(track.languageCode || "").toLowerCase() === targetLower) ||
+      (targetScript && human.find((track) => chineseScript(track.languageCode) === targetScript)) ||
+      human.find((track) => sameLanguage(track.languageCode, targetLanguage)) || null;
   }
 
   function youtubeTrackKey(track) {
@@ -1992,17 +2044,43 @@
     view.host.dataset.idle = String(!open && !view.status.textContent);
   }
 
+  function nextSubtitleBoundaryMs(chunks, time) {
+    if (!chunks.length) return null;
+    let lo = 0, hi = chunks.length - 1;
+    while (lo <= hi) {
+      const middle = (lo + hi) >> 1;
+      const chunk = chunks[middle];
+      if (time < chunk.start) hi = middle - 1;
+      else if (time >= chunk.end) lo = middle + 1;
+      else {
+        for (const group of chunk.groups) {
+          if (group.start > time) return group.start;
+          if (group.end > time) return group.end;
+        }
+        return chunks[middle + 1]?.start ?? null;
+      }
+    }
+    return chunks[lo]?.start ?? null;
+  }
+
   function renderSubtitles(session = subtitleSession) {
     if (!subtitleView || !session || session !== subtitleSession) return;
     clearTimeout(session.renderTimer);
     const ad = session.player.classList.contains("ad-showing") || session.player.classList.contains("ad-interrupting");
-    const group = ad ? null : subtitleAtTime(session.chunks, session.video.currentTime * 1000);
+    const nowMs = session.video.currentTime * 1000;
+    const group = ad ? null : subtitleAtTime(session.chunks, nowMs);
     if (subtitleView.source.textContent !== (group?.text || "")) subtitleView.source.textContent = group?.text || "";
     if (subtitleView.translation.textContent !== (group?.translation || "")) subtitleView.translation.textContent = group?.translation || "";
     subtitleView.source.hidden = session.preferences.translationOnly && !!group?.translation;
     subtitleView.captions.hidden = !group;
+    subtitleView.host.dataset.paused = String(Boolean(session.video.paused));
     if (!ad && session.video.paused === false && !session.video.ended) {
-      session.renderTimer = setTimeout(() => renderSubtitles(session), 80);
+      const nextMs = nextSubtitleBoundaryMs(session.chunks, nowMs);
+      if (nextMs !== null) {
+        const rate = Math.max(0.25, Number(session.video.playbackRate) || 1);
+        const delay = Math.max(16, Math.min(1000, Math.ceil((nextMs - nowMs) / rate)));
+        session.renderTimer = setTimeout(() => renderSubtitles(session), delay);
+      }
     }
   }
 
@@ -2011,6 +2089,7 @@
     host.className = `${SCRIPT_PREFIX}__host`;
     host.dataset.touchTranslateUi = "";
     host.dataset.idle = "true";
+    host.dataset.paused = String(Boolean(video.paused));
     const toolbar = document.createElement("div");
     toolbar.className = `${SCRIPT_PREFIX}__toolbar`;
     const button = (text, action, parent = toolbar) => {
@@ -2058,11 +2137,13 @@
         GM_setValue(PREFERENCES_KEY, preferences);
         applySubtitlePreferences();
         if (key === "smart" && subtitleSession) resegmentYoutubeSubtitles();
+        else if (key === "forceAi" && subtitleView?.preferences.enabled) restartYoutubeSubtitles();
       });
       label.append(text, input);
       controls.append(label);
     };
     preference("Smart segmentation", "smart", "checkbox");
+    preference("Force AI translation", "forceAi", "checkbox");
     preference("Translation only", "translationOnly", "checkbox");
     preference("Text size", "fontSize", "range", 14, 36);
     preference("Bottom position", "bottom", "range", 0, 35);
@@ -2096,6 +2177,11 @@
         element.addEventListener(type, (event) => event.stopPropagation());
       }
     }
+    for (const type of ["click", "dblclick", "pointerdown", "pointerup", "touchstart", "touchend"]) {
+      captions.addEventListener(type, (event) => {
+        if (video.paused && event.target !== captions) event.stopPropagation();
+      });
+    }
     for (const type of ["pointermove", "input", "change", "keydown"]) {
       controls.addEventListener(type, () => schedulePreferencesHide(subtitleView), { passive: true });
     }
@@ -2119,6 +2205,7 @@
     const noteActivity = () => {
       syncSubtitleTriggerDock(subtitleView);
       schedulePosition();
+      host.dataset.paused = String(Boolean(video.paused));
       host.dataset.autohide = "false";
       clearTimeout(autohideTimer);
       if (video.paused === false && !video.ended) {
@@ -2205,6 +2292,11 @@
         const track = selectYoutubeTrack(snapshot, targetLanguage);
         if (!track) throw new Error("This video has no available captions. Speech transcription is not included.");
         if (typeof track.languageCode !== "string" || track.languageCode.length > 64 || !["", "asr"].includes(track.kind || "")) throw new Error("Invalid YouTube caption track.");
+        const forceAi = Boolean(session.preferences?.forceAi);
+        if (session.auto && !forceAi && sameLanguage(track.languageCode, targetLanguage)) {
+          session.sameLanguageSkipped = true;
+          return [];
+        }
         const url = youtubeCaptionUrl(track, snapshot);
         if ((attempted.get(url) || 0) < 3 && (url !== lastUrl || attempt % 10 === 0)) {
           attempted.set(url, (attempted.get(url) || 0) + 1);
@@ -2220,7 +2312,7 @@
             session.trackKey = youtubeTrackKey(track);
             session.rawFragments = fragments;
             session.automatic = track.kind === "asr";
-            const targetTrack = selectTargetYoutubeTrack(snapshot, track, targetLanguage);
+            const targetTrack = selectTargetYoutubeTrack(snapshot, track, targetLanguage, forceAi);
             if (targetTrack && typeof targetTrack.languageCode === "string" && targetTrack.languageCode.length <= 64) {
               try {
                 const targetText = await captionBridgeRequest("load", { url: youtubeCaptionUrl(targetTrack, snapshot) }, signal);
@@ -2251,7 +2343,14 @@
   function subtitleQueueChunk(session) {
     const time = session.video.currentTime * 1000;
     const lookahead = SUBTITLE_LOOKAHEAD_MS * Math.min(4, Math.max(1, session.video.playbackRate || 1));
-    return session.chunks.find((chunk) => !chunk.done && !chunk.failed && chunk.end > time && chunk.start <= time + lookahead);
+    const index = session.chunks.findIndex((chunk) => !chunk.done && !chunk.failed && chunk.end > time && chunk.start <= time + lookahead);
+    if (index < 0) return undefined;
+    const current = session.chunks[index];
+    if (session.video.paused === false && current.start < time && current.end - time < 2500) {
+      const next = session.chunks[index + 1];
+      if (next && !next.done && !next.failed && next.start <= time + 5000) return next;
+    }
+    return current;
   }
 
   function subtitleRetryDelay(attempt = 1, baseMs = SUBTITLE_RETRY_BASE_MS) {
@@ -2359,12 +2458,17 @@
     view.toggle.setAttribute("aria-pressed", "true");
     try {
       let settings = loadSettings();
+      const forceAi = Boolean(view.preferences.forceAi);
       let hasNativeTarget = false;
       try { requireReadySettings(settings); }
       catch {
         const snapshot = await captionBridgeRequest("snapshot").catch(() => null);
         const source = selectYoutubeTrack(snapshot, settings.targetLanguage);
-        hasNativeTarget = Boolean(selectTargetYoutubeTrack(snapshot, source, settings.targetLanguage));
+        if (auto === true && !forceAi && source && sameLanguage(source.languageCode, settings.targetLanguage)) {
+          stopYoutubeSubtitles();
+          return;
+        }
+        hasNativeTarget = Boolean(selectTargetYoutubeTrack(snapshot, source, settings.targetLanguage, forceAi));
         if (!hasNativeTarget) {
           if (auto === true) {
             stopYoutubeSubtitles();
@@ -2377,13 +2481,17 @@
       if (!settings) { stopYoutubeSubtitles(); return; }
       const session = {
         videoId: youtubeVideoId(), player: view.player, video: view.video, settings,
-        preferences: { ...view.preferences }, controller: new AbortController(),
+        auto: Boolean(auto), preferences: { ...view.preferences }, controller: new AbortController(),
         chunks: [], listeners: [], generation: 0, running: false, request: null, error: null,
       };
       subtitleSession = session;
       setSubtitleStatus("Loading YouTube captions…");
       session.chunks = await loadYoutubeCaptions(session);
       if (session !== subtitleSession || session.controller.signal.aborted) return;
+      if (session.sameLanguageSkipped) {
+        stopYoutubeSubtitles();
+        return;
+      }
       if (!session.nativeBilingual && hasNativeTarget) {
         if (auto === true) { stopYoutubeSubtitles(); return; }
         const ready = await readySettings();
@@ -2408,7 +2516,7 @@
       listen("timeupdate", () => { renderSubtitles(session); void pumpSubtitleQueue(session); });
       listen("play", () => { renderSubtitles(session); });
       listen("pause", () => { clearTimeout(session.renderTimer); renderSubtitles(session); });
-      listen("ratechange", () => { void pumpSubtitleQueue(session); });
+      listen("ratechange", () => { renderSubtitles(session); void pumpSubtitleQueue(session); });
       session.player.classList.add(`${SCRIPT_PREFIX}__active`);
       view.toggle.textContent = "Stop CC";
       renderSubtitles(session);
@@ -2496,7 +2604,7 @@
       .${SCRIPT_PREFIX}__trigger[data-active=true] .${SCRIPT_PREFIX}__badge { background:#fff !important; color:#0f0f0f !important; box-shadow:0 3px 0 #ff0033 !important; }
       .${SCRIPT_PREFIX}__toolbar button:focus-visible, .${SCRIPT_PREFIX}__preferences button:focus-visible, .${SCRIPT_PREFIX}__trigger:focus-visible, .${SCRIPT_PREFIX}__preferences input:focus-visible { outline:2px solid #a8c7ff !important; outline-offset:2px !important; }
       .${SCRIPT_PREFIX}__toolbar button[aria-pressed=true], .${SCRIPT_PREFIX}__preferences button[aria-pressed=true] { background:#315b9bdd !important; }
-      .${SCRIPT_PREFIX}__preferences { position:absolute !important; bottom:var(--pref-offset,58px) !important; right:var(--pref-right,12px) !important; width:236px !important; padding:12px !important; background:#161618f5 !important; border:1px solid #ffffff40 !important; border-radius:8px !important; pointer-events:auto !important; z-index:70 !important; }
+      .${SCRIPT_PREFIX}__preferences { position:absolute !important; bottom:var(--pref-offset,58px) !important; right:var(--pref-right,12px) !important; width:236px !important; max-height:calc(100% - var(--pref-offset,58px) - 8px) !important; overflow-y:auto !important; box-sizing:border-box !important; padding:12px !important; background:#161618f5 !important; border:1px solid #ffffff40 !important; border-radius:8px !important; pointer-events:auto !important; z-index:70 !important; }
       .${SCRIPT_PREFIX}__preferences > button { width:100% !important; margin-bottom:4px !important; }
       .${SCRIPT_PREFIX}__preferences label { display:flex !important; align-items:center !important; justify-content:space-between !important; min-height:44px !important; gap:12px !important; color:#fff !important; font:inherit !important; }
       .${SCRIPT_PREFIX}__preferences input { width:90px !important; min-height:28px !important; accent-color:#a8c7ff !important; }
@@ -2504,8 +2612,9 @@
       .${SCRIPT_PREFIX}__status { max-width:min(90%, 520px) !important; padding:6px 8px !important; border-radius:4px !important; background:#161618cc !important; font:12px/1.4 -apple-system,BlinkMacSystemFont,sans-serif !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; }
       .${SCRIPT_PREFIX}__status:empty { display:none !important; }
       .${SCRIPT_PREFIX}__status[data-error=true] { color:#ffb4ab !important; max-height:140px !important; overflow:auto !important; pointer-events:auto !important; }
-      .${SCRIPT_PREFIX}__captions { position:absolute !important; bottom:max(calc(var(--subtitle-bottom,0%) + 8px),var(--subtitle-controls-bottom,0px)) !important; left:4% !important; right:4% !important; width:92% !important; margin:auto !important; text-align:center !important; font:500 var(--subtitle-size,22px)/1.4 -apple-system,BlinkMacSystemFont,sans-serif !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; text-shadow:0 1px 3px #000 !important; }
+      .${SCRIPT_PREFIX}__captions { position:absolute !important; bottom:max(calc(var(--subtitle-bottom,0%) + 8px),var(--subtitle-controls-bottom,0px)) !important; left:4% !important; right:4% !important; width:92% !important; margin:auto !important; text-align:center !important; text-wrap:balance !important; font:500 var(--subtitle-size,22px)/1.4 -apple-system,BlinkMacSystemFont,sans-serif !important; white-space:pre-wrap !important; overflow-wrap:anywhere !important; text-shadow:0 1px 3px #000 !important; }
       .${SCRIPT_PREFIX}__captions > div { width:fit-content !important; max-width:100% !important; box-sizing:border-box !important; margin:2px auto !important; padding:3px 8px !important; border-radius:4px !important; background:#000c !important; color:#fff !important; }
+      .${SCRIPT_PREFIX}__host[data-paused=true] .${SCRIPT_PREFIX}__captions > div { pointer-events:auto !important; -webkit-user-select:text !important; user-select:text !important; cursor:text !important; }
       .${SCRIPT_PREFIX}__captions > div:empty { display:none !important; }
       .${SCRIPT_PREFIX}__captions > .${SCRIPT_PREFIX}__translation { color:#ffedab !important; }
       .${SCRIPT_PREFIX}__active .ytp-caption-window-container { visibility:hidden !important; }
@@ -2522,7 +2631,7 @@
       parseSubtitleGroups, requestSubtitleTranslation, subtitleCacheKey, joinCaptionText,
       youtubeVideoId, selectYoutubeTrack, selectTargetYoutubeTrack, sameLanguage, youtubeCaptionUrl, youtubeTrackKey,
       captionBridgeRequest, youtubeCaptionBridge, installCaptionBridge,
-      subtitleAtTime, subtitleQueueChunk, subtitleRetryDelay, cancelSubtitleRequest,
+      subtitleAtTime, nextSubtitleBoundaryMs, subtitleQueueChunk, subtitleRetryDelay, cancelSubtitleRequest,
       pumpSubtitleQueue, loadYoutubeCaptions, loadSubtitlePreferences,
       startYoutubeSubtitles, stopYoutubeSubtitles, retryYoutubeSubtitles, resegmentYoutubeSubtitles, checkSubtitleTrack,
       mountSubtitleView, renderSubtitles, refreshYoutubePlayer, setSubtitleStatus, setPreferencesOpen,
@@ -2538,6 +2647,8 @@
 
   function refreshYoutubePlayer() {
     const videoId = youtubeVideoId();
+    if (!videoId && !subtitleView && !subtitleSession) return;
+    if (document.hidden && subtitleView && subtitleView.videoId === videoId) return;
     const video = videoId
       ? document.querySelector("#movie_player video") ||
         document.querySelector("video.html5-main-video") ||
@@ -2560,7 +2671,6 @@
     }
     if (subtitleView) {
       syncSubtitleTriggerDock(subtitleView);
-      updateSubtitlePosition(subtitleView);
     }
     const session = subtitleSession;
     if (session) {
@@ -2582,6 +2692,9 @@
     GM_registerMenuCommand(`${SCRIPT_NAME}: Toggle captions`, toggleYoutubeSubtitles);
     refreshYoutubePlayer();
     setInterval(refreshYoutubePlayer, 1000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshYoutubePlayer();
+    });
     document.addEventListener("yt-navigate-start", () => stopYoutubeSubtitles());
     document.addEventListener("yt-navigate-finish", refreshYoutubePlayer);
     window.addEventListener("pagehide", () => stopYoutubeSubtitles());

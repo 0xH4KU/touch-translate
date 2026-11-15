@@ -21,6 +21,8 @@
   const SUBTITLE_CLAUSE_PAUSE_MS = 400;
   const SUBTITLE_BATCH_MS = 30000;
   const SUBTITLE_BATCH_CHARS = 6000;
+  const SUBTITLE_FIRST_BATCH_MS = 12000;
+  const SUBTITLE_FIRST_BATCH_CHARS = 2000;
   const SUBTITLE_LOOKAHEAD_MS = 60000;
   const SUBTITLE_DISMISS_MS = 4000;
   const SUBTITLE_RETRY_BASE_MS = 2000;
@@ -36,6 +38,7 @@
     return {
       enabled: saved?.enabled !== false,
       smart: saved?.smart !== false,
+      forceAi: saved?.forceAi === true,
       translationOnly: saved?.translationOnly === true,
       fontSize: Math.max(14, Math.min(36, Number(saved?.fontSize) || 22)),
       bottom: Math.max(0, Math.min(35, Number.isFinite(bottom) ? bottom : 0)),

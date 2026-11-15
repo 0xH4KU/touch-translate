@@ -5,7 +5,7 @@
       parseSubtitleGroups, requestSubtitleTranslation, subtitleCacheKey, joinCaptionText,
       youtubeVideoId, selectYoutubeTrack, selectTargetYoutubeTrack, sameLanguage, youtubeCaptionUrl, youtubeTrackKey,
       captionBridgeRequest, youtubeCaptionBridge, installCaptionBridge,
-      subtitleAtTime, subtitleQueueChunk, subtitleRetryDelay, cancelSubtitleRequest,
+      subtitleAtTime, nextSubtitleBoundaryMs, subtitleQueueChunk, subtitleRetryDelay, cancelSubtitleRequest,
       pumpSubtitleQueue, loadYoutubeCaptions, loadSubtitlePreferences,
       startYoutubeSubtitles, stopYoutubeSubtitles, retryYoutubeSubtitles, resegmentYoutubeSubtitles, checkSubtitleTrack,
       mountSubtitleView, renderSubtitles, refreshYoutubePlayer, setSubtitleStatus, setPreferencesOpen,
@@ -21,6 +21,8 @@
 
   function refreshYoutubePlayer() {
     const videoId = youtubeVideoId();
+    if (!videoId && !subtitleView && !subtitleSession) return;
+    if (document.hidden && subtitleView && subtitleView.videoId === videoId) return;
     const video = videoId
       ? document.querySelector("#movie_player video") ||
         document.querySelector("video.html5-main-video") ||
@@ -43,7 +45,6 @@
     }
     if (subtitleView) {
       syncSubtitleTriggerDock(subtitleView);
-      updateSubtitlePosition(subtitleView);
     }
     const session = subtitleSession;
     if (session) {
@@ -65,6 +66,9 @@
     GM_registerMenuCommand(`${SCRIPT_NAME}: Toggle captions`, toggleYoutubeSubtitles);
     refreshYoutubePlayer();
     setInterval(refreshYoutubePlayer, 1000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshYoutubePlayer();
+    });
     document.addEventListener("yt-navigate-start", () => stopYoutubeSubtitles());
     document.addEventListener("yt-navigate-finish", refreshYoutubePlayer);
     window.addEventListener("pagehide", () => stopYoutubeSubtitles());

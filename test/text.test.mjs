@@ -1274,3 +1274,193 @@ for (const mode of ["success", "failure", "auto-failure", "cancel", "cancel-wait
   await checkBatchRecovery(mode);
 }
 
+// Chinese script unification skips both Simplified and Traditional Chinese during auto-page
+// translation while leaving Japanese Kanji headings and mixed mostly-English text alone.
+assert.equal(api.isChineseText("這是一段繁體中文的評論內容。"), true);
+assert.equal(api.isChineseText("这是一段简体中文的评论内容。"), true);
+assert.equal(api.isChineseText("利用規約"), false);
+assert.equal(api.isChineseText("新規登録"), false);
+assert.equal(api.isChineseText("日本語のテスト文章です"), false);
+assert.equal(api.isChineseText("한국어 테스트 문장입니다"), false);
+assert.equal(api.isChineseText("This mostly English sentence includes 中文."), false);
+const visibleChineseBlock = { ...pageBlock, visibility: "visible" };
+const visibleChineseRoot = { contains: (element) => element === visibleChineseBlock };
+assert.equal(api.isTranslatablePageBlock(visibleChineseBlock, [visibleChineseRoot], "这是一段简体中文的评论内容。", "zh-TW"), false);
+assert.equal(api.isTranslatablePageBlock(visibleChineseBlock, [visibleChineseRoot], "这是一段简体中文的评论内容。", "en"), true);
+assert.equal(api.isTranslatablePageBlock(visibleChineseBlock, [visibleChineseRoot], "利用規約", "zh-TW"), true);
+
+// Sheer non-link overlay covers pierce to underlying text, while blur/opaque covers block it.
+const origGetComputedStyle = context.getComputedStyle;
+const origCreateElement = document.createElement;
+context.getComputedStyle = (el) => ({
+  ...origGetComputedStyle(el),
+  position: el.position,
+  backgroundColor: el.backgroundColor,
+  backgroundImage: el.backgroundImage,
+  backdropFilter: el.backdropFilter,
+  flexDirection: el.flexDirection,
+  gridTemplateColumns: el.gridTemplateColumns,
+});
+try {
+  const cardRoot = {
+    matches: () => false,
+    getBoundingClientRect: () => ({ width: 300, height: 180 }),
+    parentElement: body,
+  };
+  const sheerCover = {
+    tagName: "DIV",
+    position: "absolute",
+    backgroundColor: "rgba(0, 0, 0, 0.05)",
+    backgroundImage: "linear-gradient(to top, rgba(0, 0, 0, 0.3), transparent)",
+    backdropFilter: "none",
+    innerText: "",
+    parentElement: cardRoot,
+    matches: () => false,
+    getBoundingClientRect: () => ({ width: 300, height: 180 }),
+  };
+  const cardHeadline = { tagName: "H3", innerText: "Card headline", matches: () => false };
+  document.elementsFromPoint = () => [sheerCover, cardHeadline, body];
+  assert.equal(api.resolveTargetElement(sheerCover, { clientX: 50, clientY: 50 }), cardHeadline);
+  sheerCover.backdropFilter = "blur(8px)";
+  assert.equal(api.resolveTargetElement(sheerCover, { clientX: 50, clientY: 50 }), sheerCover);
+  sheerCover.backdropFilter = "none";
+  sheerCover.backgroundColor = "rgb(255, 255, 255)";
+  assert.equal(api.resolveTargetElement(sheerCover, { clientX: 50, clientY: 50 }), sheerCover);
+
+  // Table cells and horizontal flex items insert translations inside the block, while column flex keeps sibling insertion.
+  function makeDomContainerMock(tagName, parentElement = null) {
+    const classes = new Set();
+    const el = {
+      tagName,
+      isConnected: true,
+      parentElement,
+      nextElementSibling: null,
+      children: [],
+      childNodes: [],
+      textNodes: [],
+      style: { cssText: "", setProperty() {}, removeProperty() {} },
+      classList: { add: (c) => classes.add(c), contains: (c) => classes.has(c) },
+      attributes: [],
+      getAttribute: () => null,
+      setAttribute() {},
+      removeAttribute() {},
+      matches: () => false,
+      querySelectorAll: () => [],
+      append(...items) {
+        for (const item of items) {
+          if (item && typeof item === "object") {
+            item.parentElement = this;
+            item.isConnected = true;
+          }
+          this.children.push(item);
+          this.childNodes.push(item);
+        }
+      },
+      replaceChildren(...items) { this.children = []; this.childNodes = []; this.append(...items); },
+      cloneNode() { return makeDomContainerMock(this.tagName, null); },
+      insertAdjacentElement(_pos, next) { this.nextElementSibling = next; next.isConnected = true; },
+    };
+    return el;
+  }
+  document.createElement = (tag) => makeDomContainerMock(tag.toUpperCase());
+  const tdCell = makeDomContainerMock("TD");
+  tdCell.textNodes = [{ nodeValue: "Cell text", parentElement: tdCell }];
+  api.insertTranslation(tdCell, "儲存格譯文");
+  assert.equal(tdCell.nextElementSibling, null);
+  assert.equal(tdCell.children.length, 1);
+  assert.equal(tdCell.children[0].classList.contains("touch-translate__translation"), true);
+  // Even with an indicator appended after the translation child, translationAfter still finds it.
+  const indicatorMock = makeDomContainerMock("SPAN");
+  indicatorMock.classList.add("touch-translate__indicator");
+  tdCell.append(indicatorMock);
+  assert.equal(api.translationAfter(tdCell), tdCell.children[0]);
+
+  const flexRowParent = Object.assign(makeDomContainerMock("DIV"), { display: "flex", flexDirection: "row" });
+  const flexRowItem = makeDomContainerMock("P", flexRowParent);
+  flexRowItem.textNodes = [{ nodeValue: "Row item", parentElement: flexRowItem }];
+  api.insertTranslation(flexRowItem, "橫向項目");
+  assert.equal(flexRowItem.nextElementSibling, null);
+  assert.equal(flexRowItem.children.length, 1);
+
+  const flexColParent = Object.assign(makeDomContainerMock("DIV"), { display: "flex", flexDirection: "column" });
+  const flexColItem = makeDomContainerMock("P", flexColParent);
+  flexColItem.textNodes = [{ nodeValue: "Column item", parentElement: flexColItem }];
+  api.insertTranslation(flexColItem, "縱向項目");
+  assert.ok(flexColItem.nextElementSibling);
+  assert.equal(flexColItem.children.length, 0);
+} finally {
+  context.getComputedStyle = origGetComputedStyle;
+  document.createElement = origCreateElement;
+}
+
+// Partial batch recovery preserves valid items when another item in the batch fails line-break validation.
+const partialReq = api.requestTranslations(["First paragraph.\n\nSecond paragraph.", "Single line"], retrySettings);
+transport.options.onload({
+  status: 200,
+  responseText: JSON.stringify({
+    choices: [{
+      finish_reason: "stop",
+      message: { content: JSON.stringify({ translations: ["Collapsed lines", "單行"] }) },
+    }],
+  }),
+});
+await assert.rejects(partialReq.promise, (error) => {
+  assert.equal(error.code, "TRANSLATION_RESPONSE_ERROR");
+  assert.deepEqual([...error.partialTranslations], [null, "單行"]);
+  return true;
+});
+
+{
+  const items = ["First broken", "Second fine", "Already Chinese"].map((text) => ({
+    text, isConnected: true, busy: null,
+    getAttribute() { return this.busy; },
+    setAttribute(_name, value) { this.busy = value; },
+    removeAttribute() { this.busy = null; },
+  }));
+  const calls = [];
+  const inserted = new Map();
+  const task = { autoPage: true, cancelled: false, jobs: new Set() };
+  const scheduler = vm.runInNewContext(
+    readFileSync(new URL("../src/text/jobs.js", import.meta.url), "utf8") +
+      "\n({ translateElements })",
+    {
+      Error, Map, Set, WeakMap, clearTimeout,
+      BATCH_MAX_CHARS: 6000,
+      comparableText: (v) => String(v || "").replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase(),
+      readySettings: async () => retrySettings,
+      loadCache: () => ({}), saveCache() {},
+      sourceText: (el) => el.text,
+      translationAfter: (el) => inserted.has(el),
+      translationRequestFor: (_el, text) => ({ requestText: text, segmentCount: 0 }),
+      hashCacheKey: (text) => text,
+      groupRecords: api.groupRecords, makeBatches: api.makeBatches,
+      parseInlineTranslation: api.parseInlineTranslation,
+      recordMatchesElement: (record) => record.element.isConnected,
+      shouldSplitBatch: api.shouldSplitBatch,
+      restoreAriaBusy(job) {
+        if (job.ariaBusy === null) job.element.removeAttribute("aria-busy");
+        else job.element.setAttribute("aria-busy", job.ariaBusy);
+      },
+      showIndicator() {}, removeIndicator() {}, toast() {},
+      insertTranslation(el, result) { inserted.set(el, result.translation); },
+      requestTranslations(texts) {
+        calls.push([...texts]);
+        return {
+          promise: texts.length > 1
+            ? Promise.reject(Object.assign(new Error("break mismatch"), {
+                code: "TRANSLATION_RESPONSE_ERROR",
+                partialTranslations: [null, "第二段", "Already Chinese!"],
+              }))
+            : Promise.resolve(["第一段修復"]),
+          abort() {},
+        };
+      },
+    },
+  );
+  await scheduler.translateElements(items, { task });
+  assert.deepEqual(calls, [["First broken", "Second fine", "Already Chinese"], ["First broken"]]);
+  assert.equal(inserted.get(items[0]), "第一段修復");
+  assert.equal(inserted.get(items[1]), "第二段");
+  assert.equal(inserted.has(items[2]), false, "Auto-page translation must skip echoed identical output");
+}
+

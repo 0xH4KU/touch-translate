@@ -1,6 +1,7 @@
   const REQUEST_TIMEOUT_MS = 60000;
   const MAX_RETRIES = 2;
   const structuredOutputFallbackModels = new Set();
+  const thinkingFallbackModels = new Set();
 
   function endpointFor(baseURL, model = "", apiFormat = "chat-completions") {
     const url = new URL(baseURL);
@@ -111,6 +112,15 @@
     );
   }
 
+  function thinkingUnsupported(status, message) {
+    return (
+      (status === 400 || status === 422) &&
+      /reasoning[_ -]?effort|thinking[_ -]?(?:config|level)|thinking\s+is\s+not\s+supported/i.test(
+        String(message || ""),
+      )
+    );
+  }
+
   function responseFormatError(reason, content, expected = EXPECTED_FORMAT) {
     const error = new Error([
       "Response format mismatch.",
@@ -173,16 +183,18 @@
     const nativeGemini = settings.apiFormat === "gemini-native";
     const url = new URL(endpointFor(settings.baseURL, settings.model, settings.apiFormat));
     const modelKey = `${nativeGemini}\u0000${settings.baseURL}\u0000${settings.model}\u0000${schemaName}`;
+    const thinkingKey = `${nativeGemini}\u0000${settings.baseURL}\u0000${settings.model}\u0000${thinkingLevelFor(settings)}`;
     const headers = { "Content-Type": "application/json" };
     if (!nativeGemini) headers.Authorization = `Bearer ${settings.apiKey}`;
     else if (/^(?:\/v1\/[^/]+\/[^/]+)?\/google-ai-studio\//.test(url.pathname)) {
       headers["cf-aig-authorization"] = `Bearer ${settings.apiKey}`;
     } else headers["x-goog-api-key"] = settings.apiKey;
 
-    const buildPayload = (useSchema) => {
+    const buildPayload = (useSchema, useThinking = true) => {
       if (nativeGemini) {
         const generationConfig = generationConfigFor(settings);
         if (useSchema) generationConfig.responseJsonSchema = schema;
+        if (!useThinking) delete generationConfig.thinkingConfig;
         return {
           systemInstruction: { parts: [{ text: systemPrompt }] },
           contents: [{ role: "user", parts: geminiParts }],
@@ -197,8 +209,8 @@
       const payload = {
         model: settings.model,
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userContent }],
-        reasoning_effort: thinkingLevelFor(settings),
       };
+      if (useThinking) payload.reasoning_effort = thinkingLevelFor(settings);
       if (useSchema) {
         payload.response_format = {
           type: "json_schema",
@@ -214,6 +226,7 @@
     let rejectPromise;
     let attempt = 0;
     let schemaFallbackTried = false;
+    let thinkingFallbackTried = false;
     const promise = new Promise((resolve, reject) => {
       rejectPromise = reject;
       const finish = (callback, value) => {
@@ -247,23 +260,24 @@
         if (imageMimeType) lines.push(`Image MIME type: ${imageMimeType}`);
         return new Error(lines.join("\n"));
       };
-      const retry = (disableSchema, response) => {
+      const retry = (disableSchema, disableThinking, response) => {
         if (attempt >= MAX_RETRIES || settled) return false;
         const delay = retryDelayFor(response, attempt++);
-        retryTimer = setTimeout(() => send(disableSchema), delay);
+        retryTimer = setTimeout(() => send(disableSchema, disableThinking), delay);
         return true;
       };
-      const send = (disableSchema = false) => {
+      const send = (disableSchema = false, disableThinking = false) => {
         if (settled) return;
         const useSchema = !disableSchema && !structuredOutputFallbackModels.has(modelKey);
+        const useThinking = !disableThinking && !thinkingFallbackModels.has(thinkingKey);
         const fallback = () => {
           schemaFallbackTried = true;
-          send(true);
+          send(true, disableThinking);
         };
         try {
           currentRequest = GM_xmlhttpRequest({
             method: "POST", url: url.href, headers,
-            data: JSON.stringify(buildPayload(useSchema)),
+            data: JSON.stringify(buildPayload(useSchema, useThinking)),
             anonymous: true, timeout: REQUEST_TIMEOUT_MS,
             onload(response) {
               currentRequest = null;
@@ -273,6 +287,11 @@
                 const responseText = String(response.responseText || "");
                 if (status < 200 || status >= 300) {
                   const detail = extractErrorMessage(responseText);
+                  if (useThinking && !thinkingFallbackTried && thinkingUnsupported(status, detail)) {
+                    thinkingFallbackTried = true;
+                    send(disableSchema, true);
+                    return;
+                  }
                   if (useSchema && !schemaFallbackTried && (
                     structuredOutputUnsupported(status, detail) ||
                     (nativeGemini && allowGenericSchemaFallback && status === 400)
@@ -281,7 +300,7 @@
                     return;
                   }
                   if ((status === 429 || (status >= 500 && status < 600)) &&
-                    !/quota|insufficient_quota|billing/i.test(detail) && retry(disableSchema, response)) return;
+                    !/quota|insufficient_quota|billing/i.test(detail) && retry(disableSchema, disableThinking, response)) return;
                   throw httpFailure(response, useSchema);
                 }
                 let body;
@@ -299,16 +318,17 @@
                   throw error;
                 }
                 if (schemaFallbackTried && disableSchema) structuredOutputFallbackModels.add(modelKey);
+                if (thinkingFallbackTried && disableThinking) thinkingFallbackModels.add(thinkingKey);
                 finish(resolve, result);
               } catch (error) { finish(reject, error); }
             },
             onerror() {
               currentRequest = null;
-              if (!retry(disableSchema)) finish(reject, new Error(`Could not connect to the translation API (${url.href}).`));
+              if (!retry(disableSchema, disableThinking)) finish(reject, new Error(`Could not connect to the translation API (${url.href}).`));
             },
             ontimeout() {
               currentRequest = null;
-              if (!retry(disableSchema)) finish(reject, new Error("The translation API timed out."));
+              if (!retry(disableSchema, disableThinking)) finish(reject, new Error("The translation API timed out."));
             },
             onabort() { finish(reject, cancelledError()); },
           });
@@ -319,6 +339,7 @@
       const failure = new Error(redactProviderDiagnostic(errorMessageFor(error), settings.apiKey));
       failure.name = error?.name || "Error";
       if (error?.code) failure.code = error.code;
+      if (Array.isArray(error?.partialTranslations)) failure.partialTranslations = error.partialTranslations;
       throw failure;
     });
     return {

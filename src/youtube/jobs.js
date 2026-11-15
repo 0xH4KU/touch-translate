@@ -23,6 +23,11 @@
         const track = selectYoutubeTrack(snapshot, targetLanguage);
         if (!track) throw new Error("This video has no available captions. Speech transcription is not included.");
         if (typeof track.languageCode !== "string" || track.languageCode.length > 64 || !["", "asr"].includes(track.kind || "")) throw new Error("Invalid YouTube caption track.");
+        const forceAi = Boolean(session.preferences?.forceAi);
+        if (session.auto && !forceAi && sameLanguage(track.languageCode, targetLanguage)) {
+          session.sameLanguageSkipped = true;
+          return [];
+        }
         const url = youtubeCaptionUrl(track, snapshot);
         if ((attempted.get(url) || 0) < 3 && (url !== lastUrl || attempt % 10 === 0)) {
           attempted.set(url, (attempted.get(url) || 0) + 1);
@@ -38,7 +43,7 @@
             session.trackKey = youtubeTrackKey(track);
             session.rawFragments = fragments;
             session.automatic = track.kind === "asr";
-            const targetTrack = selectTargetYoutubeTrack(snapshot, track, targetLanguage);
+            const targetTrack = selectTargetYoutubeTrack(snapshot, track, targetLanguage, forceAi);
             if (targetTrack && typeof targetTrack.languageCode === "string" && targetTrack.languageCode.length <= 64) {
               try {
                 const targetText = await captionBridgeRequest("load", { url: youtubeCaptionUrl(targetTrack, snapshot) }, signal);
@@ -69,7 +74,14 @@
   function subtitleQueueChunk(session) {
     const time = session.video.currentTime * 1000;
     const lookahead = SUBTITLE_LOOKAHEAD_MS * Math.min(4, Math.max(1, session.video.playbackRate || 1));
-    return session.chunks.find((chunk) => !chunk.done && !chunk.failed && chunk.end > time && chunk.start <= time + lookahead);
+    const index = session.chunks.findIndex((chunk) => !chunk.done && !chunk.failed && chunk.end > time && chunk.start <= time + lookahead);
+    if (index < 0) return undefined;
+    const current = session.chunks[index];
+    if (session.video.paused === false && current.start < time && current.end - time < 2500) {
+      const next = session.chunks[index + 1];
+      if (next && !next.done && !next.failed && next.start <= time + 5000) return next;
+    }
+    return current;
   }
 
   function subtitleRetryDelay(attempt = 1, baseMs = SUBTITLE_RETRY_BASE_MS) {
@@ -177,12 +189,17 @@
     view.toggle.setAttribute("aria-pressed", "true");
     try {
       let settings = loadSettings();
+      const forceAi = Boolean(view.preferences.forceAi);
       let hasNativeTarget = false;
       try { requireReadySettings(settings); }
       catch {
         const snapshot = await captionBridgeRequest("snapshot").catch(() => null);
         const source = selectYoutubeTrack(snapshot, settings.targetLanguage);
-        hasNativeTarget = Boolean(selectTargetYoutubeTrack(snapshot, source, settings.targetLanguage));
+        if (auto === true && !forceAi && source && sameLanguage(source.languageCode, settings.targetLanguage)) {
+          stopYoutubeSubtitles();
+          return;
+        }
+        hasNativeTarget = Boolean(selectTargetYoutubeTrack(snapshot, source, settings.targetLanguage, forceAi));
         if (!hasNativeTarget) {
           if (auto === true) {
             stopYoutubeSubtitles();
@@ -195,13 +212,17 @@
       if (!settings) { stopYoutubeSubtitles(); return; }
       const session = {
         videoId: youtubeVideoId(), player: view.player, video: view.video, settings,
-        preferences: { ...view.preferences }, controller: new AbortController(),
+        auto: Boolean(auto), preferences: { ...view.preferences }, controller: new AbortController(),
         chunks: [], listeners: [], generation: 0, running: false, request: null, error: null,
       };
       subtitleSession = session;
       setSubtitleStatus("Loading YouTube captions…");
       session.chunks = await loadYoutubeCaptions(session);
       if (session !== subtitleSession || session.controller.signal.aborted) return;
+      if (session.sameLanguageSkipped) {
+        stopYoutubeSubtitles();
+        return;
+      }
       if (!session.nativeBilingual && hasNativeTarget) {
         if (auto === true) { stopYoutubeSubtitles(); return; }
         const ready = await readySettings();
@@ -226,7 +247,7 @@
       listen("timeupdate", () => { renderSubtitles(session); void pumpSubtitleQueue(session); });
       listen("play", () => { renderSubtitles(session); });
       listen("pause", () => { clearTimeout(session.renderTimer); renderSubtitles(session); });
-      listen("ratechange", () => { void pumpSubtitleQueue(session); });
+      listen("ratechange", () => { renderSubtitles(session); void pumpSubtitleQueue(session); });
       session.player.classList.add(`${SCRIPT_PREFIX}__active`);
       view.toggle.textContent = "Stop CC";
       renderSubtitles(session);

@@ -225,13 +225,26 @@
       parseResponse: (content) => {
         const translations = parseTranslations(content, texts.length)
           .map((translation) => translation.replace(/\r\n?/g, "\n"));
+        const invalidIndices = [];
         translations.forEach((translation, index) => {
           const sourceBreaks = String(texts[index]).match(/\n+/g) || [];
           const translatedBreaks = translation.match(/\n+/g) || [];
           if (sourceBreaks.join("|") !== translatedBreaks.join("|")) {
-            throw responseFormatError(`Translation ${index + 1} did not preserve paragraph and line breaks.`, content);
+            invalidIndices.push(index);
           }
         });
+        if (invalidIndices.length) {
+          const error = responseFormatError(
+            `Translation ${invalidIndices[0] + 1} did not preserve paragraph and line breaks.`,
+            content,
+          );
+          if (invalidIndices.length < translations.length) {
+            error.partialTranslations = translations.map((value, index) =>
+              invalidIndices.includes(index) ? null : value,
+            );
+          }
+          throw error;
+        }
         return translations;
       },
       schema: {

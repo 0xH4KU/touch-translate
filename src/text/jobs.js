@@ -156,6 +156,58 @@
       toast(`Translating ${completed}/${activeTotal}`, 0);
     }
 
+    const applyResolvedPairs = (pairs) => {
+      const cacheEntries = {};
+      for (const [group, rawTranslation] of pairs) {
+        const result = parseInlineTranslation(
+          rawTranslation,
+          group.segmentCount,
+        );
+        const unchanged =
+          typeof comparableText === "function"
+            ? comparableText(result.translation) === comparableText(group.text)
+            : result.translation === group.text;
+        if (!unchanged) {
+          cacheEntries[group.key] = {
+            ...result,
+            formatKey: group.formatKey,
+            at: Date.now(),
+          };
+        }
+        for (const record of group.entries) {
+          const { element, formatKey, job } = record;
+          if (pendingJobs.get(element) !== job || job.cancelled) {
+            activeTotal -= 1;
+            continue;
+          }
+          if (!recordMatchesElement(record, settings)) {
+            settleJob(job);
+            activeTotal -= 1;
+            continue;
+          }
+          if (!unchanged || !currentTask.autoPage) {
+            insertTranslation(
+              element,
+              {
+                translation: result.translation,
+                segments:
+                  formatKey === group.formatKey ? result.segments : null,
+              },
+              currentTask.translations,
+            );
+          }
+          settleJob(job);
+          completed += 1;
+        }
+      }
+      if (Object.keys(cacheEntries).length) {
+        cache = saveCache(cacheEntries);
+      }
+      if (showProgress) {
+        toast(`Translating ${completed}/${activeTotal}`, 0);
+      }
+    };
+
     const batches = makeBatches(groupRecords(records), showProgress);
     const failedJobs = [];
     let responseError;
@@ -230,7 +282,28 @@
             continue;
           }
           if (!shouldSplitBatch(error)) throw error;
-          if (activeBatch.length > 1) {
+          const partial =
+            Array.isArray(error?.partialTranslations) &&
+            error.partialTranslations.length === activeBatch.length
+              ? error.partialTranslations
+              : null;
+          if (partial) {
+            const validPairs = [];
+            const failedGroups = [];
+            activeBatch.forEach((group, index) => {
+              if (typeof partial[index] === "string") {
+                validPairs.push([group, partial[index]]);
+              } else {
+                failedGroups.push(group);
+              }
+            });
+            if (validPairs.length) applyResolvedPairs(validPairs);
+            if (failedGroups.length) {
+              batches.splice(
+                batchIndex + 1, 0, ...failedGroups.map((group) => [group]),
+              );
+            }
+          } else if (activeBatch.length > 1) {
             batches.splice(
               batchIndex + 1, 0, ...activeBatch.map((group) => [group]),
             );
@@ -251,50 +324,12 @@
           activeRequest.jobs.clear();
         }
         if (currentTask.cancelled) return;
-        const cacheEntries = {};
-        translations.forEach((rawTranslation, index) => {
-          const group = activeBatch[index];
-          const result = parseInlineTranslation(
+        applyResolvedPairs(
+          translations.map((rawTranslation, index) => [
+            activeBatch[index],
             rawTranslation,
-            group.segmentCount,
-          );
-          if (result.translation !== group.text) {
-            cacheEntries[group.key] = {
-              ...result,
-              formatKey: group.formatKey,
-              at: Date.now(),
-            };
-          }
-          for (const record of group.entries) {
-            const { element, formatKey, job } = record;
-            if (pendingJobs.get(element) !== job || job.cancelled) {
-              activeTotal -= 1;
-              continue;
-            }
-            if (!recordMatchesElement(record, settings)) {
-              settleJob(job);
-              activeTotal -= 1;
-              continue;
-            }
-            insertTranslation(
-              element,
-              {
-                translation: result.translation,
-                segments:
-                  formatKey === group.formatKey ? result.segments : null,
-              },
-              currentTask.translations,
-            );
-            settleJob(job);
-            completed += 1;
-          }
-        });
-        if (Object.keys(cacheEntries).length) {
-          cache = saveCache(cacheEntries);
-        }
-        if (showProgress) {
-          toast(`Translating ${completed}/${activeTotal}`, 0);
-        }
+          ]),
+        );
       }
       if (responseError && !currentTask.autoPage) throw responseError;
     } catch (error) {
@@ -370,7 +405,12 @@
     for (const element of elements) {
       if (
         !task.observedBlocks.has(element) &&
-        isTranslatablePageBlock(element, roots)
+        isTranslatablePageBlock(
+          element,
+          roots,
+          undefined,
+          task.settings?.targetLanguage,
+        )
       ) {
         task.observedBlocks.add(element);
         task.intersectionObserver.observe(element);
@@ -407,7 +447,12 @@
       innerHeight || document.documentElement.clientHeight;
     const blocks = [...task.pendingBlocks]
       .filter((element) => {
-        const eligible = isTranslatablePageBlock(element, roots);
+        const eligible = isTranslatablePageBlock(
+          element,
+          roots,
+          undefined,
+          task.settings?.targetLanguage,
+        );
         if (!eligible) task.observedBlocks.delete(element);
         return eligible;
       })
@@ -448,7 +493,8 @@
       );
       return;
     }
-    if (!(await readySettings())) return;
+    const settings = await readySettings();
+    if (!settings) return;
     const task = {
       autoPage: true,
       cancelled: false,
@@ -457,6 +503,7 @@
       observedBlocks: new WeakSet(),
       pendingBlocks: new Set(),
       rerun: false,
+      settings,
       translations: new Set(),
     };
     task.schedule = () => {
@@ -467,7 +514,35 @@
         runPageTranslation(task, isFirst);
       }, 60);
     };
-    task.refresh = () => {
+    const isOwnNode = (node) =>
+      node?.nodeType === 1 &&
+      (isSuiteUi(node) ||
+        node.classList?.contains(TRANSLATION_CLASS) ||
+        node.classList?.contains(INDICATOR_CLASS));
+    const isOwnMutation = (record) => {
+      if (
+        isOwnNode(record.target) ||
+        record.target?.closest?.(`.${TRANSLATION_CLASS}`)
+      ) {
+        return true;
+      }
+      if (record.type === "attributes") {
+        return record.attributeName === "aria-busy";
+      }
+      if (record.type === "childList") {
+        const changed = [...record.addedNodes, ...record.removedNodes];
+        return changed.length > 0 && changed.every(isOwnNode);
+      }
+      return false;
+    };
+    task.refresh = (records) => {
+      if (
+        Array.isArray(records) &&
+        records.length &&
+        records.every(isOwnMutation)
+      ) {
+        return;
+      }
       clearTimeout(task.refreshTimer);
       task.refreshTimer = setTimeout(() => {
         if (!task.cancelled) observePageBlocks(task);

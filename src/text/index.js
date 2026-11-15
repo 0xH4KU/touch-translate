@@ -31,11 +31,13 @@
       canConsumeRightSwipe,
       indicatorFor,
       insertTranslation,
+      isChineseText,
       isPrivateOrLocalHost,
       isRenderedTextNode,
       isSafeHref,
       isTranslatablePageBlock,
       shouldSplitBatch,
+      thinkingUnsupported,
       makeBatches,
       movedTooFar,
       normalizeText,
@@ -83,6 +85,22 @@
     capture: true,
     passive: true,
   });
+  document.addEventListener(
+    "click",
+    (event) => {
+      if (
+        lastSwipeCommitAt &&
+        Date.now() - lastSwipeCommitAt < 400 &&
+        !isSuiteUi(event.target)
+      ) {
+        lastSwipeCommitAt = 0;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+      }
+    },
+    true,
+  );
 
   registerCommonMenus();
   GM_registerMenuCommand("Touch Translate: Auto-translate page", startPageTranslation);

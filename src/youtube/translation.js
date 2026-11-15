@@ -8,6 +8,16 @@
     }, "");
   }
 
+  function normalizeCaptionText(value, automatic = true) {
+    if (automatic) return normalizeText(value);
+    return String(value || "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/[^\S\n]+/g, " ")
+      .replace(/ *\n */g, "\n")
+      .replace(/\n{2,}/g, "\n")
+      .trim();
+  }
+
   function parseYoutubeCaptions(text, automatic = true) {
     if (typeof text !== "string" || text.length > CAPTION_MAX_BYTES) throw new Error("YouTube captions are too large or invalid.");
     let data;
@@ -35,7 +45,7 @@
         else pieces.push({ offset, text: seg.utf8 });
       }
       pieces.forEach((piece, index) => {
-        const content = normalizeText(piece.text);
+        const content = normalizeCaptionText(piece.text, automatic);
         if (!content) return;
         const start = event.tStartMs + piece.offset;
         const end = event.tStartMs + (pieces[index + 1]?.offset ?? durationMs);
@@ -105,8 +115,11 @@
       const entries = fragments.slice(group.from, group.to + 1);
       const chars = entries.reduce((sum, fragment) => sum + fragment.text.length, 0);
       if (chars > SUBTITLE_BATCH_CHARS) throw new Error("A subtitle cue is too long to translate safely.");
-      if (!chunk || entries.at(-1).end - chunk.start > SUBTITLE_BATCH_MS ||
-        chunk.chars + chars > SUBTITLE_BATCH_CHARS || chunk.fragments.length + entries.length > 180) {
+      const first = !chunk ? !chunks.length : chunks.length === 1;
+      const maxMs = first ? SUBTITLE_FIRST_BATCH_MS : SUBTITLE_BATCH_MS;
+      const maxChars = first ? SUBTITLE_FIRST_BATCH_CHARS : SUBTITLE_BATCH_CHARS;
+      if (!chunk || entries.at(-1).end - chunk.start > maxMs ||
+        chunk.chars + chars > maxChars || chunk.fragments.length + entries.length > 180) {
         chunk = { start: entries[0].start, end: entries.at(-1).end, chars: 0, fragments: [], automatic, done: false, failed: false, rawFrom: group.from };
         chunks.push(chunk);
       }
@@ -161,7 +174,7 @@
           return overlap > 0 && (idx === targets[range.from] || idx === targets[range.to] ||
             (mid >= start && mid <= end) || overlap >= Math.min(end - start, target.end - target.start) * 0.4);
         });
-        return { ...range, translation: matched.map((t) => t.text).join(" ") };
+        return { ...range, translation: joinCaptionText(matched) };
       }), fragments);
       chunk.done = true;
       return chunk;

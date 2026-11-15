@@ -4,6 +4,16 @@
       .trim();
   }
 
+  function comparableText(value) {
+    return String(value || "").replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+  }
+
+  function isChineseLanguage(value) {
+    return /^(?:zh(?:$|[-_])|chinese(?=$|\s*\()|(?:traditional|simplified)\s+chinese|繁體|正體|简体|簡體|中文|漢語|汉语)/i.test(
+      String(value || "").trim(),
+    );
+  }
+
   function errorMessageFor(error) {
     if (typeof error?.message === "string" && error.message.trim()) {
       return error.message;

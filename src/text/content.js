@@ -357,20 +357,43 @@
     return nodes;
   }
 
+  let inlineStructureCache = new WeakMap();
+  let inlineStructureClearScheduled = false;
+
+  function cachedInlineStructure(element) {
+    const textContent = element.textContent;
+    const cached = inlineStructureCache.get(element);
+    if (cached && cached.textContent === textContent) return cached.structure;
+    const structure = extractInlineStructure(element);
+    inlineStructureCache.set(element, { textContent, structure });
+    if (!inlineStructureClearScheduled) {
+      inlineStructureClearScheduled = true;
+      queueMicrotask(() => {
+        inlineStructureCache = new WeakMap();
+        inlineStructureClearScheduled = false;
+      });
+    }
+    return structure;
+  }
+
   function sourceText(element) {
-    const raw = normalizeLineBreaks(element.innerText ?? element.textContent);
+    if (typeof Node === "function" && element instanceof Node) {
+      if (!String(element.textContent || "").trim()) return "";
+      return cachedInlineStructure(element).plainText;
+    }
+    const raw = normalizeLineBreaks(element?.innerText ?? element?.textContent);
     if (!raw) return "";
-    if (
-      Array.isArray(element.textNodes) ||
-      (typeof Node === "function" && element instanceof Node)
-    ) {
+    if (Array.isArray(element?.textNodes)) {
       return extractInlineStructure(element).plainText;
     }
     return raw;
   }
 
   function translationRequestFor(element, text) {
-    const { requestText, wrappers } = extractInlineStructure(element);
+    const { requestText, wrappers } =
+      typeof Node === "function" && element instanceof Node
+        ? cachedInlineStructure(element)
+        : extractInlineStructure(element);
     return {
       requestText: requestText || text,
       segmentCount: wrappers.length,
@@ -391,9 +414,35 @@
       : source;
   }
 
+  function shouldInsertTranslationInside(anchor) {
+    if (/^(?:TD|TH|CAPTION|SUMMARY)$/i.test(anchor?.tagName || "")) return true;
+    const parent = anchor?.parentElement;
+    if (!parent || typeof getComputedStyle !== "function") return false;
+    const style = getComputedStyle(parent);
+    const display = String(style?.display || "");
+    if (/^(?:flex|inline-flex)$/i.test(display)) {
+      return !/^column/i.test(String(style.flexDirection || ""));
+    }
+    if (/^(?:grid|inline-grid)$/i.test(display)) {
+      const cols = String(style.gridTemplateColumns || "").trim();
+      return Boolean(cols && cols !== "none" && cols.split(/\s+/).length > 1);
+    }
+    return false;
+  }
+
   function translationAfter(source) {
-    const next = translationAnchor(source).nextElementSibling;
-    return next?.classList.contains(TRANSLATION_CLASS) ? next : null;
+    const anchor = translationAnchor(source);
+    const next = anchor.nextElementSibling;
+    if (next?.classList?.contains?.(TRANSLATION_CLASS)) return next;
+    const children = anchor?.children;
+    if (children) {
+      for (let i = children.length - 1; i >= 0; i -= 1) {
+        if (children[i]?.classList?.contains?.(TRANSLATION_CLASS)) {
+          return children[i];
+        }
+      }
+    }
+    return null;
   }
 
   function indicatorFor(element) {
@@ -509,15 +558,25 @@
       typeof result === "string" ? result : result?.translation;
     if (!normalizeText(translation)) return;
 
-    // A custom element clone can rerender itself and erase the translation.
-    const translated = source.tagName.includes("-")
+    const anchor = translationAnchor(source);
+    const insertInside =
+      anchor === source && shouldInsertTranslationInside(anchor);
+    // A custom element clone can rerender itself and erase the translation;
+    // table cells and flex/grid items insert a clean inner div instead of adding siblings.
+    const usePlainDiv = source.tagName?.includes("-") || insertInside;
+    const translated = usePlainDiv
       ? document.createElement("div")
       : source.cloneNode(true);
-    if (source.tagName.includes("-")) {
-      translated.className = source.className;
-      translated.style.cssText = source.style.cssText;
+    if (usePlainDiv) {
+      if (!insertInside) {
+        translated.className = source.className || "";
+        translated.style.cssText = source.style?.cssText || "";
+      }
       translated.append(
-        ...Array.from(source.childNodes, (node) => node.cloneNode(true)),
+        ...Array.from(
+          source.childNodes || source.children || [],
+          (node) => node.cloneNode(true),
+        ),
       );
     }
     translated
@@ -593,13 +652,13 @@
     ).matches;
     if (animateIn) translated.style.setProperty("opacity", "0", "important");
 
-    const anchor = translationAnchor(source);
-    if (anchor !== source || source.tagName.includes("-")) {
+    if (!insertInside && (anchor !== source || source.tagName?.includes("-"))) {
       const style = getComputedStyle(source);
       translated.style.font = style.font;
       translated.style.color = style.color;
     }
-    anchor.insertAdjacentElement("afterend", translated);
+    if (insertInside) anchor.append(translated);
+    else anchor.insertAdjacentElement("afterend", translated);
     translations?.add(translated);
     const { container, wrappers } = extractInlineStructure(translated);
     const segments = Array.isArray(result?.segments) ? result.segments : null;
@@ -646,11 +705,35 @@
       : [document.body || document.documentElement];
   }
 
-  function isUsefulPageBlock(element, text) {
+  function isChineseText(value) {
+    const text = normalizeText(value);
+    if (
+      !text ||
+      /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(text)
+    ) {
+      return false;
+    }
+    const letters = text.match(/\p{L}/gu);
+    if (!letters?.length) return false;
+    const han = text.match(/\p{Script=Han}/gu) || [];
+    if (han.length < 2 || han.length / letters.length < 0.6) return false;
+    return (
+      han.length >= 12 ||
+      /[的了是在有不這这个們们為为與与對对從从給给讓让把被沒没很就還还說说會会要能可]/u.test(
+        text,
+      )
+    );
+  }
+
+  function isUsefulPageBlock(element, text, targetLanguage = "") {
     const chrome = element.matches?.(YOUTUBE_COMMENT_SELECTOR)
       ? element.parentElement?.closest(PAGE_CHROME_SELECTOR)
       : element.closest(PAGE_CHROME_SELECTOR);
-    if (!pageTextLooksUseful(text) || chrome) {
+    if (
+      !pageTextLooksUseful(text) ||
+      chrome ||
+      (isChineseLanguage(targetLanguage) && isChineseText(text))
+    ) {
       return false;
     }
     const outerChrome = element.closest("header, footer");
@@ -672,7 +755,7 @@
     return text.length >= 160 || linkedCharacters / text.length <= 0.8;
   }
 
-  function isTranslatablePageBlock(element, roots, text) {
+  function isTranslatablePageBlock(element, roots, text, targetLanguage = "") {
     if (
       !element?.isConnected ||
       isSuiteUi(element) ||
@@ -685,5 +768,5 @@
     ) {
       return false;
     }
-    return isUsefulPageBlock(element, text ?? sourceText(element));
+    return isUsefulPageBlock(element, text ?? sourceText(element), targetLanguage);
   }

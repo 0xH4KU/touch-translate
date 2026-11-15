@@ -67,6 +67,23 @@ export async function runBrowserChecks(textSource, imageSource, youtubeSource) {
     assert(p.nextElementSibling?.textContent === "一般段落的譯文。", "The translated paragraph must render");
   });
 
+  await check("Table cell translation inserts inside the cell without shifting columns", async () => {
+    const table = document.createElement("table");
+    const row = document.createElement("tr");
+    const td = document.createElement("td");
+    td.textContent = "Table cell content";
+    row.append(td); table.append(row); article.append(table);
+    const start = requests.length;
+    const job = t.translateElements([td]);
+    await tick();
+    const pending = requests.slice(start).filter(r => r.kind === "text");
+    assert(pending.length === 1, "Table cell translation must send one request");
+    textReply(pending[0].options, "表格儲存格內容");
+    await job;
+    assert(td.querySelector(".touch-translate__translation")?.textContent === "表格儲存格內容", "Cell translation must render inside the cell");
+    assert(!td.nextElementSibling, "Cell translation must not add a sibling cell");
+  });
+
   await check("Concurrent text requests preserve both persistent cache entries", async () => {
     delete stores.text["cache-v1"];
     const a = paragraph("First independent paragraph."), b = paragraph("Second independent paragraph.");
