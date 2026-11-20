@@ -69,22 +69,25 @@
   // Initialization
 
   addStyles();
-  document.addEventListener("touchstart", onTouchStart, {
+  const touchTarget =
+    typeof globalThis.addEventListener === "function" ? globalThis : document;
+  touchTarget.addEventListener("touchstart", onTouchStart, {
     capture: true,
     passive: true,
   });
-  document.addEventListener("touchmove", onTouchMove, {
+  touchTarget.addEventListener("touchmove", onTouchMove, {
     capture: true,
     passive: false,
   });
-  document.addEventListener("touchend", onTouchEnd, {
+  touchTarget.addEventListener("touchend", onTouchEnd, {
     capture: true,
     passive: false,
   });
-  document.addEventListener("touchcancel", resetTouches, {
+  touchTarget.addEventListener("touchcancel", resetTouches, {
     capture: true,
     passive: true,
   });
+  globalThis.addEventListener?.("blur", resetTouches);
   document.addEventListener(
     "click",
     (event) => {

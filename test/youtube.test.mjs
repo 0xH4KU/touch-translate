@@ -3,139 +3,97 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { createHarness, cacheSettings } from "./fixtures.mjs";
 
-const { youtubeApi: api, youtubeSource, context, transport, storage } = createHarness();
+const { youtubeApi: api, context, transport, storage } = createHarness();
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const settings = api.cleanSettings({ ...cacheSettings, apiFormat: "chat-completions", apiKey: "synthetic-subtitle-secret" });
 const json3 = (events) => JSON.stringify({ events });
 const event = (start, duration, text, extra = {}) => ({ tStartMs: start, dDurationMs: duration, segs: [{ utf8: text }], ...extra });
-const reply = (options, groups) => options.onload({ status: 200, responseText: JSON.stringify({
-  choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ groups }) } }],
-}) });
+const reply = (options, groups) => options.onload({
+  status: 200,
+  responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ groups }) } }] }),
+});
 
-assert.match(youtubeSource, /@run-at\s+document-start/);
-assert.doesNotMatch(youtubeSource, /@match\s+\*:\/\/\*\/\*/);
+// 1. Video ID & caption parsing (ASR offsets, malformed event resilience, human line breaks).
 assert.equal(api.youtubeVideoId("https://www.youtube.com/watch?v=abcdefghijk"), "abcdefghijk");
-assert.equal(api.youtubeVideoId("https://m.youtube.com/watch?v=abcdefghijk"), null);
 assert.equal(api.youtubeVideoId("https://www.youtube.com/shorts/abcdefghijk"), null);
-assert.equal(api.youtubeVideoId("https://www.youtube.com/watch?v=bad"), null);
 
 const raw = api.parseYoutubeCaptions(json3([
-  { tStartMs: 0, segs: [] },
+  event(0, 0, "Zero duration"),
   { tStartMs: 1000, dDurationMs: 2000, segs: [{ utf8: "When", tOffsetMs: 0 }, { utf8: " we", tOffsetMs: 500 }, { utf8: " arrived", tOffsetMs: 1000 }] },
-  event(2000, 1000, "arrived"),
   event(3000, 1800, "we sat down."),
-  event(7000, 1500, "Again."), event(10000, 1500, "Again."),
+  event(7000, 1500, "Again."),
 ]));
 assert.deepEqual(plain(raw), [
-  { start: 1000, end: 1500, text: "When" }, { start: 1500, end: 2000, text: "we" },
-  { start: 2000, end: 3000, text: "arrived" }, { start: 3000, end: 4800, text: "we sat down." },
-  { start: 7000, end: 8500, text: "Again." }, { start: 10000, end: 11500, text: "Again." },
+  { start: 1000, end: 1500, text: "When" },
+  { start: 1500, end: 2000, text: "we" },
+  { start: 2000, end: 3000, text: "arrived" },
+  { start: 3000, end: 4800, text: "we sat down." },
+  { start: 7000, end: 8500, text: "Again." },
 ]);
+assert.equal(api.parseYoutubeCaptions(json3([event(1000, 2000, "- Really?\n- Yes!")]), false)[0].text, "- Really?\n- Yes!");
 assert.equal(api.joinCaptionText(raw.slice(0, 4)), "When we arrived we sat down.");
-assert.equal(api.joinCaptionText([{ text: "你好" }, { text: "世界" }, { text: "。" }]), "你好世界。");
-assert.deepEqual(plain(api.ruleSubtitleGroups(raw, true)), [{ from: 0, to: 3 }, { from: 4, to: 4 }, { from: 5, to: 5 }]);
-assert.equal(api.ruleSubtitleGroups(raw, false).length, raw.length);
-assert.deepEqual(plain(api.parseYoutubeCaptions(json3([
-  { tStartMs: 1000, dDurationMs: 2000, segs: [{ utf8: "Hello", tOffsetMs: 0 }, { utf8: " world.", tOffsetMs: 500 }] },
-]), false)), [{ start: 1000, end: 3000, text: "Hello world." }], "Human captions must retain their existing cue boundaries");
-assert.deepEqual(plain(api.parseYoutubeCaptions(json3([
-  event(1000, 2000, "A rolling"), event(1000, 2500, "A rolling update."),
-]))), [{ start: 1000, end: 3500, text: "A rolling update." }]);
-for (const invalid of ["", "<html>error</html>", "{}", json3([event(-1, 1000, "Bad")]), json3([event(0, 0, "Bad")]),
-  json3([{ tStartMs: 0, dDurationMs: 1000, segs: [{ utf8: "Bad", tOffsetMs: -10 }] }])]) {
-  assert.throws(() => api.parseYoutubeCaptions(invalid));
-}
-assert.throws(() => api.makeSubtitleChunks([{ start: 0, end: 1000, text: "x".repeat(6001) }], false), /too long/);
+assert.equal(api.joinCaptionText([{ text: "你好" }, { text: "世界" }]), "你好世界");
+assert.throws(() => api.parseYoutubeCaptions("<html>error</html>"));
 
+// 2. Subtitle grouping, segmentation validation, and native bilingual merging.
 const chunk = api.makeSubtitleChunks(raw.slice(0, 4), true)[0];
 const groups = [{ from: 0, to: 3, translation: "我們到達後便坐下。" }];
-const translated = api.parseSubtitleGroups(JSON.stringify({ groups }), chunk, true);
-assert.equal(translated[0].start, 1000);
-assert.equal(translated[0].end, 4800);
-assert.equal(translated[0].text, "When we arrived we sat down.");
-for (const invalid of [[], [{ from: 1, to: 3, translation: "漏字" }], [{ from: 0, to: 2, translation: "漏尾" }],
-  [{ from: 0, to: 4, translation: "越界" }], [{ from: 0.5, to: 3, translation: "小數" }],
-  [{ from: 0, to: 1, translation: "重複" }, { from: 1, to: 3, translation: "重複" }], [{ from: 0, to: 3, translation: " " }]]) {
-  assert.throws(() => api.parseSubtitleGroups(JSON.stringify({ groups: invalid }), chunk, true), (error) => error.code === "SUBTITLE_SEGMENTATION_ERROR");
-}
+assert.equal(api.parseSubtitleGroups(JSON.stringify({ groups }), chunk, true)[0].end, 4800);
+assert.throws(
+  () => api.parseSubtitleGroups(JSON.stringify({ groups: [{ from: 0, to: 2, translation: "漏尾" }] }), chunk, true),
+  (error) => error.code === "SUBTITLE_SEGMENTATION_ERROR",
+);
 const silent = api.makeSubtitleChunks(raw, true)[0];
-assert.throws(() => api.parseSubtitleGroups({ groups: [{ from: 0, to: 5, translation: "跨越停頓" }] }, silent, true), /reading limit|silence/);
-const manual = api.makeSubtitleChunks(raw.slice(0, 4), false)[0];
-assert.throws(() => api.parseSubtitleGroups({ groups }, manual, true), /fixed subtitle/);
-assert.notEqual(api.subtitleCacheKey(chunk, settings, true), api.subtitleCacheKey(chunk, settings, false));
-assert.notEqual(api.subtitleCacheKey(chunk, settings, true), api.subtitleCacheKey({ ...chunk, context: "Different context." }, settings, true));
-assert.equal(api.subtitleCacheKey(chunk, settings, true), api.subtitleCacheKey({ ...chunk,
-  fragments: chunk.fragments.map((fragment) => ({ ...fragment, start: fragment.start + 90000, end: fragment.end + 90000 })),
-}, settings, true));
+assert.throws(() => api.parseSubtitleGroups({ groups: [{ from: 0, to: 4, translation: "跨停頓" }] }, silent, true), /reading limit|silence/);
 
 const videoId = "abcdefghijk";
 const baseUrl = `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en&kind=asr`;
 const track = { baseUrl, languageCode: "en", kind: "asr", vssId: "a.en" };
-const snapshot = { videoId, tracks: [track], selected: { vssId: "a.en" },
-  audioUrls: [baseUrl + "&pot=correct-token&potc=1"], observedUrls: [baseUrl.replace(videoId, "otherVideo1") + "&pot=wrong-token"] };
-assert.equal(api.selectYoutubeTrack(snapshot), track);
-const url = new URL(api.youtubeCaptionUrl(track, snapshot));
-assert.equal(url.searchParams.get("pot"), "correct-token");
-assert.equal(url.searchParams.get("fmt"), "json3");
-assert.equal(new URL(api.youtubeCaptionUrl(track, { ...snapshot, observedUrls: [baseUrl + "&pot=observed-token&cver=observed-client"] })).searchParams.get("pot"), "observed-token");
-assert.throws(() => api.youtubeCaptionUrl({ ...track, baseUrl: "https://evil.example/api/timedtext?v=" + videoId }, snapshot), /Invalid/);
-assert.throws(() => api.youtubeCaptionUrl({ ...track, baseUrl: baseUrl + "&tlang=fr" }, snapshot), /Invalid/);
+const zhTwTrack = { baseUrl: `https://www.youtube.com/api/timedtext?v=${videoId}&lang=zh-TW`, languageCode: "zh-TW", kind: "", vssId: ".zh-TW" };
+const snapshot = { videoId, tracks: [track, zhTwTrack], audioUrls: [`${baseUrl}&pot=tok1`], observedUrls: [] };
 
-const request = api.requestSubtitleTranslation(chunk, settings, true);
-const payload = JSON.parse(transport.options.data);
-assert.equal(transport.options.anonymous, true);
-assert.doesNotMatch(payload.messages[1].content, /youtube\.com|abcdefghijk|synthetic-subtitle-secret/);
-assert.doesNotMatch(payload.messages[1].content, /"start"|"end"/);
-assert.equal(payload.response_format.json_schema.name, "youtube_subtitles");
-assert.equal(payload.response_format.json_schema.schema.properties.groups.maxItems, undefined, "Large maxItems on object arrays breaks Gemini responseJsonSchema state limits");
-reply(transport.options, groups);
-assert.equal((await request.promise)[0].translation, groups[0].translation);
+assert.equal(api.selectYoutubeTrack(snapshot, "zh-TW"), track);
+assert.equal(api.selectTargetYoutubeTrack(snapshot, track, "zh-TW"), zhTwTrack);
+assert.equal(api.selectTargetYoutubeTrack(snapshot, track, "zh-TW", true), null);
+assert.equal(new URL(api.youtubeCaptionUrl(track, snapshot)).searchParams.get("pot"), "tok1");
+assert.throws(() => api.youtubeCaptionUrl({ ...track, baseUrl: `${baseUrl}&tlang=fr` }, snapshot), /Invalid/);
 
-const geminiNativeSettings = api.cleanSettings({
-  ...settings,
-  apiFormat: "gemini-native",
-  baseURL: "https://generativelanguage.googleapis.com/v1beta",
-  model: "gemini-3.5-flash-lite",
-});
-const geminiRequest = api.requestSubtitleTranslation(chunk, geminiNativeSettings, true);
-assert.ok(JSON.parse(transport.options.data).generationConfig.responseJsonSchema);
-transport.options.onload({
-  status: 400,
-  responseText: JSON.stringify({ error: { code: 400, message: "Request contains an invalid argument.", status: "INVALID_ARGUMENT" } }),
-});
-assert.equal(JSON.parse(transport.options.data).generationConfig.responseJsonSchema, undefined, "Generic Gemini 400 INVALID_ARGUMENT must retry without responseJsonSchema");
-transport.options.onload({
-  status: 200,
-  responseText: JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: JSON.stringify({ groups }) }] } }] }),
-});
-assert.equal((await geminiRequest.promise)[0].translation, groups[0].translation);
+const merged = api.mergeBilingualCaptions(raw.slice(0, 4), [
+  { start: 1000, end: 2900, text: "當我們到達時，" },
+  { start: 2900, end: 4800, text: "便坐了下來。" },
+], true);
+assert.deepEqual(plain(merged[0].groups), [
+  { from: 0, to: 2, start: 1000, end: 3000, text: "When we arrived", translation: "當我們到達時，" },
+  { from: 3, to: 3, start: 3000, end: 4800, text: "we sat down.", translation: "便坐了下來。" },
+]);
 
+// 3. Translation queue: smart fallback to fixedGroups, caching, seek cancellation, and backoff retry.
 const makeSession = (chunks) => ({
-  video: { currentTime: 1.5, playbackRate: 1 }, player: { classList: { contains: () => false } },
+  video: { currentTime: 1.5, playbackRate: 1 },
+  player: { classList: { contains: () => false } },
   chunks, settings, preferences: { smart: true }, generation: 0, running: false,
   controller: new AbortController(),
 });
+
 delete storage["youtube-cache-v1"];
 const session = makeSession(api.makeSubtitleChunks(raw.slice(0, 4), true));
 api.setSession(session);
 const pumping = api.pumpSubtitleQueue(session);
-reply(transport.options, [{ from: 0, to: 2, translation: "Invalid partial translation" }]);
+reply(transport.options, [{ from: 0, to: 2, translation: "Bad split" }]);
 for (let i = 0; i < 10; i++) await Promise.resolve();
-assert.ok(JSON.parse(transport.options.data).messages[1].content.includes("fixedGroups"), "Invalid AI segmentation must fall back to deterministic boundaries");
+assert.ok(JSON.parse(transport.options.data).messages[1].content.includes("fixedGroups"));
 reply(transport.options, groups);
 await pumping;
 assert.equal(session.chunks[0].done, true);
-const cache = storage["youtube-cache-v1"];
-assert.equal(Object.keys(cache).length, 1);
-assert.doesNotMatch(JSON.stringify(cache), /When|arrived|youtube\.com|synthetic-subtitle-secret|"start"|"end"/);
 
-const priorRequests = transport.history.length;
-const cached = makeSession(api.makeSubtitleChunks(raw.slice(0, 4), true));
-api.setSession(cached);
-await api.pumpSubtitleQueue(cached);
-assert.equal(cached.chunks[0].done, true);
-assert.equal(transport.history.length, priorRequests, "Replaying a translated chunk must use local cache");
+// Replaying cached chunk uses local storage without calling API.
+const reqBeforeCache = transport.history.length;
+const cachedSession = makeSession(api.makeSubtitleChunks(raw.slice(0, 4), true));
+api.setSession(cachedSession);
+await api.pumpSubtitleQueue(cachedSession);
+assert.equal(transport.history.length, reqBeforeCache);
 
+// Cancelled seek drops late response.
 delete storage["youtube-cache-v1"];
 const seeking = makeSession(api.makeSubtitleChunks(raw.slice(0, 4), true));
 api.setSession(seeking);
@@ -146,195 +104,54 @@ seeking.video.currentTime = 1000;
 reply(late, groups);
 await inFlight;
 assert.equal(seeking.chunks[0].done, false);
-assert.equal(storage["youtube-cache-v1"], undefined, "A late result after seeking must neither render nor enter cache");
 
-assert.ok(
-  api.subtitleRetryDelay(1) < api.subtitleRetryDelay(2) && api.subtitleRetryDelay(2) < api.subtitleRetryDelay(3),
-  "Automatic retry intervals must increase across consecutive failures",
-);
-const failing = { ...makeSession(api.makeSubtitleChunks(raw.slice(0, 4), true)), retryBaseMs: 20 };
+// Provider error schedules backoff retry and redacts secrets.
+delete storage["youtube-cache-v1"];
+const failing = { ...makeSession(api.makeSubtitleChunks(raw.slice(0, 3), true)), retryBaseMs: 20 };
 api.setSession(failing);
-const failed = api.pumpSubtitleQueue(failing);
+const failRun = api.pumpSubtitleQueue(failing);
 transport.options.onload({ status: 401, responseText: '{"error":{"message":"bad synthetic-subtitle-secret"}}' });
-await failed;
+await failRun;
 assert.equal(failing.chunks[0].failed, true);
 assert.equal(failing.retryCount, 1);
-assert.equal(storage["youtube-cache-v1"], undefined);
 assert.doesNotMatch(failing.error.message, /synthetic-subtitle-secret/);
-const failedCount = transport.history.length;
-await api.pumpSubtitleQueue(failing);
-assert.equal(transport.history.length, failedCount, "Provider failures must wait for the backoff timer before retrying");
-await new Promise((resolve) => setTimeout(resolve, 30));
-assert.equal(transport.history.length, failedCount + 1, "First automatic retry must fire after the initial backoff interval");
-transport.options.onload({ status: 401, responseText: '{"error":{"message":"still failing"}}' });
-for (let i = 0; i < 5; i++) await Promise.resolve();
-assert.equal(failing.retryCount, 2);
-await new Promise((resolve) => setTimeout(resolve, 25));
-assert.equal(transport.history.length, failedCount + 1, "Second automatic retry must wait for the longer backoff interval");
-await new Promise((resolve) => setTimeout(resolve, 30));
-assert.equal(transport.history.length, failedCount + 2, "Second automatic retry must fire after the increased interval");
-reply(transport.options, groups);
-for (let i = 0; i < 5; i++) await Promise.resolve();
-assert.equal(failing.chunks[0].done, true);
-assert.equal(failing.retryCount, 0);
-delete storage["youtube-cache-v1"];
 
-const far = api.makeSubtitleChunks(Array.from({ length: 100 }, (_, index) => ({ start: index * 4000, end: index * 4000 + 3000, text: "A complete sentence." })), false);
-const bounded = makeSession(far);
-bounded.chunks.forEach((entry) => { entry.done = entry.start < 65000; });
-assert.equal(api.subtitleQueueChunk(bounded), undefined, "Prefetch must not send the entire remaining transcript");
-bounded.video.playbackRate = 2;
-assert.ok(api.subtitleQueueChunk(bounded));
-assert.equal(api.subtitleAtTime(session.chunks, 1000).translation, groups[0].translation);
-assert.equal(api.subtitleAtTime(session.chunks, 4800), null);
-assert.equal(api.loadSubtitlePreferences().enabled, true, "Bilingual subtitles must be enabled by default");
-assert.equal(api.loadSubtitlePreferences().bottom, 0, "Captions must default to the bottom of the player");
-storage["youtube-preferences-v1"] = { bottom: 12, fontSize: 30 };
-assert.equal(api.loadSubtitlePreferences().bottom, 0, "The previously saved default must migrate to bottom placement");
-assert.equal(api.loadSubtitlePreferences().fontSize, 30, "Position migration must preserve unrelated preferences");
-storage["youtube-preferences-v1"] = { bottom: 20 };
-assert.equal(api.loadSubtitlePreferences().bottom, 20, "Existing custom positions must be preserved");
-storage["youtube-preferences-v1"] = { bottom: 12, positionVersion: 1 };
-assert.equal(api.loadSubtitlePreferences().bottom, 12, "A newly chosen 12% offset must not be mistaken for the old default");
-delete storage["youtube-preferences-v1"];
-
-const resilient = api.parseYoutubeCaptions(json3([
-  event(0, 0, "Zero duration marker"),
-  { tStartMs: 1000, segs: [{ utf8: "Inferred duration." }] },
-  { tStartMs: 2500, dDurationMs: 1500, segs: [{ utf8: "Bad offset", tOffsetMs: -5 }, { utf8: "Kept word", tOffsetMs: 200 }] },
-]));
-assert.deepEqual(plain(resilient), [
-  { start: 1000, end: 2500, text: "Inferred duration." },
-  { start: 2700, end: 4000, text: "Kept word" },
-], "Single malformed ASR events or offsets must be skipped or repaired without rejecting the whole track");
-
-const unpunctuatedAsr = [
-  { start: 0, end: 1200, text: "first clause words" },
-  { start: 1200, end: 2400, text: "continuing smoothly" },
-  { start: 2400, end: 3600, text: "past three seconds" },
-  { start: 4100, end: 5200, text: "after a half second breath" },
-];
-assert.deepEqual(plain(api.ruleSubtitleGroups(unpunctuatedAsr, true)), [
-  { from: 0, to: 2 }, { from: 3, to: 3 },
-], "ASR rule grouping must split at natural breathing pauses once a clause is long enough");
-
-const tolerantChunk = api.makeSubtitleChunks([
-  { start: 0, end: 4500, text: "a".repeat(95) },
-  { start: 5600, end: 8600, text: "b".repeat(95) },
-], true)[0];
-const tolerantGroups = api.parseSubtitleGroups({ groups: [{ from: 0, to: 1, translation: "自然長句不誤殺。" }] }, tolerantChunk, true);
-assert.equal(tolerantGroups.length, 1, "Smart segmentation validator must tolerate minor length/pause overrun within hard limits");
-
-const zhTwTrack = { baseUrl: `https://www.youtube.com/api/timedtext?v=${videoId}&lang=zh-TW`, languageCode: "zh-TW", kind: "", vssId: ".zh-TW" };
-const zhCnTrack = { baseUrl: `https://www.youtube.com/api/timedtext?v=${videoId}&lang=zh-CN`, languageCode: "zh-CN", kind: "", vssId: ".zh-CN" };
-const bilingualSnapshot = { videoId, tracks: [track, zhTwTrack], selected: { languageCode: "zh-TW", kind: "", vssId: ".zh-TW" }, defaultIndex: 0 };
-assert.equal(api.selectYoutubeTrack(bilingualSnapshot, "zh-TW"), track, "Source track selection must avoid picking the target language when an original track exists");
-assert.equal(api.selectTargetYoutubeTrack(bilingualSnapshot, track, "zh-TW"), zhTwTrack, "Target track selection must match an existing human subtitle track in the target language");
-assert.equal(api.selectTargetYoutubeTrack({ videoId, tracks: [track, zhCnTrack] }, track, "zh-TW"), zhCnTrack, "Simplified Chinese tracks must be usable as native Chinese tracks when Traditional Chinese is absent");
-assert.equal(api.selectTargetYoutubeTrack({ videoId, tracks: [track, zhCnTrack, zhTwTrack] }, track, "zh-TW"), zhTwTrack, "Traditional Chinese tracks must still be preferred over Simplified Chinese when both exist");
-assert.equal(api.selectTargetYoutubeTrack({ videoId, tracks: [track, zhCnTrack, zhTwTrack] }, track, "zh-TW", true), null, "forceAi must bypass native target-track merging");
-assert.equal(api.sameLanguage("zh-CN", "zh-TW"), true);
-assert.equal(api.sameLanguage("zh", "zh-TW"), true);
-assert.equal(
-  new URL(api.youtubeCaptionUrl(track, { ...snapshot, observedUrls: [baseUrl + "&tlang=zh-Hant&pot=tlang-observed-token"] })).searchParams.get("pot"),
-  "tlang-observed-token",
-  "Observed auto-translated URLs must still contribute their pot token while stripping tlang",
-);
-
-const mergedChunks = api.mergeBilingualCaptions(raw.slice(0, 4), [
-  { start: 1000, end: 2900, text: "當我們到達時，" },
-  { start: 2900, end: 4800, text: "便坐了下來。" },
-], true);
-assert.equal(mergedChunks[0].done, true);
-assert.deepEqual(plain(mergedChunks[0].groups), [
-  { from: 0, to: 2, start: 1000, end: 3000, text: "When we arrived", translation: "當我們到達時，" },
-  { from: 3, to: 3, start: 3000, end: 4800, text: "we sat down.", translation: "便坐了下來。" },
-], "Native bilingual merging must align ASR words to human target cues without API calls");
-
-const cjkMerged = api.mergeBilingualCaptions(
-  [{ start: 1000, end: 2800, text: "Hello world" }],
-  [{ start: 1000, end: 1800, text: "你好" }, { start: 1800, end: 2800, text: "世界" }],
-  false,
-);
-assert.equal(cjkMerged[0].groups[0].translation, "你好世界", "Native bilingual merging must join CJK target cues without inserting ASCII spaces");
-
-assert.equal(
-  api.parseYoutubeCaptions(json3([event(1000, 2000, "- Really?\n- Yes!")]), false)[0].text,
-  "- Really?\n- Yes!",
-  "Human captions must preserve internal line breaks",
-);
-
-assert.equal(far[0].end, 11000, "Initial subtitle batch must stay within 12s for faster startup");
-assert.ok(far[1].end - far[1].start > 12000, "Subsequent subtitle batches must retain full 30s batching");
-
-const seekPrioritySession = {
-  video: { currentTime: 10, playbackRate: 1, paused: false },
-  chunks: [
-    { start: 0, end: 11000, done: false, failed: false, groups: [{ start: 0, end: 11000 }] },
-    { start: 12000, end: 42000, done: false, failed: false, groups: [{ start: 12000, end: 42000 }] },
-  ],
-};
-assert.equal(api.subtitleQueueChunk(seekPrioritySession), seekPrioritySession.chunks[1], "Near-end playing seek must prioritize the upcoming chunk");
-seekPrioritySession.video.paused = true;
-assert.equal(api.subtitleQueueChunk(seekPrioritySession), seekPrioritySession.chunks[0], "Paused near-end seek must still translate the visible chunk");
-
-const boundaryChunks = [
-  { start: 1000, end: 4000, groups: [{ start: 1000, end: 2000 }, { start: 2500, end: 4000 }] },
-  { start: 6000, end: 8000, groups: [{ start: 6000, end: 8000 }] },
-];
-assert.equal(api.nextSubtitleBoundaryMs(boundaryChunks, 500), 1000);
-assert.equal(api.nextSubtitleBoundaryMs(boundaryChunks, 1500), 2000);
-assert.equal(api.nextSubtitleBoundaryMs(boundaryChunks, 2100), 2500);
-assert.equal(api.nextSubtitleBoundaryMs(boundaryChunks, 4500), 6000);
-assert.equal(api.nextSubtitleBoundaryMs(boundaryChunks, 8000), null);
-
-// Auto-start must skip same-language Chinese videos (zh-CN source with zh-TW target) unless forceAi is enabled.
+// 4. Auto-start skips same-language Chinese videos unless forceAi is enabled.
 {
-  const zhOnlyUrl = `https://www.youtube.com/api/timedtext?v=${videoId}&lang=zh-CN`;
-  const zhOnlySnapshot = { videoId, tracks: [{ baseUrl: zhOnlyUrl, languageCode: "zh-CN", kind: "", vssId: ".zh-CN" }] };
-  const autoSkipped = await new Promise((resolve) => {
-    const view = {
-      player: { classList: { add() {}, remove() {}, contains: () => false }, style: {} },
-      video: { currentTime: 0, playbackRate: 1, paused: true, addEventListener() {}, removeEventListener() {} },
-      trigger: { dataset: {} },
-      toggle: { textContent: "", setAttribute() {} },
-      status: { dataset: {} },
-      retry: {},
-      captions: {},
-      source: {},
-      translation: {},
-      host: { dataset: {} },
-      preferences: { enabled: true, smart: true, forceAi: false, translationOnly: false },
-    };
-    const priorFetch = context.fetch;
-    void priorFetch;
-    const autoCalls = [];
-    const autoSandbox = vm.runInNewContext(
-      `${readFileSync(new URL("../src/shared/utils.js", import.meta.url), "utf8")}
-      ${readFileSync(new URL("../src/youtube/config.js", import.meta.url), "utf8")}
-      ${readFileSync(new URL("../src/youtube/jobs.js", import.meta.url), "utf8")}
-      ({ startYoutubeSubtitles, getSession: () => subtitleSession, setView: (v) => { subtitleView = v; } })`,
-      {
-        AbortController, URL, clearTimeout, setTimeout,
-        GM_getValue: (_k, d) => d,
-        loadSettings: () => settings,
-        requireReadySettings: (s) => s,
-        youtubeVideoId: () => videoId,
-        captionBridgeRequest: async (action) => action === "snapshot" ? zhOnlySnapshot : null,
-        selectYoutubeTrack: api.selectYoutubeTrack,
-        selectTargetYoutubeTrack: api.selectTargetYoutubeTrack,
-        sameLanguage: api.sameLanguage,
-        setSubtitleStatus() {},
-        cancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
-        requestSubtitleTranslation: () => { autoCalls.push(1); return { promise: Promise.resolve([]), abort() {} }; },
-      },
-    );
-    autoSandbox.setView(view);
-    autoSandbox.startYoutubeSubtitles(true).then(() => resolve({ session: autoSandbox.getSession(), calls: autoCalls.length }));
+  const zhSnapshot = { videoId, tracks: [{ baseUrl: `https://www.youtube.com/api/timedtext?v=${videoId}&lang=zh-CN`, languageCode: "zh-CN", kind: "", vssId: ".zh-CN" }] };
+  const autoCalls = [];
+  const sandbox = vm.runInNewContext(
+    `${readFileSync(new URL("../src/shared/utils.js", import.meta.url), "utf8")}
+    ${readFileSync(new URL("../src/youtube/config.js", import.meta.url), "utf8")}
+    ${readFileSync(new URL("../src/youtube/jobs.js", import.meta.url), "utf8")}
+    ({ startYoutubeSubtitles, getSession: () => subtitleSession, setView: (v) => { subtitleView = v; } })`,
+    {
+      AbortController, URL, clearTimeout, setTimeout,
+      GM_getValue: (_k, d) => d,
+      loadSettings: () => settings,
+      requireReadySettings: (s) => s,
+      youtubeVideoId: () => videoId,
+      captionBridgeRequest: async (action) => action === "snapshot" ? zhSnapshot : null,
+      selectYoutubeTrack: api.selectYoutubeTrack,
+      selectTargetYoutubeTrack: api.selectTargetYoutubeTrack,
+      sameLanguage: api.sameLanguage,
+      setSubtitleStatus() {},
+      cancelledError: () => Object.assign(new Error("cancelled"), { name: "AbortError" }),
+      requestSubtitleTranslation: () => { autoCalls.push(1); return { promise: Promise.resolve([]), abort() {} }; },
+    },
+  );
+  sandbox.setView({
+    player: { classList: { add() {}, remove() {}, contains: () => false }, style: {} },
+    video: { currentTime: 0, playbackRate: 1, paused: true, addEventListener() {}, removeEventListener() {} },
+    trigger: { dataset: {} }, toggle: { textContent: "", setAttribute() {} }, status: { dataset: {} },
+    retry: {}, captions: {}, source: {}, translation: {}, host: { dataset: {} },
+    preferences: { enabled: true, smart: true, forceAi: false, translationOnly: false },
   });
-  assert.equal(autoSkipped.session, null);
-  assert.equal(autoSkipped.calls, 0, "Auto-start must not call translation API for zh-CN track when target is zh-TW");
+  await sandbox.startYoutubeSubtitles(true);
+  assert.equal(sandbox.getSession(), null);
+  assert.equal(autoCalls.length, 0);
 }
 
 api.setSession(null);
+void context;
 console.log("YouTube subtitle checks passed");

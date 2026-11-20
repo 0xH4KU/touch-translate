@@ -2,14 +2,16 @@
   const SCRIPT_PREFIX = "touch-translate";
   // Constants and defaults
 
+  const TWEET_TEXT_SELECTOR = "[data-testid='tweetText']";
   const YOUTUBE_COMMENT_SELECTOR = [
     "yt-attributed-string#content-text",
     "yt-formatted-string#content-text",
     "ytm-comment-renderer .YtmCommentRendererText",
     "ytm-comment-renderer .comment-text",
   ].join(", ");
+  const POST_TEXT_SELECTOR = `${TWEET_TEXT_SELECTOR}, ${YOUTUBE_COMMENT_SELECTOR}`;
   const BLOCK_SELECTOR =
-    `p, li, blockquote, figcaption, dt, dd, summary, [data-testid='tweetText'], h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header'], ${YOUTUBE_COMMENT_SELECTOR}`;
+    `p, li, blockquote, figcaption, dt, dd, summary, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header'], ${POST_TEXT_SELECTOR}`;
   const TITLE_BLOCK_SELECTOR =
     "p, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header']";
   const OVERLAY_LINK_SELECTOR = [

@@ -761,8 +761,11 @@
       isSuiteUi(element) ||
       !roots.some((root) => root.contains(element)) ||
       element.closest(`.${TRANSLATION_CLASS}`) ||
-      element.querySelector(BLOCK_SELECTOR) ||
-      (!element.matches?.(TITLE_BLOCK_SELECTOR) && hasNestedTextBlock(element)) ||
+      element.parentElement?.closest?.(POST_TEXT_SELECTOR) ||
+      (!element.matches?.(POST_TEXT_SELECTOR) && element.querySelector(BLOCK_SELECTOR)) ||
+      (!element.matches?.(TITLE_BLOCK_SELECTOR) &&
+        !element.matches?.(POST_TEXT_SELECTOR) &&
+        hasNestedTextBlock(element)) ||
       translationAfter(element) ||
       !isVisible(element)
     ) {

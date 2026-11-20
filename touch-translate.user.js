@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Touch Translate
 // @namespace    https://github.com/0xh4ku/touch-translate
-// @version      0.6.4
+// @version      0.6.5
 // @description  Swipe right to translate a text block; tap with four fingers to translate the page.
 // @author       HAKU
 // @match        *://*/*
@@ -26,14 +26,16 @@
   const SCRIPT_PREFIX = "touch-translate";
   // Constants and defaults
 
+  const TWEET_TEXT_SELECTOR = "[data-testid='tweetText']";
   const YOUTUBE_COMMENT_SELECTOR = [
     "yt-attributed-string#content-text",
     "yt-formatted-string#content-text",
     "ytm-comment-renderer .YtmCommentRendererText",
     "ytm-comment-renderer .comment-text",
   ].join(", ");
+  const POST_TEXT_SELECTOR = `${TWEET_TEXT_SELECTOR}, ${YOUTUBE_COMMENT_SELECTOR}`;
   const BLOCK_SELECTOR =
-    `p, li, blockquote, figcaption, dt, dd, summary, [data-testid='tweetText'], h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header'], ${YOUTUBE_COMMENT_SELECTOR}`;
+    `p, li, blockquote, figcaption, dt, dd, summary, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header'], ${POST_TEXT_SELECTOR}`;
   const TITLE_BLOCK_SELECTOR =
     "p, h1, h2, h3, h4, h5, h6, [role='heading'], [slot='title'], [slot='heading'], [slot='header']";
   const OVERLAY_LINK_SELECTOR = [
@@ -2466,8 +2468,11 @@
       isSuiteUi(element) ||
       !roots.some((root) => root.contains(element)) ||
       element.closest(`.${TRANSLATION_CLASS}`) ||
-      element.querySelector(BLOCK_SELECTOR) ||
-      (!element.matches?.(TITLE_BLOCK_SELECTOR) && hasNestedTextBlock(element)) ||
+      element.parentElement?.closest?.(POST_TEXT_SELECTOR) ||
+      (!element.matches?.(POST_TEXT_SELECTOR) && element.querySelector(BLOCK_SELECTOR)) ||
+      (!element.matches?.(TITLE_BLOCK_SELECTOR) &&
+        !element.matches?.(POST_TEXT_SELECTOR) &&
+        hasNestedTextBlock(element)) ||
       translationAfter(element) ||
       !isVisible(element)
     ) {
@@ -3094,11 +3099,18 @@
     return false;
   }
 
+  function singleTweetChild(element) {
+    const tweets = element?.querySelectorAll?.(TWEET_TEXT_SELECTOR);
+    if (tweets?.length !== 1) return null;
+    const tweet = tweets[0];
+    return sourceText(element) === sourceText(tweet) ? tweet : null;
+  }
+
   function swipeElementFor(target) {
     const translation = target?.closest?.(`.${TRANSLATION_CLASS}`);
     if (translation) return translation;
-    const comment = target?.closest?.(YOUTUBE_COMMENT_SELECTOR);
-    if (comment) return comment;
+    const post = target?.closest?.(POST_TEXT_SELECTOR);
+    if (post) return post;
 
     let inline = null;
     for (
@@ -3107,6 +3119,7 @@
       element = element.parentElement || element.getRootNode?.().host
     ) {
       if (element === document.body || element === document.documentElement) break;
+      if (!sourceText(element)) continue;
       inline ||= element;
       const display = getComputedStyle(element).display;
       if (element.matches?.(TITLE_BLOCK_SELECTOR)) return element;
@@ -3114,7 +3127,7 @@
         element.matches?.(BLOCK_SELECTOR) ||
         (display !== "contents" && !display.startsWith("inline"))
       ) {
-        return hasNestedTextBlock(element) ? null : element;
+        return hasNestedTextBlock(element) ? singleTweetChild(element) : element;
       }
     }
     return inline && !hasNestedTextBlock(inline) ? inline : null;
@@ -3181,12 +3194,17 @@
     if (element.matches?.(OVERLAY_LINK_SELECTOR)) return true;
     const style = getComputedStyle(element);
     if (style.position !== "absolute" && style.position !== "fixed") return false;
-    const parent = element.parentElement;
-    if (parent && typeof parent.getBoundingClientRect === "function") {
-      const pRect = parent.getBoundingClientRect();
+    if (typeof element.getBoundingClientRect === "function") {
       const rect = element.getBoundingClientRect();
-      if (rect.width >= pRect.width * 0.9 && rect.height >= pRect.height * 0.9) {
+      if (!sourceText(element) && rect.width >= 40 && rect.height >= 24) {
         return true;
+      }
+      const parent = element.parentElement;
+      if (parent && typeof parent.getBoundingClientRect === "function") {
+        const pRect = parent.getBoundingClientRect();
+        if (rect.width >= pRect.width * 0.9 && rect.height >= pRect.height * 0.9) {
+          return true;
+        }
       }
     }
     return false;
@@ -3303,22 +3321,28 @@
       };
       return;
     }
+    fourFinger = null;
     if (event.touches.length !== 1) {
       clearSwipe();
       return;
     }
     const touch = event.touches[0];
+    const isElementNode = (node) =>
+      node?.nodeType === 1 ||
+      (typeof Element === "function" && node instanceof Element);
     const rawTarget =
-      event.composedPath?.().find((node) => node instanceof Element) ||
-      (event.target instanceof Element ? event.target : null);
+      event.composedPath?.().find(isElementNode) ||
+      (isElementNode(event.target)
+        ? event.target
+        : event.target?.parentElement || null);
     const target = resolveTargetElement(rawTarget, touch);
     const control = target?.closest("input, textarea, select, button");
-    const comment = target?.closest(YOUTUBE_COMMENT_SELECTOR);
+    const post = target?.closest(POST_TEXT_SELECTOR);
     if (
       !target ||
       touch.clientX < SAFARI_EDGE_X ||
       target.isContentEditable ||
-      (control && !(comment && control.contains(comment))) ||
+      (control && !(post && control.contains(post))) ||
       canConsumeRightSwipe(target)
     ) {
       clearSwipe();
@@ -3719,22 +3743,25 @@
   // Initialization
 
   addStyles();
-  document.addEventListener("touchstart", onTouchStart, {
+  const touchTarget =
+    typeof globalThis.addEventListener === "function" ? globalThis : document;
+  touchTarget.addEventListener("touchstart", onTouchStart, {
     capture: true,
     passive: true,
   });
-  document.addEventListener("touchmove", onTouchMove, {
+  touchTarget.addEventListener("touchmove", onTouchMove, {
     capture: true,
     passive: false,
   });
-  document.addEventListener("touchend", onTouchEnd, {
+  touchTarget.addEventListener("touchend", onTouchEnd, {
     capture: true,
     passive: false,
   });
-  document.addEventListener("touchcancel", resetTouches, {
+  touchTarget.addEventListener("touchcancel", resetTouches, {
     capture: true,
     passive: true,
   });
+  globalThis.addEventListener?.("blur", resetTouches);
   document.addEventListener(
     "click",
     (event) => {
