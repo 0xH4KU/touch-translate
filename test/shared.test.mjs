@@ -138,9 +138,9 @@ assert.deepEqual(
 );
 const lostParagraphs = api.requestTranslations(["First paragraph.\n\nSecond paragraph."], settings);
 transport.options.onload({ status: 200, responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"translations":["Two paragraphs collapsed into one."]}' } }] }) });
-await assert.rejects(lostParagraphs.promise, /did not preserve paragraph and line breaks/);
+assert.equal((await lostParagraphs.promise)[0], "Two paragraphs collapsed into one.");
 const crlfParagraphs = api.requestTranslations(["First paragraph.\n\nSecond paragraph."], settings);
-transport.options.onload({ status: 200, responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ translations: ["第一段。\r\n\r\n第二段。"] }) } }] }) });
+transport.options.onload({ status: 200, responseText: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ translations: ["第一段。 \r\n \r\n\n 第二段。"] }) } }] }) });
 assert.equal((await crlfParagraphs.promise)[0], "第一段。\n\n第二段。");
 assert.equal(api.hashCacheKey("same", nativeSettings), api.hashCacheKey("same", { ...nativeSettings, temperature: 1.8 }));
 assert.equal(imageApi.hashImageCacheKey("same", nativeSettings), imageApi.hashImageCacheKey("same", { ...nativeSettings, temperature: 1.8 }));

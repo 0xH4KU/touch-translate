@@ -1393,14 +1393,26 @@ try {
   document.createElement = origCreateElement;
 }
 
-// Partial batch recovery preserves valid items when another item in the batch fails line-break validation.
-const partialReq = api.requestTranslations(["First paragraph.\n\nSecond paragraph.", "Single line"], retrySettings);
+// Line-break differences due to natural clause reordering are accepted, while empty items trigger partial batch recovery.
+const collapsedReq = api.requestTranslations(["First paragraph.\n\nSecond paragraph.", "Single line"], retrySettings);
 transport.options.onload({
   status: 200,
   responseText: JSON.stringify({
     choices: [{
       finish_reason: "stop",
       message: { content: JSON.stringify({ translations: ["Collapsed lines", "單行"] }) },
+    }],
+  }),
+});
+assert.deepEqual([...(await collapsedReq.promise)], ["Collapsed lines", "單行"]);
+
+const partialReq = api.requestTranslations(["First paragraph.\n\nSecond paragraph.", "Single line"], retrySettings);
+transport.options.onload({
+  status: 200,
+  responseText: JSON.stringify({
+    choices: [{
+      finish_reason: "stop",
+      message: { content: JSON.stringify({ translations: ["   ", "單行"] }) },
     }],
   }),
 });
@@ -1447,7 +1459,7 @@ await assert.rejects(partialReq.promise, (error) => {
         calls.push([...texts]);
         return {
           promise: texts.length > 1
-            ? Promise.reject(Object.assign(new Error("break mismatch"), {
+            ? Promise.reject(Object.assign(new Error("empty item"), {
                 code: "TRANSLATION_RESPONSE_ERROR",
                 partialTranslations: [null, "第二段", "Already Chinese!"],
               }))

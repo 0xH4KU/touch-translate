@@ -104,16 +104,26 @@
         text,
       );
     }
-    const invalidIndex = translations.findIndex(
-      (item) => typeof item !== "string" || !item.trim(),
+    const normalized = translations.map((item) =>
+      typeof item === "string" ? normalizeLineBreaks(item) : "",
     );
-    if (invalidIndex >= 0) {
-      throw responseFormatError(
-        `Translation ${invalidIndex + 1} is empty or is not text.`,
+    const invalidIndices = [];
+    normalized.forEach((item, index) => {
+      if (!item) invalidIndices.push(index);
+    });
+    if (invalidIndices.length) {
+      const error = responseFormatError(
+        `Translation ${invalidIndices[0] + 1} is empty or is not text.`,
         text,
       );
+      if (invalidIndices.length < normalized.length) {
+        error.partialTranslations = normalized.map((item, index) =>
+          invalidIndices.includes(index) ? null : item,
+        );
+      }
+      throw error;
     }
-    return translations.map((item) => item.trim());
+    return normalized;
   }
 
   function inlineSegmentText(children) {
@@ -222,31 +232,7 @@
       systemPrompt,
       userContent: userPrompt,
       geminiParts: [{ text: userPrompt }],
-      parseResponse: (content) => {
-        const translations = parseTranslations(content, texts.length)
-          .map((translation) => translation.replace(/\r\n?/g, "\n"));
-        const invalidIndices = [];
-        translations.forEach((translation, index) => {
-          const sourceBreaks = String(texts[index]).match(/\n+/g) || [];
-          const translatedBreaks = translation.match(/\n+/g) || [];
-          if (sourceBreaks.join("|") !== translatedBreaks.join("|")) {
-            invalidIndices.push(index);
-          }
-        });
-        if (invalidIndices.length) {
-          const error = responseFormatError(
-            `Translation ${invalidIndices[0] + 1} did not preserve paragraph and line breaks.`,
-            content,
-          );
-          if (invalidIndices.length < translations.length) {
-            error.partialTranslations = translations.map((value, index) =>
-              invalidIndices.includes(index) ? null : value,
-            );
-          }
-          throw error;
-        }
-        return translations;
-      },
+      parseResponse: (content) => parseTranslations(content, texts.length),
       schema: {
         type: "object",
         properties: {
